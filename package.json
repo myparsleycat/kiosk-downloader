@@ -1,5 +1,5 @@
 {
-  "name": "Kiosk Downloader",
+  "name": "kiosk-downloader",
   "version": "1.0.0",
   "description": "Unofficial Kiosk Downloader",
   "main": "./out/main/index.js",
