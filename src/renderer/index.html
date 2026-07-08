@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="UTF-8" />
+        <title>Kiosk Downloader</title>
+        <script>
+            (function () {
+                var dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+                var root = document.documentElement;
+                root.classList.add(dark ? "dark" : "light");
+                root.style.backgroundColor = dark ? "#1c1c1c" : "#ffffff";
+            })();
+        </script>
+    </head>
+
+    <body>
+        <div id="root"></div>
+        <script type="module" src="/src/main.tsx"></script>
+    </body>
+</html>

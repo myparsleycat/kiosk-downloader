@@ -1,0 +1,8 @@
+packages:
+  - '.'
+
+allowBuilds:
+  cbor-extract: true
+  electron: true
+  electron-winstaller: true
+  esbuild: true
