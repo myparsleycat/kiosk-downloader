@@ -1,5 +1,5 @@
 appId: com.kiodl.app
-productName: kiosk-downloader
+productName: Kiosk Downloader
 directories:
     buildResources: build
     output: dist
@@ -16,7 +16,7 @@ win:
     target:
         - nsis
         - portable
-    executableName: kiosk-downloader
+    executableName: Kiosk Downloader
 nsis:
     artifactName: ${name}-${version}-setup.${ext}
     shortcutName: ${productName}
