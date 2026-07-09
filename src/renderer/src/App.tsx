@@ -1,4 +1,5 @@
 import { cn } from "@renderer/lib/utils";
+import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -14,6 +15,7 @@ import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { useTitleBarOverlay } from "./hooks/use-title-bar-overlay";
 import { useDownloadTreeExpanded } from "./stores/download-tree-expanded";
+import { useNewDownloadDraft } from "./stores/new-download-draft";
 
 export function RootProvider({ children }: { children: React.ReactNode }) {
   return (
@@ -35,6 +37,29 @@ function MainComponent() {
   const [focusDownloadId, setFocusDownloadId] = React.useState<string | null>(null);
 
   useTitleBarOverlay();
+
+  React.useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const text = e.clipboardData?.getData("text") ?? "";
+      const resolved = tryDecodeShareUrlBase64(text) ?? text;
+      if (!tryParseShareUrl(resolved.trim())) return;
+
+      e.preventDefault();
+      useNewDownloadDraft.getState().setUrl(resolved.trim());
+      setTab("new");
+    };
+
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, []);
 
   React.useEffect(() => {
     let mounted = true;
