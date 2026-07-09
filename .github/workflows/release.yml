@@ -38,7 +38,7 @@ jobs:
             - name: Dry-run semantic-release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: pnpm release -- --dry-run
+              run: pnpm exec semantic-release --dry-run
 
             - name: Export next version
               id: version
@@ -142,7 +142,7 @@ jobs:
             - name: Publish release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: pnpm release
+              run: pnpm exec semantic-release
 
             - name: Upload release assets
               env:
