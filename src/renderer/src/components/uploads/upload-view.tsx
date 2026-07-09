@@ -196,63 +196,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
 
   return (
     <div className="flex h-full">
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex items-center justify-between border-b px-4 py-2.5">
-          <span className="cn-font-heading text-sm font-medium">업로드 파일</span>
-          <div className="flex items-center gap-1.5">
-            <Button size="xs" variant="outline" onClick={handleFilePicker} disabled={expanding}>
-              <FileUpIcon className="size-3" />
-              파일 선택
-            </Button>
-            <Button size="xs" variant="outline" onClick={handleFolderPicker} disabled={expanding}>
-              <FolderOpenIcon className="size-3" />
-              폴더 선택
-            </Button>
-            {files.length > 0 && (
-              <Button size="xs" variant="ghost" onClick={clearFiles} disabled={expanding}>
-                <XIcon className="size-3" />
-                전체 삭제
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {files.length === 0 ? (
-          <DropZone
-            dragOver={dragOver}
-            expanding={expanding}
-            onDrop={handleDrop}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onFilePicker={handleFilePicker}
-            onFolderPicker={handleFolderPicker}
-          />
-        ) : (
-          <>
-            <div className="flex items-center justify-between border-b px-4 py-1.5 text-xs text-muted-foreground">
-              <span>
-                선택 <span className="tabular-nums">{summary.count}</span> / {totalFiles} 파일
-              </span>
-              <span className="tabular-nums">{formatSize(summary.bytes)}</span>
-            </div>
-            <ScrollArea className="flex-1">
-              <div className="p-2">
-                <FileTree
-                  mode="selection"
-                  root={tree}
-                  selected={selected}
-                  onToggle={handleToggle}
-                />
-              </div>
-            </ScrollArea>
-          </>
-        )}
-      </div>
-
-      <div className="flex w-[340px] min-w-0 shrink-0 flex-col overflow-hidden border-l">
+      <div className="flex w-[340px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="border-b px-4 py-3">
           <h2 className="cn-font-heading text-sm font-medium">컬렉션 정보</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
@@ -373,6 +317,62 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
             업로드 & 링크 생성
           </Button>
         </div>
+      </div>
+
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex items-center justify-between border-b px-4 py-2.5">
+          <span className="cn-font-heading text-sm font-medium">업로드 파일</span>
+          <div className="flex items-center gap-1.5">
+            <Button size="xs" variant="outline" onClick={handleFilePicker} disabled={expanding}>
+              <FileUpIcon className="size-3" />
+              파일 선택
+            </Button>
+            <Button size="xs" variant="outline" onClick={handleFolderPicker} disabled={expanding}>
+              <FolderOpenIcon className="size-3" />
+              폴더 선택
+            </Button>
+            {files.length > 0 && (
+              <Button size="xs" variant="ghost" onClick={clearFiles} disabled={expanding}>
+                <XIcon className="size-3" />
+                전체 삭제
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {files.length === 0 ? (
+          <DropZone
+            dragOver={dragOver}
+            expanding={expanding}
+            onDrop={handleDrop}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onFilePicker={handleFilePicker}
+            onFolderPicker={handleFolderPicker}
+          />
+        ) : (
+          <>
+            <div className="flex items-center justify-between border-b px-4 py-1.5 text-xs text-muted-foreground">
+              <span>
+                선택 <span className="tabular-nums">{summary.count}</span> / {totalFiles} 파일
+              </span>
+              <span className="tabular-nums">{formatSize(summary.bytes)}</span>
+            </div>
+            <ScrollArea className="flex-1">
+              <div className="p-2">
+                <FileTree
+                  mode="selection"
+                  root={tree}
+                  selected={selected}
+                  onToggle={handleToggle}
+                />
+              </div>
+            </ScrollArea>
+          </>
+        )}
       </div>
     </div>
   );
