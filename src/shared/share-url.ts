@@ -1,3 +1,5 @@
+import validator from "validator";
+
 export const SHARE_HOST = "kio.ac";
 export const SHARE_PATH_PREFIX = "/c/";
 export const SHARE_ID_LENGTH = 22;
@@ -71,4 +73,37 @@ export function tryParseShareUrl(url: string) {
     }
 
     return shareId;
+}
+
+export function tryDecodeShareUrlBase64(input: string) {
+    let current = input.trim();
+    if (!current) {
+        return null;
+    }
+
+    for (let i = 0; i < 5; i++) {
+        if (!validator.isBase64(current)) {
+            return null;
+        }
+
+        let decoded: string;
+        try {
+            decoded = new TextDecoder().decode(
+                Uint8Array.from(atob(current), (c) => c.charCodeAt(0)),
+            );
+        } catch {
+            return null;
+        }
+
+        const next = decoded.trim();
+        if (!next || next === current) {
+            return null;
+        }
+        if (tryParseShareUrl(next)) {
+            return next;
+        }
+        current = next;
+    }
+
+    return null;
 }

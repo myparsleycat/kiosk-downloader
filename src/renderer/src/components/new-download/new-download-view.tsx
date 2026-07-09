@@ -28,7 +28,7 @@ import {
   isCollectionInvalidPasswordError,
   isCollectionPasswordRequiredError,
 } from "@shared/download-errors";
-import { tryParseShareUrl } from "@shared/share-url";
+import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
 import { formatSize } from "@shared/utils";
 import {
   ArrowDownIcon,
@@ -284,7 +284,10 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                     id="url-input"
                     placeholder="https://kio.ac/c/..."
                     value={url}
-                    onChange={(e) => setUrl(e.target.value)}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setUrl(tryDecodeShareUrlBase64(value) ?? value);
+                    }}
                   />
                   <InputGroupAddon align="inline-end">
                     {loading && <Loader2Icon className="size-4 animate-spin" />}
