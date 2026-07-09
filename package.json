@@ -1,6 +1,7 @@
 {
   "name": "kiosk-downloader",
   "version": "1.0.0",
+  "private": true,
   "description": "Unofficial Kiosk Downloader",
   "main": "./out/main/index.js",
   "scripts": {
@@ -15,6 +16,7 @@
     "lint": "oxlint --type-aware --type-check",
     "lint:fix": "oxlint --fix",
     "postinstall": "install-electron && electron-builder install-app-deps",
+    "release": "semantic-release",
     "start": "electron-vite preview",
     "typecheck": "oxlint --type-aware --type-check"
   },
@@ -43,6 +45,9 @@
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",
     "@rolldown/plugin-babel": "^0.2.3",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^10.0.1",
     "@tailwindcss/vite": "^4.3.2",
     "@tanstack/react-query": "^5.101.2",
     "@types/auto-launch": "^5.0.5",
@@ -68,6 +73,7 @@
     "prettier": "^3.9.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "semantic-release": "^25.0.5",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.2",

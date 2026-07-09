@@ -7,3 +7,5 @@ thumbs.db
 *.log*
 *.db*
 .pnpm-store
+# semantic-release
+.next-version
