@@ -1,6 +1,7 @@
 import { cn } from "@renderer/lib/utils";
 import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
 import type { UploadItem } from "@shared/types";
+import { DownloadIcon, PlusIcon, SettingsIcon, UploadIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -11,9 +12,9 @@ import { NewDownloadView } from "./components/new-download/new-download-view";
 import { SettingsView } from "./components/settings/settings-view";
 import { ThemeBridge } from "./components/theme-bridge";
 import { ThemeProvider } from "./components/theme-provider";
+import { Button } from "./components/ui/button";
 import { Toaster } from "./components/ui/sonner";
-import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
-import { TooltipProvider } from "./components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip";
 import { UploadList } from "./components/uploads/upload-list";
 import { UploadView } from "./components/uploads/upload-view";
 import { useTitleBarOverlay } from "./hooks/use-title-bar-overlay";
@@ -140,21 +141,99 @@ function MainComponent() {
 
   return (
     <main className="flex h-screen flex-col">
-      {/* top tabs */}
-      <div className={cn("titlebar flex items-center py-2 pr-2", isDarwin ? "pl-21" : "pl-2")}>
-        <Tabs
-          value={tab}
-          onValueChange={(v) => setTab(v as TabValue)}
-          className="w-full flex-row gap-0 h-6"
+      {/* top navigation */}
+      <div
+        className={cn(
+          "titlebar flex items-center gap-2 py-2 pr-2 no-drag",
+          isDarwin ? "pl-21" : "pl-2",
+        )}
+      >
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setTab("downloads")}
+            className={cn(
+              "h-6 gap-1 px-2 text-xs",
+              tab === "downloads" || tab === "new"
+                ? "bg-muted text-foreground"
+                : "text-foreground/60",
+            )}
+          >
+            <DownloadIcon className="size-3.5" />
+            다운로드
+          </Button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setTab("new")}
+                  className={cn(
+                    "h-6 w-6",
+                    tab === "new" ? "bg-muted text-foreground" : "text-foreground/60",
+                  )}
+                >
+                  <PlusIcon className="size-3.5" />
+                </Button>
+              }
+            />
+            <TooltipContent>새 다운로드</TooltipContent>
+          </Tooltip>
+        </div>
+
+        <div className="h-4 w-px bg-border" />
+
+        <div className="flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setTab("uploads")}
+            className={cn(
+              "h-6 gap-1 px-2 text-xs",
+              tab === "uploads" || tab === "new-upload"
+                ? "bg-muted text-foreground"
+                : "text-foreground/60",
+            )}
+          >
+            <UploadIcon className="size-3.5" />
+            업로드
+          </Button>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setTab("new-upload")}
+                  className={cn(
+                    "h-6 w-6",
+                    tab === "new-upload" ? "bg-muted text-foreground" : "text-foreground/60",
+                  )}
+                >
+                  <PlusIcon className="size-3.5" />
+                </Button>
+              }
+            />
+            <TooltipContent>새 업로드</TooltipContent>
+          </Tooltip>
+        </div>
+
+        <div className="h-4 w-px bg-border" />
+
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setTab("settings")}
+          className={cn(
+            "h-6 gap-1 px-2 text-xs",
+            tab === "settings" ? "bg-muted text-foreground" : "text-foreground/60",
+          )}
         >
-          <TabsList className="h-6 no-drag p-0 bg-transparent">
-            <TabsTrigger value="downloads">다운로드</TabsTrigger>
-            <TabsTrigger value="new">새 다운로드</TabsTrigger>
-            <TabsTrigger value="uploads">업로드</TabsTrigger>
-            <TabsTrigger value="new-upload">새 업로드</TabsTrigger>
-            <TabsTrigger value="settings">설정</TabsTrigger>
-          </TabsList>
-        </Tabs>
+          <SettingsIcon className="size-3.5" />
+          설정
+        </Button>
       </div>
       <div className="shrink-0 border-b" />
 
