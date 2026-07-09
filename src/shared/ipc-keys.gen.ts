@@ -15,6 +15,14 @@ export const IPC_HANDLER_CHANNELS = [
     "download:resumeFile",
     "setting:getMany",
     "setting:set",
+    "upload:copyLink",
+    "upload:create",
+    "upload:expandPaths",
+    "upload:list",
+    "upload:pause",
+    "upload:remove",
+    "upload:resume",
+    "upload:solveTurnstile",
     "util:copyStr",
     "util:fs:metadata",
     "util:fs:mkdir",
@@ -39,6 +47,8 @@ export const IPC_EVENT_CHANNELS = [
     "fn:toast",
     "renderer:reload",
     "setting:update",
+    "upload:item-update",
+    "upload:update",
     "window:blur",
     "window:focus"
 ] as const;

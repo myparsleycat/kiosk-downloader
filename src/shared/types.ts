@@ -105,6 +105,60 @@ export interface DownloadItem {
 
 export type DownloadFilter = "all" | "active" | "completed";
 
+export type UploadStatus = "queued" | "uploading" | "paused" | "completed" | "error" | "expired";
+
+export type FileUploadStatus = "pending" | "uploading" | "paused" | "completed" | "error";
+
+export type UploadChunkStatus = "pending" | "uploading" | "completed" | "error";
+
+export interface UploadTreeFile {
+    path: string;
+    name: string;
+    size: number;
+    fsPath: string;
+}
+
+export interface UploadOptions {
+    name: string;
+    description: string;
+    password: string;
+    expires: number;
+    eternal: boolean;
+}
+
+export interface UploadFileProgress {
+    fileId: string;
+    path: string;
+    status: FileUploadStatus;
+    uploaded: number;
+    size: number;
+    speedBps?: number;
+    error?: string;
+}
+
+export interface UploadItem {
+    id: string;
+    name: string;
+    description: string;
+    passwordProtected: boolean;
+    expires: number;
+    eternal: boolean;
+    shareLink: string | null;
+    progress: Record<string, UploadFileProgress>;
+    status: UploadStatus;
+    speedBps?: number;
+    elapsedMs?: number;
+    createdAt: number;
+    updatedAt: number;
+    error?: string;
+}
+
+export interface CreateUploadPayload {
+    tree: UploadTreeFile[];
+    options: UploadOptions;
+    turnstileToken: string;
+}
+
 export interface LoadCollectionPayload {
     url: string;
     password?: string;
@@ -141,5 +195,7 @@ export type IpcEvents = {
     "renderer:reload": () => void;
     "download:update": (items: DownloadItem[]) => void;
     "download:item-update": (item: DownloadItem) => void;
+    "upload:update": (items: UploadItem[]) => void;
+    "upload:item-update": (item: UploadItem) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;
 };

@@ -60,6 +60,38 @@ export function shareIdToUuidBytes(shareId: string) {
     return bytes;
 }
 
+export function uuidBytesToShareId(bytes: Uint8Array): string {
+    if (bytes.length !== 16) {
+        throw new Error(`Invalid UUID byte length ${bytes.length} (expected 16).`);
+    }
+
+    const out: string[] = new Array(SHARE_ID_LENGTH);
+    let bitPos = 0;
+    let byteIdx = 0;
+
+    for (let n = SHARE_ID_LENGTH - 1; n >= 0; n -= 1) {
+        let value = 0;
+        for (let s = 0; s < 6; s += 1) {
+            if (byteIdx < 16) {
+                const bit = (bytes[byteIdx] >> bitPos) & 1;
+                value |= bit << s;
+                bitPos += 1;
+                if (bitPos === 8) {
+                    bitPos = 0;
+                    byteIdx += 1;
+                }
+            }
+        }
+        out[n] = UUID_ALPHABET[value];
+    }
+
+    return out.join("");
+}
+
+export function buildShareUrl(shareId: string): string {
+    return `https://${SHARE_HOST}${SHARE_PATH_PREFIX}${shareId}`;
+}
+
 export function tryParseShareUrl(url: string) {
     const shareId = tryExtractShareId(url);
     if (!shareId) {

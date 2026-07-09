@@ -7,7 +7,8 @@ export class TransferService {
 
     public async refreshPowerSaveBlock() {
         const shouldBlock =
-            this.kd.service.download.hasActiveTransfers() &&
+            (this.kd.service.download.hasActiveTransfers() ||
+                this.kd.service.upload.hasActiveTransfers()) &&
             (await this.kd.setting.general.getPowerSaveBlockInTransfer());
 
         if (shouldBlock && !this.isPowerSaveBlockerActive) {

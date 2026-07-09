@@ -5,6 +5,7 @@ import type { KioskDownloader } from "../index";
 
 import { registerDownloadHandlers } from "./handlers/download";
 import { registerSettingHandlers } from "./handlers/setting";
+import { registerUploadHandlers } from "./handlers/upload";
 import { registerUtilHandlers } from "./handlers/util";
 import { registerWindowHandlers } from "./handlers/window";
 
@@ -18,6 +19,7 @@ export class IPC {
 
     private setupHandlers() {
         registerDownloadHandlers(this.kd);
+        registerUploadHandlers(this.kd);
         registerSettingHandlers(this.kd);
         registerUtilHandlers();
         registerWindowHandlers(this.kd);
