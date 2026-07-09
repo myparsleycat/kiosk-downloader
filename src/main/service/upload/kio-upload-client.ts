@@ -19,6 +19,7 @@ const API_BASE_URL = "https://api.kio.ac";
 
 const EDGE_PUT_MAX_ATTEMPTS = 5;
 const EDGE_PUT_RETRY_BACKOFF_MAX_MS = 5000;
+const UPLOAD_STREAM_CHUNK_SIZE = 64 * 1024;
 
 type CborResponse = {
     status: number;
@@ -51,6 +52,22 @@ function asRecord(value: unknown) {
         return null;
     }
     return value as Record<string, unknown>;
+}
+
+function createUploadStream(bytes: Buffer) {
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({
+        pull(controller) {
+            if (offset >= bytes.length) {
+                controller.close();
+                return;
+            }
+
+            const nextOffset = Math.min(offset + UPLOAD_STREAM_CHUNK_SIZE, bytes.length);
+            controller.enqueue(bytes.subarray(offset, nextOffset));
+            offset = nextOffset;
+        },
+    });
 }
 
 function randomUuidBytes(): Buffer {
@@ -257,6 +274,7 @@ export class KioUploadClient {
         item: ServerFileMapping,
         uploadToken: string,
         signal: AbortSignal,
+        onProgress?: (transferredBytes: number) => void,
     ): Promise<number> {
         const bytes =
             item.length > 0
@@ -311,11 +329,17 @@ export class KioUploadClient {
             );
         }
 
-        await this.edgePut(url, edgeToken, bytes, signal);
+        await this.edgePut(url, edgeToken, bytes, signal, onProgress);
         return item.length;
     }
 
-    private async edgePut(baseUrl: string, token: string, bytes: Buffer, signal: AbortSignal) {
+    private async edgePut(
+        baseUrl: string,
+        token: string,
+        bytes: Buffer,
+        signal: AbortSignal,
+        onProgress?: (transferredBytes: number) => void,
+    ) {
         const putUrl = `${baseUrl.replace(/\/$/, "")}/edge/v4/upload`;
 
         for (let attempt = 1; attempt <= EDGE_PUT_MAX_ATTEMPTS; attempt += 1) {
@@ -323,12 +347,19 @@ export class KioUploadClient {
                 throw new DOMException("The operation was aborted.", "AbortError");
             }
 
+            onProgress?.(0);
             const response = await this.kd.http.request(putUrl, {
                 method: "PUT",
-                body: bytes as BodyInit,
-                headers: { "Kiosk-ESUT": token },
+                body: createUploadStream(bytes),
+                headers: {
+                    "Content-Length": bytes.byteLength.toString(),
+                    "Kiosk-ESUT": token,
+                },
                 signal,
                 retry: { limit: 0 },
+                onUploadProgress: (progress) => {
+                    onProgress?.(progress.transferredBytes);
+                },
             });
 
             if (response.ok) {

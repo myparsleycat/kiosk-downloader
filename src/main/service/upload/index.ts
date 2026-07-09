@@ -231,16 +231,21 @@ export class UploadService {
         for (const [path, fileProgress] of Object.entries(item.progress)) {
             const snapshot =
                 options.sampleSpeeds && fileProgress.status === "uploading"
-                    ? this.metrics.sampleFile(fileProgress.fileId)
-                    : this.metrics.getFileSnapshot(fileProgress.fileId);
+                    ? this.metrics.sampleFile(fileProgress.fileId, fileProgress.uploaded)
+                    : this.metrics.getFileSnapshot(fileProgress.fileId, fileProgress.uploaded);
 
             const speedBps =
                 fileProgress.status === "uploading" && snapshot.speedBps > 0
                     ? snapshot.speedBps
                     : undefined;
+            const uploaded = Math.min(
+                fileProgress.size,
+                Math.max(fileProgress.uploaded, snapshot.uploaded),
+            );
 
             progress[path] = {
                 ...fileProgress,
+                uploaded,
                 speedBps,
             };
         }

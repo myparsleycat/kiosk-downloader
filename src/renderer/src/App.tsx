@@ -107,22 +107,14 @@ function MainComponent() {
 
   React.useEffect(() => {
     let mounted = true;
-
-    window.api
-      .invoke("upload:list")
-      .then((items) => {
-        if (mounted) setUploads(items);
-      })
-      .catch((error) => {
-        toast.error("업로드 목록을 불러오지 못했습니다", {
-          description: error instanceof Error ? error.message : String(error),
-        });
-      });
+    let receivedUploadUpdate = false;
 
     const offUpdate = window.api.on("upload:update", (items) => {
+      receivedUploadUpdate = true;
       setUploads(items);
     });
     const offItem = window.api.on("upload:item-update", (item) => {
+      receivedUploadUpdate = true;
       setUploads((prev) => {
         const index = prev.findIndex((entry) => entry.id === item.id);
         if (index === -1) return [item, ...prev];
@@ -131,6 +123,17 @@ function MainComponent() {
         return next;
       });
     });
+
+    window.api
+      .invoke("upload:list")
+      .then((items) => {
+        if (mounted && !receivedUploadUpdate) setUploads(items);
+      })
+      .catch((error) => {
+        toast.error("업로드 목록을 불러오지 못했습니다", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
 
     return () => {
       mounted = false;

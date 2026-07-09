@@ -346,9 +346,7 @@ function UploadDetail({
                 variant="outline"
                 size="sm"
                 isLoading={pendingAction === "copy"}
-                onClick={() =>
-                  runAction("copy", async () => onCopyLink(item), "링크를 복사했습니다")
-                }
+                onClick={() => runAction("copy", async () => onCopyLink(item))}
               >
                 <CopyIcon className="size-3.5" />
                 링크 복사
@@ -431,6 +429,7 @@ function UploadFileList({ progress }: { progress: UploadItem["progress"] }) {
     <div className="flex flex-col gap-0.5">
       {entries.map((file) => {
         const pct = file.size > 0 ? Math.min(100, (file.uploaded / file.size) * 100) : 100;
+        const speedLabel = file.status === "uploading" ? formatSpeed(file.speedBps) : null;
         return (
           <div
             key={file.fileId}
@@ -441,6 +440,14 @@ function UploadFileList({ progress }: { progress: UploadItem["progress"] }) {
             </span>
             <span className="shrink-0 tabular-nums text-muted-foreground">
               {formatSize(file.uploaded)} / {formatSize(file.size)}
+            </span>
+            <span
+              className={cn(
+                "w-[5.5rem] shrink-0 whitespace-nowrap text-right tabular-nums",
+                speedLabel ? "text-primary" : "invisible",
+              )}
+            >
+              {speedLabel ?? "0 B/s"}
             </span>
             <span
               className={cn(

@@ -1,11 +1,15 @@
-const SPEED_WINDOW_MS = 2000;
+import { performance } from "node:perf_hooks";
+
+const SPEED_WINDOW_MS = 3000;
 const MIN_SPEED_SAMPLE_SPAN_MS = 500;
 type ByteSample = { t: number; b: number };
 
 export class UploadTransferMetrics {
-    private readonly transferredByChunk = new Map<string, number>();
-    private readonly transferredByFile = new Map<string, number>();
-    private readonly transferredByCollection = new Map<string, number>();
+    private readonly activeTransferredByChunk = new Map<string, number>();
+    private readonly activeTransferredByFile = new Map<string, number>();
+    private readonly activeTransferredByCollection = new Map<string, number>();
+    private readonly observedTransferredByFile = new Map<string, number>();
+    private readonly observedTransferredByCollection = new Map<string, number>();
     private readonly collectionByFile = new Map<string, string>();
     private readonly samplesByFile = new Map<string, ByteSample[]>();
     private readonly samplesByCollection = new Map<string, ByteSample[]>();
@@ -14,61 +18,73 @@ export class UploadTransferMetrics {
 
     public registerFile(collectionId: string, fileId: string) {
         this.collectionByFile.set(fileId, collectionId);
-        if (!this.transferredByFile.has(fileId)) {
-            this.transferredByFile.set(fileId, 0);
+        if (!this.activeTransferredByFile.has(fileId)) {
+            this.activeTransferredByFile.set(fileId, 0);
         }
-        if (!this.transferredByCollection.has(collectionId)) {
-            this.transferredByCollection.set(collectionId, 0);
+        if (!this.activeTransferredByCollection.has(collectionId)) {
+            this.activeTransferredByCollection.set(collectionId, 0);
         }
     }
 
-    public addChunkBytes(fileId: string, chunkIndex: number, bytes: number) {
+    public setChunkTransferProgress(fileId: string, chunkIndex: number, bytes: number) {
         const key = this.chunkKey(fileId, chunkIndex);
-        const previous = this.transferredByChunk.get(key) ?? 0;
+        const previous = this.activeTransferredByChunk.get(key) ?? 0;
         const normalized = Math.max(0, bytes);
         const delta = normalized - previous;
         if (delta === 0) {
             return;
         }
 
-        this.transferredByChunk.set(key, normalized);
-        this.addTransferredBytes(fileId, delta);
+        if (normalized > 0) {
+            this.activeTransferredByChunk.set(key, normalized);
+        } else {
+            this.activeTransferredByChunk.delete(key);
+        }
+        this.addActiveTransferredBytes(fileId, delta);
+        if (delta > 0) {
+            this.addObservedTransferredBytes(fileId, delta);
+        }
+    }
+
+    public completeChunk(fileId: string, chunkIndex: number) {
+        this.clearChunk(fileId, chunkIndex);
     }
 
     public clearChunk(fileId: string, chunkIndex: number) {
         const key = this.chunkKey(fileId, chunkIndex);
-        const previous = this.transferredByChunk.get(key) ?? 0;
+        const previous = this.activeTransferredByChunk.get(key) ?? 0;
         if (previous > 0) {
-            this.transferredByChunk.delete(key);
-            this.addTransferredBytes(fileId, -previous);
+            this.activeTransferredByChunk.delete(key);
+            this.addActiveTransferredBytes(fileId, -previous);
         }
     }
 
     public clearFile(fileId: string) {
-        for (const key of this.transferredByChunk.keys()) {
+        for (const key of this.activeTransferredByChunk.keys()) {
             if (key.startsWith(`${fileId}:`)) {
-                this.transferredByChunk.delete(key);
+                this.activeTransferredByChunk.delete(key);
             }
         }
         this.samplesByFile.delete(fileId);
         this.speedByFile.delete(fileId);
-        this.transferredByFile.delete(fileId);
+        this.activeTransferredByFile.delete(fileId);
+        this.observedTransferredByFile.delete(fileId);
         this.collectionByFile.delete(fileId);
     }
 
-    public getFileSnapshot(fileId: string) {
+    public getFileSnapshot(fileId: string, persistedUploaded: number) {
         return {
-            uploaded: this.transferredByFile.get(fileId) ?? 0,
+            uploaded: persistedUploaded + (this.activeTransferredByFile.get(fileId) ?? 0),
             speedBps: this.speedByFile.get(fileId) ?? 0,
         };
     }
 
-    public sampleFile(fileId: string) {
+    public sampleFile(fileId: string, persistedUploaded: number) {
         return {
-            uploaded: this.transferredByFile.get(fileId) ?? 0,
+            uploaded: persistedUploaded + (this.activeTransferredByFile.get(fileId) ?? 0),
             speedBps: this.recordSpeedSample(
                 fileId,
-                this.transferredByFile.get(fileId) ?? 0,
+                this.observedTransferredByFile.get(fileId) ?? 0,
                 this.samplesByFile,
                 this.speedByFile,
             ),
@@ -84,28 +100,35 @@ export class UploadTransferMetrics {
     public sampleCollection(collectionId: string) {
         return this.recordSpeedSample(
             collectionId,
-            this.transferredByCollection.get(collectionId) ?? 0,
+            this.observedTransferredByCollection.get(collectionId) ?? 0,
             this.samplesByCollection,
             this.speedByCollection,
         );
     }
 
     public clearCollection(collectionId: string) {
+        const fileIds = [...this.collectionByFile]
+            .filter(([, fileCollectionId]) => fileCollectionId === collectionId)
+            .map(([fileId]) => fileId);
+        for (const fileId of fileIds) {
+            this.clearFile(fileId);
+        }
         this.samplesByCollection.delete(collectionId);
         this.speedByCollection.delete(collectionId);
-        this.transferredByCollection.delete(collectionId);
+        this.activeTransferredByCollection.delete(collectionId);
+        this.observedTransferredByCollection.delete(collectionId);
     }
 
     private chunkKey(fileId: string, chunkIndex: number) {
         return `${fileId}:${chunkIndex}`;
     }
 
-    private addTransferredBytes(fileId: string, bytes: number) {
-        const fileBytes = (this.transferredByFile.get(fileId) ?? 0) + bytes;
+    private addActiveTransferredBytes(fileId: string, bytes: number) {
+        const fileBytes = (this.activeTransferredByFile.get(fileId) ?? 0) + bytes;
         if (fileBytes > 0) {
-            this.transferredByFile.set(fileId, fileBytes);
+            this.activeTransferredByFile.set(fileId, fileBytes);
         } else {
-            this.transferredByFile.set(fileId, 0);
+            this.activeTransferredByFile.delete(fileId);
         }
 
         const collectionId = this.collectionByFile.get(fileId);
@@ -113,13 +136,30 @@ export class UploadTransferMetrics {
             return;
         }
 
-        const collectionBytes = (this.transferredByCollection.get(collectionId) ?? 0) + bytes;
+        const collectionBytes = (this.activeTransferredByCollection.get(collectionId) ?? 0) + bytes;
         if (collectionBytes > 0) {
-            this.transferredByCollection.set(collectionId, collectionBytes);
+            this.activeTransferredByCollection.set(collectionId, collectionBytes);
             return;
         }
 
-        this.transferredByCollection.set(collectionId, 0);
+        this.activeTransferredByCollection.delete(collectionId);
+    }
+
+    private addObservedTransferredBytes(fileId: string, bytes: number) {
+        this.observedTransferredByFile.set(
+            fileId,
+            (this.observedTransferredByFile.get(fileId) ?? 0) + bytes,
+        );
+
+        const collectionId = this.collectionByFile.get(fileId);
+        if (!collectionId) {
+            return;
+        }
+
+        this.observedTransferredByCollection.set(
+            collectionId,
+            (this.observedTransferredByCollection.get(collectionId) ?? 0) + bytes,
+        );
     }
 
     private recordSpeedSample(
@@ -128,7 +168,7 @@ export class UploadTransferMetrics {
         samplesByKey: Map<string, ByteSample[]>,
         speedByKey: Map<string, number>,
     ) {
-        const now = Date.now();
+        const now = performance.now();
         const samples = samplesByKey.get(key) ?? [];
         samples.push({ t: now, b: totalBytes });
         const window = samples.filter((sample) => now - sample.t <= SPEED_WINDOW_MS);

@@ -84,6 +84,7 @@ export class UploadScheduler {
     private readonly waiters: Array<() => void> = [];
     private readonly activeCollections = new Set<string>();
     private readonly collectionTimerStartedAt = new Map<string, number>();
+    private readonly progressUpdatesInFlight = new Set<string>();
     private targetWorkers = 0;
     private runningWorkers = 0;
     private progressPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -295,6 +296,22 @@ export class UploadScheduler {
                 return;
             }
 
+            let statusChanged = false;
+            const file = this.repository.getFile(chunk.fileId);
+            if (file?.status === "pending") {
+                this.repository.markFileStatus(chunk.fileId, "uploading");
+                statusChanged = true;
+            }
+
+            const collection = this.repository.getCollection(chunk.collectionId);
+            if (collection?.status === "queued") {
+                this.repository.markCollectionStatus(chunk.collectionId, "uploading");
+                statusChanged = true;
+            }
+            if (statusChanged) {
+                await this.emitUpdate(chunk.collectionId);
+            }
+
             this.repository.markChunkUploading(chunkRow);
 
             try {
@@ -309,11 +326,20 @@ export class UploadScheduler {
                     },
                     chunk.uploadToken,
                     signal,
+                    (transferredBytes) => {
+                        if (!signal.aborted) {
+                            this.metrics.setChunkTransferProgress(
+                                chunk.fileId,
+                                chunk.chunkIndex,
+                                transferredBytes,
+                            );
+                        }
+                    },
                 );
 
                 this.repository.markChunkCompleted(chunkRow, bytes);
                 this.repository.addFileUploadedBytes(chunk.fileId, bytes);
-                this.metrics.addChunkBytes(chunk.fileId, chunk.chunkIndex, bytes);
+                this.metrics.completeChunk(chunk.fileId, chunk.chunkIndex);
                 state.remaining -= 1;
                 this.releaseChunk(chunk.collectionId);
                 await this.afterChunkSettled(chunk.collectionId);
@@ -392,7 +418,6 @@ export class UploadScheduler {
     private async afterChunkSettled(collectionId: string) {
         const state = this.states.get(collectionId);
         if (!state || state.inFlight > 0) {
-            await this.emitProgressUpdate(collectionId);
             return;
         }
 
@@ -539,12 +564,25 @@ export class UploadScheduler {
                 return;
             }
             for (const collectionId of this.activeCollections) {
-                void this.emitProgressUpdate(collectionId).catch((error) => {
+                void this.emitProgressUpdateOnce(collectionId).catch((error) => {
                     this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");
                 });
             }
         } catch (error) {
             this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");
+        }
+    }
+
+    private async emitProgressUpdateOnce(collectionId: string) {
+        if (this.progressUpdatesInFlight.has(collectionId)) {
+            return;
+        }
+
+        this.progressUpdatesInFlight.add(collectionId);
+        try {
+            await this.emitProgressUpdate(collectionId);
+        } finally {
+            this.progressUpdatesInFlight.delete(collectionId);
         }
     }
 
