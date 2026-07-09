@@ -1,21 +1,31 @@
+import path from "node:path";
+import type { Readable } from "node:stream";
+
 import type {
     CreateUploadPayload,
     DirNode,
+    ExpandPathsResult,
     FileNode,
     UploadFileProgress,
     UploadItem,
+    UploadTreeFile,
 } from "@shared/types";
-import { toErrorMessage } from "@shared/utils";
+import { MAX_UPLOAD_FILES } from "@shared/types";
+import { normalizePath, toErrorMessage } from "@shared/utils";
 import { clipboard } from "electron";
+import fg from "fast-glob";
+import type { Entry } from "fast-glob";
+import fse from "fs-extra";
 
 import type { KioskDownloader } from "../..";
-import type { ServerFileMapping } from "./types";
+import type { ServerFileMapping, UploadSourceFile } from "./types";
 
 import { KioUploadClient } from "./kio-upload-client";
 import { UploadTransferMetrics } from "./metrics";
 import { UploadRepository } from "./repository";
 import { UploadScheduler } from "./scheduler";
 import { TurnstileSolver } from "./turnstile";
+import { UPLOAD_SEGMENT_SIZE } from "./types";
 
 function buildDisplayTree(files: { path: string; name: string; size: number }[]): DirNode {
     const root: DirNode = {
@@ -63,12 +73,23 @@ function buildDisplayTree(files: { path: string; name: string; size: number }[])
     return root;
 }
 
+function toDisplayFile(file: UploadSourceFile): UploadTreeFile {
+    return {
+        path: file.path,
+        name: file.name,
+        size: file.size,
+        sourceMtimeMs: file.sourceMtimeMs,
+    };
+}
+
 export class UploadService {
     private readonly api: KioUploadClient;
     private readonly repository: UploadRepository;
     private readonly metrics = new UploadTransferMetrics();
     private readonly turnstile: TurnstileSolver;
     private readonly scheduler: UploadScheduler;
+    /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
+    private readonly draftSources = new Map<string, UploadSourceFile>();
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioUploadClient(kd);
@@ -105,12 +126,42 @@ export class UploadService {
         }
     }
 
+    public async expandPaths(
+        inputs: string[],
+        maxFiles: number = MAX_UPLOAD_FILES,
+    ): Promise<ExpandPathsResult> {
+        const limit = Math.max(0, Math.min(maxFiles, MAX_UPLOAD_FILES));
+        if (limit === 0) return { files: [], truncated: true };
+
+        const { sources, truncated } = await collectUploadSources(inputs, limit);
+        for (const source of sources) {
+            this.draftSources.set(source.path, source);
+        }
+        return { files: sources.map(toDisplayFile), truncated };
+    }
+
+    public clearDraftSources() {
+        this.draftSources.clear();
+    }
+
+    public removeDraftSources(paths: string[]) {
+        for (const treePath of paths) {
+            const prefix = `${treePath}/`;
+            for (const key of [...this.draftSources.keys()]) {
+                if (key === treePath || key.startsWith(prefix)) {
+                    this.draftSources.delete(key);
+                }
+            }
+        }
+    }
+
     public async create(payload: CreateUploadPayload): Promise<UploadItem | null> {
         try {
-            const tree = buildDisplayTree(payload.tree);
+            const files = await this.resolveCreateFiles(payload.tree);
+            const tree = buildDisplayTree(files);
 
             const created = await this.api.createCollection(
-                payload.tree,
+                files,
                 payload.options,
                 payload.turnstileToken,
             );
@@ -118,23 +169,25 @@ export class UploadService {
             const collectionId = this.repository.insertUpload({
                 created,
                 options: payload.options,
-                files: payload.tree.map((file) => ({
+                files: files.map((file) => ({
                     path: file.path,
                     name: file.name,
                     size: file.size,
                     fsPath: file.fsPath,
+                    sourceMtimeMs: file.sourceMtimeMs,
                 })),
+                segmentSize: UPLOAD_SEGMENT_SIZE,
                 tree,
             });
 
             this.backfillRemoteIds(collectionId, created.workItems);
+            this.clearDraftSources();
 
             const fileRows = this.repository.listFiles(collectionId);
             this.scheduler.registerWorkItems(
                 collectionId,
                 fileRows.map((file) => ({ id: file.id, remoteId: file.remoteId })),
                 created.workItems,
-                created.uploadToken,
             );
 
             await this.emitUpdate(collectionId);
@@ -162,7 +215,7 @@ export class UploadService {
     }
 
     public async pauseUpload(collectionId: string) {
-        this.scheduler.pauseCollection(collectionId);
+        await this.scheduler.pauseCollection(collectionId);
         this.repository.pauseCollection(collectionId);
         await this.emitUpdate(collectionId);
         await this.kd.service.transfer.refreshPowerSaveBlock();
@@ -170,12 +223,51 @@ export class UploadService {
 
     public async resumeUpload(collectionId: string, options: { force?: boolean } = {}) {
         this.repository.resumeCollection(collectionId, Boolean(options.force));
-        this.scheduler.resumeCollection(collectionId);
+        await this.scheduler.resumeCollection(collectionId);
         await this.emitUpdate(collectionId);
     }
 
+    public async pauseFile(collectionId: string, fileId: string) {
+        const file = this.repository.getFile(fileId);
+        if (!file || file.collectionId !== collectionId) {
+            return null;
+        }
+        await this.scheduler.pauseFile(fileId);
+        this.repository.pauseFile(fileId);
+        this.repository.recomputeCollectionStatus(collectionId);
+        await this.emitUpdate(collectionId);
+        await this.kd.service.transfer.refreshPowerSaveBlock();
+        const item = this.repository.getItem(collectionId);
+        return item ? this.enrichItem(item) : null;
+    }
+
+    public async resumeFile(
+        collectionId: string,
+        fileId: string,
+        _options: { force?: boolean } = {},
+    ) {
+        const file = this.repository.getFile(fileId);
+        if (!file || file.collectionId !== collectionId) {
+            return null;
+        }
+        const collection = this.repository.getCollection(collectionId);
+        if (collection?.status === "error") {
+            this.repository.resumeCollection(collectionId, true);
+            await this.scheduler.resumeCollection(collectionId);
+            await this.emitUpdate(collectionId);
+            const item = this.repository.getItem(collectionId);
+            return item ? this.enrichItem(item) : null;
+        }
+        this.repository.resumeFile(fileId);
+        this.repository.markCollectionStatus(collectionId, "queued");
+        await this.scheduler.resumeFile(fileId);
+        await this.emitUpdate(collectionId);
+        const item = this.repository.getItem(collectionId);
+        return item ? this.enrichItem(item) : null;
+    }
+
     public async remove(collectionId: string) {
-        this.scheduler.removeCollection(collectionId);
+        await this.scheduler.removeCollection(collectionId);
         this.repository.deleteCollection(collectionId);
         await this.emitUpdate();
         await this.kd.service.transfer.refreshPowerSaveBlock();
@@ -194,41 +286,85 @@ export class UploadService {
     }
 
     public async restoreStartupState() {
-        // Conservative: reset any 'uploading' rows to 'queued' but do NOT
-        // auto-resume. The upload token (UT) minted at collection/create may
-        // have expired server-side during downtime, so resuming blindly would
-        // fail mid-stream. The user explicitly retries, which surfaces a clear
-        // error if the UT is stale.
-        this.repository.restoreStartupState("manual");
+        const mode = await this.kd.setting.transfer.getStartupResumeMode();
+        this.repository.restoreStartupState(mode);
+        await this.scheduler.restoreFromRepository();
         await this.emitUpdate();
+        if (mode === "auto") {
+            await this.scheduler.schedule();
+        }
     }
 
     public destroy() {
         this.scheduler.destroy();
         this.turnstile.destroy();
+        this.clearDraftSources();
+    }
+
+    private async resolveCreateFiles(
+        files: CreateUploadPayload["tree"],
+    ): Promise<UploadSourceFile[]> {
+        const seenPaths = new Set<string>();
+        const resolved: UploadSourceFile[] = [];
+
+        for (const file of files) {
+            const normalizedPath = file.path.split("/").filter(Boolean).join("/");
+            if (!normalizedPath || seenPaths.has(normalizedPath)) {
+                throw new Error(`업로드 경로가 비어 있거나 중복됩니다: ${file.path}`);
+            }
+            seenPaths.add(normalizedPath);
+
+            const source = this.draftSources.get(normalizedPath);
+            if (!source) {
+                throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${normalizedPath}`);
+            }
+
+            const stat = await fse.stat(source.fsPath).catch(() => null);
+            if (
+                !stat?.isFile() ||
+                stat.size !== file.size ||
+                Math.trunc(stat.mtimeMs) !== file.sourceMtimeMs
+            ) {
+                throw new Error(
+                    `업로드 원본 파일이 변경되었거나 읽을 수 없습니다: ${source.fsPath}`,
+                );
+            }
+
+            resolved.push({
+                ...source,
+                path: normalizedPath,
+                size: file.size,
+                sourceMtimeMs: file.sourceMtimeMs,
+            });
+        }
+
+        return resolved;
     }
 
     private backfillRemoteIds(collectionId: string, workItems: ServerFileMapping[]) {
-        // workItems carry the server file id and fsPath; match DB file rows by fsPath.
         const files = this.repository.listFiles(collectionId);
-        const remoteByFsPath = new Map<string, string>();
+        const remoteByPath = new Map<string, string>();
         for (const item of workItems) {
-            if (!remoteByFsPath.has(item.fsPath)) {
-                remoteByFsPath.set(item.fsPath, item.fileId.toString("hex"));
+            const remoteId = item.fileId.toString("hex");
+            const existing = remoteByPath.get(item.relativePath);
+            if (existing && existing !== remoteId) {
+                throw new Error(`서버 파일 ID 매핑이 일관되지 않습니다: ${item.relativePath}`);
             }
+            remoteByPath.set(item.relativePath, remoteId);
         }
         for (const file of files) {
-            const remoteId = remoteByFsPath.get(file.fsPath);
-            if (remoteId) {
-                this.repository.setFileRemoteId(file.id, remoteId);
+            const remoteId = remoteByPath.get(file.path);
+            if (!remoteId) {
+                throw new Error(`서버 파일 ID 매핑이 없습니다: ${file.path}`);
             }
+            this.repository.setFileRemoteId(file.id, remoteId);
         }
     }
 
     private enrichItem(item: UploadItem, options: { sampleSpeeds?: boolean } = {}): UploadItem {
         const progress: Record<string, UploadFileProgress> = {};
 
-        for (const [path, fileProgress] of Object.entries(item.progress)) {
+        for (const [pathKey, fileProgress] of Object.entries(item.progress)) {
             const snapshot =
                 options.sampleSpeeds && fileProgress.status === "uploading"
                     ? this.metrics.sampleFile(fileProgress.fileId, fileProgress.uploaded)
@@ -243,7 +379,7 @@ export class UploadService {
                 Math.max(fileProgress.uploaded, snapshot.uploaded),
             );
 
-            progress[path] = {
+            progress[pathKey] = {
                 ...fileProgress,
                 uploaded,
                 speedBps,
@@ -284,4 +420,75 @@ export class UploadService {
             this.repository.listItems().map((item) => this.enrichItem(item, options)),
         );
     }
+}
+
+async function collectUploadSources(
+    inputs: string[],
+    maxFiles: number,
+): Promise<{ sources: UploadSourceFile[]; truncated: boolean }> {
+    const out: UploadSourceFile[] = [];
+    const seen = new Set<string>();
+    let truncated = false;
+
+    for (const input of inputs) {
+        if (out.length >= maxFiles) {
+            truncated = true;
+            break;
+        }
+
+        const stat = await fse.stat(input);
+        if (stat.isFile()) {
+            const treePath = path.basename(input);
+            assertUniqueTreePath(seen, treePath);
+            out.push({
+                path: treePath,
+                name: treePath,
+                size: stat.size,
+                fsPath: input,
+                sourceMtimeMs: Math.trunc(stat.mtimeMs),
+            });
+            continue;
+        }
+
+        const rootName = path.basename(input);
+        const stream = fg.stream("**/*", {
+            cwd: input,
+            onlyFiles: true,
+            dot: true,
+            absolute: true,
+            stats: true,
+            followSymbolicLinks: false,
+        }) as Readable;
+
+        try {
+            for await (const raw of stream) {
+                if (out.length >= maxFiles) {
+                    truncated = true;
+                    break;
+                }
+                const entry = raw as Entry;
+                const relative = path.relative(input, entry.path);
+                const treePath = normalizePath(`${rootName}/${relative}`);
+                assertUniqueTreePath(seen, treePath);
+                out.push({
+                    path: treePath,
+                    name: path.basename(entry.path),
+                    size: entry.stats?.size ?? 0,
+                    fsPath: entry.path,
+                    sourceMtimeMs: Math.trunc(entry.stats?.mtimeMs ?? 0),
+                });
+            }
+        } finally {
+            stream.destroy();
+        }
+    }
+
+    return { sources: out, truncated };
+}
+
+function assertUniqueTreePath(seen: Set<string>, treePath: string) {
+    if (seen.has(treePath)) {
+        throw new Error(`같은 업로드 경로에 두 파일을 추가할 수 없습니다: ${treePath}`);
+    }
+    seen.add(treePath);
 }

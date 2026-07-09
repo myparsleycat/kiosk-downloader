@@ -1,7 +1,14 @@
 import { cn } from "@renderer/lib/utils";
 import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
 import type { UploadItem } from "@shared/types";
-import { DownloadIcon, PlusIcon, SettingsIcon, UploadIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  LoaderCircleIcon,
+  PauseIcon,
+  PlusIcon,
+  SettingsIcon,
+  UploadIcon,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -41,6 +48,25 @@ function MainComponent() {
   const [uploads, setUploads] = React.useState<UploadItem[]>([]);
   const [focusDownloadId, setFocusDownloadId] = React.useState<string | null>(null);
   const [focusUploadId, setFocusUploadId] = React.useState<string | null>(null);
+
+  const downloadActivity = React.useMemo(
+    () =>
+      downloads.some((item) => item.status === "downloading")
+        ? "active"
+        : downloads.some((item) => item.status === "paused")
+          ? "paused"
+          : "idle",
+    [downloads],
+  );
+  const uploadActivity = React.useMemo(
+    () =>
+      uploads.some((item) => item.status === "uploading")
+        ? "active"
+        : uploads.some((item) => item.status === "paused")
+          ? "paused"
+          : "idle",
+    [uploads],
+  );
 
   useTitleBarOverlay();
 
@@ -144,7 +170,6 @@ function MainComponent() {
 
   return (
     <main className="flex h-screen flex-col">
-      {/* top navigation */}
       <div
         className={cn(
           "titlebar flex items-center gap-2 py-2 pr-2 no-drag",
@@ -163,7 +188,13 @@ function MainComponent() {
                 : "text-foreground/60",
             )}
           >
-            <DownloadIcon className="size-3.5" />
+            {downloadActivity === "active" ? (
+              <LoaderCircleIcon className="size-3.5 animate-spin" />
+            ) : downloadActivity === "paused" ? (
+              <PauseIcon className="size-3.5" />
+            ) : (
+              <DownloadIcon className="size-3.5" />
+            )}
             다운로드
           </Button>
           <Tooltip>
@@ -200,7 +231,13 @@ function MainComponent() {
                 : "text-foreground/60",
             )}
           >
-            <UploadIcon className="size-3.5" />
+            {uploadActivity === "active" ? (
+              <LoaderCircleIcon className="size-3.5 animate-spin" />
+            ) : uploadActivity === "paused" ? (
+              <PauseIcon className="size-3.5" />
+            ) : (
+              <UploadIcon className="size-3.5" />
+            )}
             업로드
           </Button>
           <Tooltip>
@@ -240,7 +277,6 @@ function MainComponent() {
       </div>
       <div className="shrink-0 border-b" />
 
-      {/* view section */}
       <div className="flex-1 overflow-hidden">
         {tab === "downloads" && (
           <DownloadView

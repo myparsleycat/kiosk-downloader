@@ -58,9 +58,10 @@ export class UploadRepository {
             tx.run(
                 `INSERT INTO "upload_collection"
                  ("id", "name", "description", "password_plain", "share_id", "share_link",
-                  "collection_uuid", "upload_token", "tree_json", "eternal", "expires", "status",
+                  "collection_uuid", "upload_token", "tree_json", "expires", "status",
+                  "segment_size",
                   "created_at", "updated_at", "elapsed_ms", "error")
-                 VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL)`,
+                 VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'queued', ?, ?, ?, 0, NULL)`,
                 [
                     collectionId,
                     record.options.name.slice(0, 100),
@@ -69,8 +70,8 @@ export class UploadRepository {
                     record.created.collectionUuid.toString("hex"),
                     record.created.uploadToken,
                     JSON.stringify(record.tree),
-                    record.options.eternal ? 1 : 0,
                     record.options.expires,
+                    record.segmentSize,
                     timestamp,
                     timestamp,
                 ],
@@ -79,9 +80,9 @@ export class UploadRepository {
             for (const file of fileRows) {
                 tx.run(
                     `INSERT INTO "upload_file"
-                     ("id", "collection_id", "remote_id", "path", "name", "size", "fs_path",
+                     ("id", "collection_id", "remote_id", "path", "name", "size", "fs_path", "source_mtime_ms",
                       "status", "uploaded_bytes", "paused_by_user", "created_at", "updated_at", "error")
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL)`,
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL)`,
                     [
                         file.id,
                         collectionId,
@@ -90,6 +91,7 @@ export class UploadRepository {
                         file.name,
                         file.size,
                         file.fsPath,
+                        file.sourceMtimeMs,
                         timestamp,
                         timestamp,
                     ],
@@ -277,19 +279,38 @@ export class UploadRepository {
         );
     }
 
-    public resetRunningChunksForFile(fileId: string) {
-        this.kd.lib.db.run(
-            `DELETE FROM "upload_chunk" WHERE "file_id" = ? AND "status" = 'uploading'`,
-            [fileId],
-        );
+    public resetIncompleteFileProgress(fileId: string) {
+        const timestamp = nowIso();
+        this.kd.lib.db.transaction((tx) => {
+            tx.run(`DELETE FROM "upload_chunk" WHERE "file_id" = ?`, [fileId]);
+            tx.run(
+                `UPDATE "upload_file"
+                 SET "uploaded_bytes" = 0, "updated_at" = ?
+                 WHERE "id" = ? AND "status" != 'completed'`,
+                [timestamp, fileId],
+            );
+        });
     }
 
-    public hasErroredChunk(fileId: string): boolean {
-        const row = this.kd.lib.db.get<{ count: number }>(
-            `SELECT COUNT(*) AS "count" FROM "upload_chunk" WHERE "file_id" = ? AND "status" = 'error'`,
-            [fileId],
-        );
-        return Number(row?.count ?? 0) > 0;
+    public resetIncompleteCollectionProgress(collectionId: string) {
+        const timestamp = nowIso();
+        this.kd.lib.db.transaction((tx) => {
+            tx.run(
+                `DELETE FROM "upload_chunk"
+                 WHERE "collection_id" = ?
+                   AND "file_id" IN (
+                       SELECT "id" FROM "upload_file"
+                       WHERE "collection_id" = ? AND "status" != 'completed'
+                   )`,
+                [collectionId, collectionId],
+            );
+            tx.run(
+                `UPDATE "upload_file"
+                 SET "uploaded_bytes" = 0, "updated_at" = ?
+                 WHERE "collection_id" = ? AND "status" != 'completed'`,
+                [timestamp, collectionId],
+            );
+        });
     }
 
     public pauseCollection(collectionId: string) {
@@ -336,12 +357,10 @@ export class UploadRepository {
                      WHERE "collection_id" = ? AND "status" = 'error'`,
                     [timestamp, collectionId],
                 );
-                tx.run(
-                    `DELETE FROM "upload_chunk" WHERE "collection_id" = ? AND "status" = 'error'`,
-                    [collectionId],
-                );
             }
         });
+        // Restart incomplete files from sequence 0; server skips already-stored segments.
+        this.resetIncompleteCollectionProgress(collectionId);
     }
 
     public pauseFile(fileId: string) {
@@ -359,39 +378,15 @@ export class UploadRepository {
         });
     }
 
-    public resumeFile(fileId: string, force: boolean) {
+    public resumeFile(fileId: string) {
         const timestamp = nowIso();
-        this.kd.lib.db.transaction((tx) => {
-            tx.run(
-                `UPDATE "upload_file"
-                 SET "status" = 'pending', "paused_by_user" = 0, "updated_at" = ?, "error" = NULL
-                 WHERE "id" = ? AND "status" IN ('paused', 'pending', 'error')`,
-                [timestamp, fileId],
-            );
-            if (force) {
-                tx.run(`DELETE FROM "upload_chunk" WHERE "file_id" = ? AND "status" = 'error'`, [
-                    fileId,
-                ]);
-            }
-        });
-    }
-
-    public syncFileUploadedBytes(fileId: string) {
-        const row = this.kd.lib.db.get<{ uploaded: number | null }>(
-            `SELECT SUM("uploaded_bytes") AS "uploaded"
-             FROM "upload_chunk"
-             WHERE "file_id" = ? AND "status" = 'completed'`,
-            [fileId],
-        );
-        const file = this.getFile(fileId);
-        if (!file) {
-            return;
-        }
-        const uploaded = Math.min(file.size, Math.max(0, Number(row?.uploaded ?? 0)));
         this.kd.lib.db.run(
-            `UPDATE "upload_file" SET "uploaded_bytes" = ?, "updated_at" = ? WHERE "id" = ?`,
-            [uploaded, nowIso(), fileId],
+            `UPDATE "upload_file"
+             SET "status" = 'pending', "paused_by_user" = 0, "updated_at" = ?, "error" = NULL
+             WHERE "id" = ? AND "status" IN ('paused', 'pending', 'error')`,
+            [timestamp, fileId],
         );
+        this.resetIncompleteFileProgress(fileId);
     }
 
     public addFileUploadedBytes(fileId: string, bytes: number) {
@@ -403,26 +398,22 @@ export class UploadRepository {
         );
     }
 
-    public completeFile(fileId: string) {
-        const file = this.getFile(fileId);
-        if (!file) {
-            return;
-        }
-        this.kd.lib.db.run(
-            `UPDATE "upload_file"
-             SET "status" = 'completed', "uploaded_bytes" = "size", "updated_at" = ?, "error" = NULL
-             WHERE "id" = ?`,
-            [nowIso(), fileId],
-        );
-    }
-
-    public completeCollection(collectionId: string, shareLink: string) {
-        this.kd.lib.db.run(
-            `UPDATE "upload_collection"
-             SET "status" = 'completed', "share_link" = ?, "updated_at" = ?, "error" = NULL
-             WHERE "id" = ?`,
-            [shareLink, nowIso(), collectionId],
-        );
+    public completeUpload(collectionId: string, shareLink: string) {
+        const timestamp = nowIso();
+        this.kd.lib.db.transaction((tx) => {
+            tx.run(
+                `UPDATE "upload_file"
+                 SET "status" = 'completed', "uploaded_bytes" = "size", "updated_at" = ?, "error" = NULL
+                 WHERE "collection_id" = ?`,
+                [timestamp, collectionId],
+            );
+            tx.run(
+                `UPDATE "upload_collection"
+                 SET "status" = 'completed', "share_link" = ?, "updated_at" = ?, "error" = NULL
+                 WHERE "id" = ?`,
+                [shareLink, timestamp, collectionId],
+            );
+        });
     }
 
     public deleteCollection(collectionId: string) {
@@ -482,7 +473,6 @@ export class UploadRepository {
             description: collection.description,
             passwordProtected: collection.passwordPlain != null,
             expires: collection.expires,
-            eternal: collection.eternal === 1,
             shareLink: collection.shareLink,
             progress,
             status: collection.status,
@@ -504,7 +494,7 @@ function collectionSelectSql() {
                    "collection_uuid" AS "collectionUuid",
                    "upload_token" AS "uploadToken",
                    "tree_json" AS "treeJson",
-                   "eternal",
+                   "segment_size" AS "segmentSize",
                    "expires",
                    "status",
                    "created_at" AS "createdAt",
@@ -522,6 +512,7 @@ function fileSelectSql() {
                    "name",
                    "size",
                    "fs_path" AS "fsPath",
+                   "source_mtime_ms" AS "sourceMtimeMs",
                    "status",
                    "uploaded_bytes" AS "uploadedBytes",
                    "paused_by_user" AS "pausedByUser",

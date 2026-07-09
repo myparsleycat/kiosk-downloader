@@ -1,15 +1,21 @@
 import type { UploadTreeFile } from "@shared/types";
 import { create } from "zustand";
 
-export type ExpiryPreset = "1d" | "7d" | "30d" | "eternal";
+const DAY = 24 * 60 * 60 * 1000;
+const MAX_EXPIRY_DAYS = 30;
+const DEFAULT_EXPIRY_DAYS = 7;
+
+export function clampExpiry(ms: number): number {
+    const now = Date.now();
+    return Math.min(Math.max(ms, now), now + MAX_EXPIRY_DAYS * DAY);
+}
 
 type UploadDraftState = {
     files: UploadTreeFile[];
     name: string;
     description: string;
     password: string;
-    expiryPreset: ExpiryPreset;
-    selected: Set<string>;
+    expiresAt: number;
 };
 
 type UploadDraftActions = {
@@ -19,8 +25,7 @@ type UploadDraftActions = {
     setName: (name: string) => void;
     setDescription: (description: string) => void;
     setPassword: (password: string) => void;
-    setExpiryPreset: (preset: ExpiryPreset) => void;
-    updateSelected: (updater: (selected: Set<string>) => Set<string>) => void;
+    setExpiresAt: (ms: number) => void;
     resetDraft: () => void;
 };
 
@@ -31,8 +36,7 @@ const draftDefaults = {
     name: "",
     description: "",
     password: "",
-    expiryPreset: "7d" as ExpiryPreset,
-    selected: new Set<string>(),
+    expiresAt: clampExpiry(Date.now() + DEFAULT_EXPIRY_DAYS * DAY),
 } satisfies UploadDraftState;
 
 export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
@@ -44,48 +48,38 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
             existing.set(file.path, file);
         }
         const files = [...existing.values()];
-        const selected = new Set(get().selected);
-        for (const file of incoming) {
-            selected.add(file.path);
-        }
-        set({ files, selected });
+        const name = get().name;
+        set({
+            files,
+            name: name.trim() === "" && incoming.length > 0 ? incoming[0].path.split("/")[0] : name,
+        });
     },
 
     removeFile: (path) => {
-        const files = get().files.filter((f) => f.path !== path);
-        const selected = new Set(get().selected);
-        selected.delete(path);
-        set({ files, selected });
+        const prefix = `${path}/`;
+        const files = get().files.filter((f) => f.path !== path && !f.path.startsWith(prefix));
+        void window.api.invoke("upload:removeDraftSources", [path]);
+        set({ files });
     },
 
-    clearFiles: () => set({ files: [], selected: new Set() }),
+    clearFiles: () => {
+        void window.api.invoke("upload:clearDraftSources");
+        set({ files: [] });
+    },
 
     setName: (name) => set({ name }),
     setDescription: (description) => set({ description }),
     setPassword: (password) => set({ password }),
-    setExpiryPreset: (expiryPreset) => set({ expiryPreset }),
+    setExpiresAt: (expiresAt) => set({ expiresAt: clampExpiry(expiresAt) }),
 
-    updateSelected: (updater) => set({ selected: updater(get().selected) }),
-
-    resetDraft: () =>
+    resetDraft: () => {
+        void window.api.invoke("upload:clearDraftSources");
         set({
             files: [],
             name: "",
             description: "",
             password: "",
-            expiryPreset: "7d",
-            selected: new Set(),
-        }),
+            expiresAt: clampExpiry(Date.now() + DEFAULT_EXPIRY_DAYS * DAY),
+        });
+    },
 }));
-
-export function resolveExpiryTimestamp(preset: ExpiryPreset): number {
-    const now = Date.now();
-    if (preset === "eternal") {
-        return now;
-    }
-
-    const DAY = 24 * 60 * 60 * 1000;
-    const days = preset === "1d" ? 1 : preset === "7d" ? 7 : 30;
-    const ms = now + days * DAY;
-    return Math.min(Math.max(ms, now), now + 30 * DAY);
-}

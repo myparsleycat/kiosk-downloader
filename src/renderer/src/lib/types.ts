@@ -108,11 +108,7 @@ export function toggleTreeSelection(
         for (const path of subtree) {
             next.delete(path);
         }
-        for (const parent of parentPaths(key)) {
-            if (!hasSelectedDescendant(parent, next)) {
-                next.delete(parent);
-            }
-        }
+        pruneEmptyAncestors(key, next);
         return next;
     }
 
@@ -125,11 +121,7 @@ export function toggleTreeSelection(
     }
 
     next.delete(key);
-    for (const parent of parentPaths(key)) {
-        if (!hasSelectedDescendant(parent, next)) {
-            next.delete(parent);
-        }
-    }
+    pruneEmptyAncestors(key, next);
     return next;
 }
 
@@ -220,13 +212,24 @@ function collectSubtreePaths(dir: DirNode, dirKey: string): string[] {
     return paths;
 }
 
-function parentPaths(key: string): string[] {
+export function parentPaths(key: string): string[] {
     const parts = key.split("/");
     const parents: string[] = [];
     for (let index = 1; index < parts.length; index += 1) {
         parents.push(parts.slice(0, index).join("/"));
     }
     return parents;
+}
+
+// Nearest-first: a farther ancestor can still see a nearer selected parent as a "descendant".
+function pruneEmptyAncestors(key: string, selected: Set<string>) {
+    const parents = parentPaths(key);
+    for (let index = parents.length - 1; index >= 0; index -= 1) {
+        const parent = parents[index];
+        if (!hasSelectedDescendant(parent, selected)) {
+            selected.delete(parent);
+        }
+    }
 }
 
 function hasSelectedDescendant(dirKey: string, selected: Set<string>): boolean {

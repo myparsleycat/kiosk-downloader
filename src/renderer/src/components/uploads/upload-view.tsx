@@ -1,23 +1,31 @@
 import { FileTree } from "@renderer/components/tree/file-tree";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@renderer/components/ui/alert-dialog";
 import { Button } from "@renderer/components/ui/button";
+import { Calendar } from "@renderer/components/ui/calendar";
 import { Field, FieldDescription, FieldLabel } from "@renderer/components/ui/field";
+import { Input } from "@renderer/components/ui/input";
 import { InputGroup, InputGroupInput } from "@renderer/components/ui/input-group";
+import { Popover, PopoverContent, PopoverTrigger } from "@renderer/components/ui/popover";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@renderer/components/ui/select";
 import { Separator } from "@renderer/components/ui/separator";
-import { summarizeSelection, toggleTreeSelection } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
-import { resolveExpiryTimestamp, useUploadDraft } from "@renderer/stores/upload-draft";
-import type { ExpiryPreset } from "@renderer/stores/upload-draft";
-import type { DirNode, UploadTreeFile } from "@shared/types";
+import { clampExpiry, useUploadDraft } from "@renderer/stores/upload-draft";
+import type { DirNode, ExpandPathsResult, UploadTreeFile } from "@shared/types";
+import { MAX_UPLOAD_FILES } from "@shared/types";
 import { formatSize } from "@shared/utils";
+import { format, isSameDay } from "date-fns";
+import { ko } from "date-fns/locale";
 import {
+  ChevronDownIcon,
   EyeIcon,
   EyeOffIcon,
   FileUpIcon,
@@ -25,8 +33,8 @@ import {
   FolderOpenIcon,
   Loader2Icon,
   LockIcon,
+  Trash2Icon,
   UploadIcon,
-  XIcon,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -36,6 +44,8 @@ import { Textarea } from "../ui/textarea";
 const MAX_NAME = 100;
 const MAX_DESCRIPTION = 2500;
 const MAX_PASSWORD = 100;
+const MAX_EXPIRY_DAYS = 30;
+const MAX_UPLOAD_BYTES = 50 * 1024 ** 3;
 
 function buildTreeFromFiles(files: UploadTreeFile[]): DirNode {
   const root: DirNode = { type: "dir", id: "root", name: "", entries: [] };
@@ -78,40 +88,143 @@ function buildTreeFromFiles(files: UploadTreeFile[]): DirNode {
   return root;
 }
 
+function mergeUploadFiles(
+  existing: UploadTreeFile[],
+  incoming: UploadTreeFile[],
+): UploadTreeFile[] {
+  const merged = new Map(existing.map((file) => [file.path, file]));
+  for (const file of incoming) {
+    merged.set(file.path, file);
+  }
+  return [...merged.values()];
+}
+
+function newIncomingPaths(existing: UploadTreeFile[], incoming: UploadTreeFile[]): string[] {
+  const existingPaths = new Set(existing.map((file) => file.path));
+  return incoming.filter((file) => !existingPaths.has(file.path)).map((file) => file.path);
+}
+
+function removeDraftSources(paths: string[]) {
+  if (paths.length === 0) return;
+  void window.api.invoke("upload:removeDraftSources", paths);
+}
+
 export function UploadView({ onCreated }: { onCreated: (uploadId: string) => void }) {
   const files = useUploadDraft((s) => s.files);
   const name = useUploadDraft((s) => s.name);
   const description = useUploadDraft((s) => s.description);
   const password = useUploadDraft((s) => s.password);
-  const expiryPreset = useUploadDraft((s) => s.expiryPreset);
-  const selected = useUploadDraft((s) => s.selected);
+  const expiresAt = useUploadDraft((s) => s.expiresAt);
   const addFiles = useUploadDraft((s) => s.addFiles);
+  const removeFile = useUploadDraft((s) => s.removeFile);
   const clearFiles = useUploadDraft((s) => s.clearFiles);
   const setName = useUploadDraft((s) => s.setName);
   const setDescription = useUploadDraft((s) => s.setDescription);
   const setPassword = useUploadDraft((s) => s.setPassword);
-  const setExpiryPreset = useUploadDraft((s) => s.setExpiryPreset);
-  const updateSelected = useUploadDraft((s) => s.updateSelected);
+  const setExpiresAt = useUploadDraft((s) => s.setExpiresAt);
   const resetDraft = useUploadDraft((s) => s.resetDraft);
 
   const [expanding, setExpanding] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
-  const [showPassword, setShowPassword] = React.useState(false);
+  const [showPassword, setShowPassword] = React.useState(true);
   const [dragOver, setDragOver] = React.useState(false);
+  const [expiryOpen, setExpiryOpen] = React.useState(false);
+  const [countOverflowOpen, setCountOverflowOpen] = React.useState(false);
+  const countOverflowResolverRef = React.useRef<((confirmed: boolean) => void) | null>(null);
+
+  const expiryDate = React.useMemo(() => new Date(expiresAt), [expiresAt]);
+  const expiryTime = React.useMemo(() => format(expiryDate, "HH:mm:ss"), [expiryDate]);
+
+  const minExpiryMonth = React.useMemo(() => new Date(new Date().setDate(1)), []);
+  const maxExpiryDate = React.useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + MAX_EXPIRY_DAYS);
+    return d;
+  }, []);
+  const maxExpiryMonth = React.useMemo(
+    () => new Date(maxExpiryDate.getFullYear(), maxExpiryDate.getMonth(), 1),
+    [maxExpiryDate],
+  );
+
+  const mergeDateAndTime = React.useCallback((date: Date, time: string): number => {
+    const [h, m, s] = time.split(":").map((n) => {
+      const v = Number(n);
+      return Number.isNaN(v) ? 0 : v;
+    });
+    const merged = new Date(date);
+    merged.setHours(h, m, s, 0);
+    return clampExpiry(merged.getTime());
+  }, []);
+
+  const handleExpiryDateSelect = React.useCallback(
+    (date: Date | undefined) => {
+      if (!date) return;
+      setExpiresAt(mergeDateAndTime(date, expiryTime));
+      setExpiryOpen(false);
+    },
+    [expiryTime, mergeDateAndTime, setExpiresAt],
+  );
+
+  const handleExpiryTimeChange = React.useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setExpiresAt(mergeDateAndTime(expiryDate, e.target.value || "00:00:00"));
+    },
+    [expiryDate, mergeDateAndTime, setExpiresAt],
+  );
 
   const tree = React.useMemo(() => buildTreeFromFiles(files), [files]);
-  const summary = summarizeSelection(selected, tree);
   const totalFiles = files.length;
-  const totalBytes = files.reduce((a, f) => a + f.size, 0);
+  const totalBytes = React.useMemo(() => files.reduce((a, f) => a + f.size, 0), [files]);
 
-  const canUpload = summary.count > 0 && name.trim().length > 0 && !starting;
+  const canUpload = totalFiles > 0 && name.trim().length > 0 && !starting;
 
-  const handleAddPaths = async (paths: string[]) => {
-    if (paths.length === 0) return;
+  const askCountOverflow = () => {
+    setCountOverflowOpen(true);
+    return new Promise<boolean>((resolve) => {
+      countOverflowResolverRef.current = resolve;
+    });
+  };
+
+  const resolveCountOverflow = (confirmed: boolean) => {
+    const resolve = countOverflowResolverRef.current;
+    if (!resolve) return;
+    countOverflowResolverRef.current = null;
+    setCountOverflowOpen(false);
+    resolve(confirmed);
+  };
+
+  const handleAddExpanded = async (load: (maxFiles: number) => Promise<ExpandPathsResult>) => {
     setExpanding(true);
+    // Let the loading spinner paint before the heavy IPC / store update.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     try {
-      const expanded = await window.api.invoke("upload:expandPaths", paths);
-      addFiles(expanded);
+      const remainingSlots = Math.max(0, MAX_UPLOAD_FILES - files.length);
+      if (remainingSlots === 0) {
+        toast.warning("하나의 컬렉션엔 최대 1000개의 파일만 추가 할 수 있습니다");
+        return;
+      }
+
+      const result = await load(remainingSlots);
+      if (result.files.length === 0) return;
+
+      const merged = mergeUploadFiles(files, result.files);
+      const mergedBytes = merged.reduce((sum, file) => sum + file.size, 0);
+      if (mergedBytes > MAX_UPLOAD_BYTES) {
+        toast.warning("최대 50 GiB 까지만 추가할 수 있습니다");
+        removeDraftSources(newIncomingPaths(files, result.files));
+        return;
+      }
+
+      if (result.truncated) {
+        setExpanding(false);
+        const confirmed = await askCountOverflow();
+        if (!confirmed) {
+          removeDraftSources(newIncomingPaths(files, result.files));
+          return;
+        }
+      }
+
+      addFiles(result.files);
     } catch (error) {
       toast.error("파일을 불러오지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
@@ -121,33 +234,21 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     }
   };
 
-  const handleFilePicker = async () => {
-    const result = await window.api.invoke("util:showOpenDialog", {
-      properties: ["openFile", "multiSelections"],
-    });
-    if (result.canceled || result.filePaths.length === 0) return;
-    void handleAddPaths(result.filePaths);
+  const handleFilePicker = () => {
+    void handleAddExpanded((maxFiles) => window.api.invoke("upload:pickFiles", maxFiles));
   };
 
-  const handleFolderPicker = async () => {
-    const result = await window.api.invoke("util:showOpenDialog", {
-      properties: ["openDirectory"],
-    });
-    if (result.canceled || result.filePaths.length === 0) return;
-    void handleAddPaths(result.filePaths);
+  const handleFolderPicker = () => {
+    void handleAddExpanded((maxFiles) => window.api.invoke("upload:pickFolder", maxFiles));
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const fileList = Array.from(e.dataTransfer.files);
-    if (fileList.length === 0) return;
-    const paths = fileList.map((f) => window.webUtils.getPathForFile(f));
-    void handleAddPaths(paths);
-  };
-
-  const handleToggle = (key: string) => {
-    updateSelected((prev) => toggleTreeSelection(prev, key, tree));
+    // Must read DataTransfer synchronously — it is invalidated after this handler returns.
+    const dropped = collectDroppedFiles(e.dataTransfer);
+    if (dropped.length === 0) return;
+    void handleAddExpanded((maxFiles) => window.api.expandDroppedFiles(dropped, maxFiles));
   };
 
   const handleStart = async () => {
@@ -156,22 +257,13 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     try {
       const turnstileToken = await window.api.invoke("upload:solveTurnstile");
 
-      const selectedFiles = files.filter((f) => {
-        const normalized = f.path;
-        for (let i = 1; i <= normalized.split("/").length; i++) {
-          if (selected.has(normalized.split("/").slice(0, i).join("/"))) return true;
-        }
-        return false;
-      });
-
       const created = await window.api.invoke("upload:create", {
-        tree: selectedFiles,
+        tree: files,
         options: {
           name: name.trim().slice(0, MAX_NAME),
           description: description.slice(0, MAX_DESCRIPTION),
           password: password || "",
-          expires: resolveExpiryTimestamp(expiryPreset),
-          eternal: expiryPreset === "eternal",
+          expires: expiresAt,
         },
         turnstileToken,
       });
@@ -181,7 +273,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
       }
 
       toast.success("업로드가 시작되었습니다", {
-        description: `${name.trim()} · ${selectedFiles.length}개 파일`,
+        description: `${name.trim()} · ${files.length}개 파일`,
       });
       resetDraft();
       onCreated(created.id);
@@ -196,6 +288,27 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
 
   return (
     <div className="flex h-full">
+      <AlertDialog
+        open={countOverflowOpen}
+        onOpenChange={(open) => {
+          if (open) return;
+          resolveCountOverflow(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>파일 개수 제한</AlertDialogTitle>
+            <AlertDialogDescription>
+              하나의 컬렉션엔 최대 1000개의 파일만 추가 할 수 있습니다. 초과분은 제외됩니다.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => resolveCountOverflow(false)}>취소</AlertDialogCancel>
+            <AlertDialogAction onClick={() => resolveCountOverflow(true)}>확인</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <div className="flex w-[340px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="border-b px-4 py-3">
           <h2 className="cn-font-heading text-sm font-medium">컬렉션 정보</h2>
@@ -242,20 +355,57 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
 
             <Field>
               <FieldLabel>만료일</FieldLabel>
-              <Select
-                value={expiryPreset}
-                onValueChange={(v) => setExpiryPreset(v as ExpiryPreset)}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1d">1일</SelectItem>
-                  <SelectItem value="7d">7일 (기본)</SelectItem>
-                  <SelectItem value="30d">30일</SelectItem>
-                  <SelectItem value="eternal">만료 없음</SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="flex gap-2">
+                <Popover open={expiryOpen} onOpenChange={setExpiryOpen}>
+                  <PopoverTrigger
+                    render={
+                      <Button variant="outline" className="flex-1 justify-between font-normal">
+                        {format(expiryDate, "PPP", { locale: ko })}
+                        <ChevronDownIcon className="size-4 opacity-50" />
+                      </Button>
+                    }
+                  />
+                  <PopoverContent className="w-auto overflow-hidden p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      selected={expiryDate}
+                      locale={ko}
+                      startMonth={minExpiryMonth}
+                      endMonth={maxExpiryMonth}
+                      defaultMonth={expiryDate}
+                      disabled={(date) =>
+                        date < new Date(new Date().setHours(0, 0, 0, 0)) || date > maxExpiryDate
+                      }
+                      onSelect={handleExpiryDateSelect}
+                    />
+                  </PopoverContent>
+                </Popover>
+                <Input
+                  type="time"
+                  step="1"
+                  value={expiryTime}
+                  onChange={handleExpiryTimeChange}
+                  className="w-30 appearance-none bg-background [&::-webkit-calendar-picker-indicator]:hidden [&::-webkit-calendar-picker-indicator]:appearance-none"
+                />
+              </div>
+
+              <div className="flex gap-1.5">
+                {[1, 7, 30].map((days) => {
+                  const target = clampExpiry(Date.now() + days * 24 * 60 * 60 * 1000);
+                  const active = isSameDay(expiryDate, new Date(target));
+                  return (
+                    <Button
+                      key={days}
+                      variant={active ? "default" : "outline"}
+                      size="xs"
+                      className="flex-1"
+                      onClick={() => setExpiresAt(target)}
+                    >
+                      {days}일
+                    </Button>
+                  );
+                })}
+              </div>
             </Field>
 
             <Field>
@@ -291,14 +441,8 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
 
             <div className="rounded-lg border bg-muted/30 p-3">
               <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">선택 파일</span>
+                <span className="text-muted-foreground">파일</span>
                 <span className="font-medium tabular-nums">
-                  {summary.count}개 · {formatSize(summary.bytes)}
-                </span>
-              </div>
-              <div className="mt-1.5 flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">전체 파일</span>
-                <span className="tabular-nums">
                   {totalFiles}개 · {formatSize(totalBytes)}
                 </span>
               </div>
@@ -333,7 +477,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
             </Button>
             {files.length > 0 && (
               <Button size="xs" variant="ghost" onClick={clearFiles} disabled={expanding}>
-                <XIcon className="size-3" />
+                <Trash2Icon className="size-3" />
                 전체 삭제
               </Button>
             )}
@@ -357,18 +501,13 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
           <>
             <div className="flex items-center justify-between border-b px-4 py-1.5 text-xs text-muted-foreground">
               <span>
-                선택 <span className="tabular-nums">{summary.count}</span> / {totalFiles} 파일
+                <span className="tabular-nums">{totalFiles}</span> 파일
               </span>
-              <span className="tabular-nums">{formatSize(summary.bytes)}</span>
+              <span className="tabular-nums">{formatSize(totalBytes)}</span>
             </div>
             <ScrollArea className="flex-1">
               <div className="p-2">
-                <FileTree
-                  mode="selection"
-                  root={tree}
-                  selected={selected}
-                  onToggle={handleToggle}
-                />
+                <FileTree mode="selection" root={tree} onDelete={(key) => removeFile(key)} />
               </div>
             </ScrollArea>
           </>
@@ -376,6 +515,22 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
       </div>
     </div>
   );
+}
+
+function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
+  const items = dataTransfer.items;
+  if (!items || items.length === 0) return [];
+
+  // Top-level items only — never fall back to dataTransfer.files, which Chromium
+  // may expand to every nested file in a dropped folder (1000+).
+  const files: File[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
 }
 
 function DropZone({

@@ -2,6 +2,7 @@ import { cn } from "@renderer/lib/utils";
 import type { UploadItem, UploadStatus } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import { ClockIcon, FolderIcon, LockIcon, LinkIcon, TimerIcon } from "lucide-react";
+import { toast } from "sonner";
 
 export function UploadCard({
   item,
@@ -48,9 +49,24 @@ export function UploadCard({
             </span>
           </div>
           {item.shareLink && (
-            <div className="mt-0.5 flex items-center gap-0.5 truncate font-mono text-[10px] text-muted-foreground">
-              <LinkIcon className="size-2.5 shrink-0" />
-              {item.shareLink}
+            <div className="mt-0.5 flex items-center gap-0.5 truncate font-mono text-[10px]">
+              <LinkIcon className="size-2.5 shrink-0 text-muted-foreground" />
+              <span
+                role="link"
+                className="cursor-pointer truncate text-primary underline underline-offset-2"
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    await window.api.invoke("util:openExternal", item.shareLink!);
+                  } catch (error) {
+                    toast.error("링크를 열지 못했습니다", {
+                      description: error instanceof Error ? error.message : String(error),
+                    });
+                  }
+                }}
+              >
+                {item.shareLink}
+              </span>
             </div>
           )}
         </div>
@@ -91,18 +107,15 @@ export function UploadCard({
       </div>
 
       <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
-        {!item.eternal && (
-          <span className="flex items-center gap-0.5">
-            <ClockIcon className="size-2.5" />
-            {new Date(item.expires).toLocaleDateString("ko-KR", {
-              month: "2-digit",
-              day: "2-digit",
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </span>
-        )}
-        {item.eternal && <span className="flex items-center gap-0.5">만료 없음</span>}
+        <span className="flex items-center gap-0.5">
+          <ClockIcon className="size-2.5" />
+          {new Date(item.expires).toLocaleDateString("ko-KR", {
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </span>
         {item.passwordProtected && (
           <span className="flex items-center gap-0.5">
             <LockIcon className="size-2.5" />

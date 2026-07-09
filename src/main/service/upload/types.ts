@@ -2,11 +2,17 @@ import type {
     DirNode,
     UploadOptions,
     UploadStatus,
+    UploadTreeFile,
     FileUploadStatus,
     UploadChunkStatus,
 } from "@shared/types";
 
 export const UPLOAD_SEGMENT_SIZE = 16 * 1024 * 1024;
+
+/** Local source file with absolute path — main-process only. */
+export type UploadSourceFile = UploadTreeFile & {
+    fsPath: string;
+};
 
 export type UploadRequestDir = {
     id: Buffer;
@@ -43,11 +49,13 @@ export type CreatedUpload = {
 
 export type ServerFileMapping = {
     fileId: Buffer;
+    relativePath: string;
     size: number;
     offset: number;
     sequence: number;
     length: number;
     fsPath: string;
+    sourceMtimeMs: number;
 };
 
 export type UploadCollectionRow = {
@@ -60,7 +68,7 @@ export type UploadCollectionRow = {
     collectionUuid: string;
     uploadToken: string;
     treeJson: string;
-    eternal: number;
+    segmentSize: number;
     expires: number;
     status: UploadStatus;
     createdAt: string;
@@ -77,6 +85,7 @@ export type UploadFileRow = {
     name: string;
     size: number;
     fsPath: string;
+    sourceMtimeMs: number;
     status: FileUploadStatus;
     uploadedBytes: number;
     pausedByUser: number;
@@ -101,7 +110,8 @@ export type UploadChunkRow = {
 export type CreateUploadRecord = {
     created: CreatedUpload;
     options: UploadOptions;
-    files: { path: string; name: string; size: number; fsPath: string }[];
+    files: { path: string; name: string; size: number; fsPath: string; sourceMtimeMs: number }[];
+    segmentSize: number;
     tree: DirNode;
 };
 

@@ -16,14 +16,16 @@ import {
   FolderIcon,
   PauseIcon,
   PlayIcon,
+  Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
 
 export interface FileTreeSelectionProps {
   mode: "selection";
   root: DirNode;
-  selected: Set<string>;
-  onToggle: (key: string) => void;
+  selected?: Set<string>;
+  onToggle?: (key: string) => void;
+  onDelete?: (key: string) => void;
 }
 
 export interface FileTreeProgressProps {
@@ -41,9 +43,7 @@ export interface FileTreeProgressProps {
 export type FileTreeProps = FileTreeSelectionProps | FileTreeProgressProps;
 
 export const FILE_TREE_RIGHT_COLS: Record<FileTreeProps["mode"], string[]> = {
-  // [크기]
-  selection: ["4rem"],
-  // [속도, 진행률, 상태, 액션]
+  selection: ["4rem", "1.5rem"],
   progress: ["5.5rem", "10rem", "5rem", "2.5rem"],
 };
 
@@ -133,8 +133,8 @@ function FileRow({
     return (
       <TreeRow
         indent={indent}
-        checked={props.selected.has(selectionKey)}
-        onToggle={() => props.onToggle(selectionKey)}
+        checked={props.selected?.has(selectionKey)}
+        onToggle={props.onToggle ? () => props.onToggle?.(selectionKey) : undefined}
         icon={<FileIcon className="size-4 text-muted-foreground" />}
         label={node.name}
         rightCols={rightCols}
@@ -142,6 +142,21 @@ function FileRow({
           <span key="size" className="text-right text-xs text-muted-foreground">
             {formatSize(node.size)}
           </span>,
+          props.onDelete ? (
+            <div key="delete" className="flex items-center justify-end">
+              <button
+                type="button"
+                className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onDelete?.(selectionKey);
+                }}
+                title="삭제"
+              >
+                <Trash2Icon className="size-3" />
+              </button>
+            </div>
+          ) : null,
         ]}
       />
     );
@@ -251,12 +266,15 @@ function DirRow({
       : false,
   );
   const toggleStoredExpanded = useDownloadTreeExpanded((state) => state.toggleExpanded);
-  const [selectionExpanded, setSelectionExpanded] = React.useState(true);
+  const [selectionExpanded, setSelectionExpanded] = React.useState(false);
   const expanded = isRoot ? true : props.mode === "progress" ? storedExpanded : selectionExpanded;
 
-  const checked = props.mode === "selection" && dirKey !== "" ? props.selected.has(dirKey) : false;
+  const checked =
+    props.mode === "selection" && dirKey !== "" && props.selected
+      ? props.selected.has(dirKey)
+      : undefined;
 
-  const total = dirSize(node);
+  const total = props.mode === "selection" ? dirSize(node) : 0;
   const dirSummary =
     props.mode === "progress" ? summarizeDirProgress(node, childPathStack, props.progress) : null;
   const showDirExcluded = dirSummary?.allExcluded ?? false;
@@ -291,7 +309,9 @@ function DirRow({
           }}
           checked={checked}
           onToggle={
-            props.mode === "selection" && dirKey !== "" ? () => props.onToggle(dirKey) : undefined
+            props.mode === "selection" && dirKey !== "" && props.onToggle
+              ? () => props.onToggle?.(dirKey)
+              : undefined
           }
           icon={
             <FolderIcon
@@ -358,6 +378,21 @@ function DirRow({
                   >
                     {formatSize(total)}
                   </span>,
+                  props.onDelete ? (
+                    <div key="delete" className="flex items-center justify-end">
+                      <button
+                        type="button"
+                        className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onDelete?.(dirKey);
+                        }}
+                        title="삭제"
+                      >
+                        <Trash2Icon className="size-3" />
+                      </button>
+                    </div>
+                  ) : null,
                 ]
           }
         />
@@ -378,12 +413,18 @@ function DirRow({
 }
 
 function dirSize(dir: DirNode): number {
+  const cached = dirSizeCache.get(dir);
+  if (cached !== undefined) return cached;
+
   let total = 0;
   for (const e of dir.entries) {
     total += e.kind === "file" ? (e.node as FileNode).size : dirSize(e.node as DirNode);
   }
+  dirSizeCache.set(dir, total);
   return total;
 }
+
+const dirSizeCache = new WeakMap<DirNode, number>();
 
 function summarizeDirProgress(
   dir: DirNode,
@@ -510,7 +551,6 @@ function TreeRow({
       }}
       onClick={expandable ? onExpand : undefined}
     >
-      {/* 확장 토글 · 체크박스 · 아이콘 */}
       <div className="flex items-center gap-1">
         <span
           className={cn(
@@ -527,17 +567,19 @@ function TreeRow({
 
         {onToggle && (
           <div onClick={(e) => e.stopPropagation()}>
-            <Checkbox checked={checked ?? false} onCheckedChange={onToggle} className="shrink-0" />
+            <Checkbox
+              checked={checked ?? false}
+              onCheckedChange={onToggle}
+              className="shrink-0 after:hidden"
+            />
           </div>
         )}
 
         {icon}
       </div>
 
-      {/* 라벨 */}
       <span className="truncate">{label}</span>
 
-      {/* 우측 영역 — 각 컬럼이 고정 너비를 가져 라벨 영역 밀림 방지 */}
       {right &&
         right.map((cell, i) => (
           <div

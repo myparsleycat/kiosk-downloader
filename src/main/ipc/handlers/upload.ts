@@ -1,49 +1,10 @@
-import path from "node:path";
-
-import type { CreateUploadPayload, UploadTreeFile } from "@shared/types";
-import { normalizePath } from "@shared/utils";
-import fse from "fs-extra";
+import { showOpenDialog } from "@main/service/util";
+import type { CreateUploadPayload, ExpandPathsResult } from "@shared/types";
+import { MAX_UPLOAD_FILES } from "@shared/types";
 
 import type { KioskDownloader } from "../..";
 
 import { rh } from "../helper";
-
-async function expandPaths(inputs: string[]): Promise<UploadTreeFile[]> {
-    const out: UploadTreeFile[] = [];
-
-    for (const input of inputs) {
-        const stat = await fse.stat(input);
-        if (stat.isFile()) {
-            out.push({
-                path: path.basename(input),
-                name: path.basename(input),
-                size: stat.size,
-                fsPath: input,
-            });
-            continue;
-        }
-
-        const rootName = path.basename(input);
-        await walkDir(input, rootName, out);
-    }
-
-    return out;
-}
-
-async function walkDir(dirPath: string, treePrefix: string, out: UploadTreeFile[]) {
-    const entries = await fse.readdir(dirPath, { withFileTypes: true });
-    for (const entry of entries) {
-        const fullPath = path.join(dirPath, entry.name);
-        const treePath = normalizePath(`${treePrefix}/${entry.name}`);
-
-        if (entry.isFile()) {
-            const stat = await fse.stat(fullPath);
-            out.push({ path: treePath, name: entry.name, size: stat.size, fsPath: fullPath });
-        } else if (entry.isDirectory()) {
-            await walkDir(fullPath, treePath, out);
-        }
-    }
-}
 
 export function registerUploadHandlers(kd: KioskDownloader) {
     rh("upload:solveTurnstile", () => kd.service.upload.solveTurnstile());
@@ -53,7 +14,37 @@ export function registerUploadHandlers(kd: KioskDownloader) {
     rh("upload:resume", (collectionId: string, options?: { force?: boolean }) =>
         kd.service.upload.resumeUpload(collectionId, options ?? {}),
     );
+    rh("upload:pauseFile", (collectionId: string, fileId: string) =>
+        kd.service.upload.pauseFile(collectionId, fileId),
+    );
+    rh("upload:resumeFile", (collectionId: string, fileId: string, options?: { force?: boolean }) =>
+        kd.service.upload.resumeFile(collectionId, fileId, options ?? {}),
+    );
     rh("upload:remove", (collectionId: string) => kd.service.upload.remove(collectionId));
     rh("upload:copyLink", (collectionId: string) => kd.service.upload.copyLink(collectionId));
-    rh("upload:expandPaths", (paths: string[]) => expandPaths(paths));
+    rh("upload:expandPaths", (paths: string[], maxFiles?: number) =>
+        kd.service.upload.expandPaths(paths, maxFiles),
+    );
+    rh("upload:pickFiles", async (maxFiles?: number): Promise<ExpandPathsResult> => {
+        const result = await showOpenDialog({
+            properties: ["openFile", "multiSelections"],
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+            return { files: [], truncated: false };
+        }
+        return kd.service.upload.expandPaths(result.filePaths, maxFiles ?? MAX_UPLOAD_FILES);
+    });
+    rh("upload:pickFolder", async (maxFiles?: number): Promise<ExpandPathsResult> => {
+        const result = await showOpenDialog({
+            properties: ["openDirectory"],
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+            return { files: [], truncated: false };
+        }
+        return kd.service.upload.expandPaths(result.filePaths, maxFiles ?? MAX_UPLOAD_FILES);
+    });
+    rh("upload:clearDraftSources", () => kd.service.upload.clearDraftSources());
+    rh("upload:removeDraftSources", (paths: string[]) =>
+        kd.service.upload.removeDraftSources(paths),
+    );
 }

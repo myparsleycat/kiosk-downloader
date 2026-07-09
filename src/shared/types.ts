@@ -111,11 +111,19 @@ export type FileUploadStatus = "pending" | "uploading" | "paused" | "completed" 
 
 export type UploadChunkStatus = "pending" | "uploading" | "completed" | "error";
 
+export const MAX_UPLOAD_FILES = 1000;
+
+/** Absolute filesystem paths stay in main; this is display / selection only. */
 export interface UploadTreeFile {
     path: string;
     name: string;
     size: number;
-    fsPath: string;
+    sourceMtimeMs: number;
+}
+
+export interface ExpandPathsResult {
+    files: UploadTreeFile[];
+    truncated: boolean;
 }
 
 export interface UploadOptions {
@@ -123,7 +131,6 @@ export interface UploadOptions {
     description: string;
     password: string;
     expires: number;
-    eternal: boolean;
 }
 
 export interface UploadFileProgress {
@@ -142,7 +149,6 @@ export interface UploadItem {
     description: string;
     passwordProtected: boolean;
     expires: number;
-    eternal: boolean;
     shareLink: string | null;
     progress: Record<string, UploadFileProgress>;
     status: UploadStatus;

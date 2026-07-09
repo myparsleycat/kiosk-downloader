@@ -1,22 +1,75 @@
 import { performance } from "node:perf_hooks";
 
-import { CHUNK_RETRY_DEFAULT, CHUNK_RETRY_MAX, CHUNK_RETRY_MIN } from "@shared/settings";
+import {
+    CHUNK_RETRY_DEFAULT,
+    CHUNK_RETRY_MAX,
+    CHUNK_RETRY_MIN,
+    SEGMENT_POOL_SIZE_DEFAULT,
+    SEGMENT_POOL_SIZE_MAX,
+    SEGMENT_POOL_SIZE_MIN,
+} from "@shared/settings";
 import { toErrorMessage } from "@shared/utils";
 
 import type { KioskDownloader } from "../..";
 import type { UploadTransferMetrics } from "./metrics";
 import type { UploadRepository } from "./repository";
-import type { SchedulerSettings, UploadChunkRow } from "./types";
+import type {
+    SchedulerSettings,
+    ServerFileMapping,
+    UploadChunkRow,
+    UploadCollectionRow,
+    UploadFileRow,
+} from "./types";
 
-import { KioUploadClient } from "./kio-upload-client";
+import {
+    KioUploadClient,
+    UploadSessionExpiredError,
+    UploadSourceChangedError,
+} from "./kio-upload-client";
 
-const MAX_UPLOAD_THREADS = 16;
+const MAX_UPLOAD_IN_FLIGHT_SEGMENTS = 8;
 const PROGRESS_EMIT_INTERVAL_MS = 500;
+const STALL_TIMEOUT_MS = 15_000;
+const MAX_SLOW_RECONNECTS = 2;
+
+type PendingChunk = ServerFileMapping & {
+    collectionId: string;
+    localFileId: string;
+    generation: number;
+};
+
+type FileWorkState = {
+    collectionId: string;
+    fileId: string;
+    chunks: ServerFileMapping[];
+    completed: Set<number>;
+    queued: Set<number>;
+    inFlightSequences: Set<number>;
+    inFlight: number;
+    generation: number;
+    paused: boolean;
+    failed: boolean;
+    controller: AbortController;
+};
+
+type CollectionWorkState = {
+    fileIds: Set<string>;
+    failed: boolean;
+    completing: boolean;
+};
 
 function clampChunkRetries(value: number) {
     return Math.min(
         CHUNK_RETRY_MAX,
         Math.max(CHUNK_RETRY_MIN, ensurePositiveInteger(value, CHUNK_RETRY_DEFAULT)),
+    );
+}
+
+function clampSegmentPoolSize(value: number) {
+    return Math.min(
+        MAX_UPLOAD_IN_FLIGHT_SEGMENTS,
+        SEGMENT_POOL_SIZE_MAX,
+        Math.max(SEGMENT_POOL_SIZE_MIN, ensurePositiveInteger(value, SEGMENT_POOL_SIZE_DEFAULT)),
     );
 }
 
@@ -31,56 +84,33 @@ function chunkBackoffMs(attempt: number) {
     return 1000 * 2 ** (attempt - 1);
 }
 
+function isAbortError(error: unknown) {
+    return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
+}
+
 function sleepWithAbort(ms: number, signal: AbortSignal) {
     return new Promise<void>((resolve, reject) => {
         if (signal.aborted) {
             reject(new DOMException("The operation was aborted.", "AbortError"));
             return;
         }
-
-        const timer = setTimeout(() => {
-            signal.removeEventListener("abort", onAbort);
-            resolve();
-        }, ms);
         const onAbort = () => {
             clearTimeout(timer);
             signal.removeEventListener("abort", onAbort);
             reject(new DOMException("The operation was aborted.", "AbortError"));
         };
+        const timer = setTimeout(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
         signal.addEventListener("abort", onAbort, { once: true });
     });
 }
 
-function isAbortError(error: unknown) {
-    return error instanceof DOMException && error.name === "AbortError";
-}
-
-type PendingChunk = {
-    collectionId: string;
-    fileId: string;
-    chunkIndex: number;
-    offset: number;
-    size: number;
-    serverFileId: Buffer;
-    fsPath: string;
-    uploadToken: string;
-};
-
-type CollectionWorkState = {
-    chunks: PendingChunk[];
-    nextIndex: number;
-    remaining: number;
-    inFlight: number;
-    failed: boolean;
-    completing: boolean;
-};
-
 export class UploadScheduler {
-    // Global segment queue across all active upload collections, drained by a
-    // bounded worker pool.
     private readonly queue: PendingChunk[] = [];
-    private readonly states = new Map<string, CollectionWorkState>();
-    private readonly collectionControllers = new Map<string, AbortController>();
+    private readonly collections = new Map<string, CollectionWorkState>();
+    private readonly files = new Map<string, FileWorkState>();
     private readonly waiters: Array<() => void> = [];
     private readonly activeCollections = new Set<string>();
     private readonly collectionTimerStartedAt = new Map<string, number>();
@@ -104,155 +134,297 @@ export class UploadScheduler {
 
     public getCollectionElapsedMs(collectionId: string) {
         const persistedMs = this.repository.getCollectionElapsedMs(collectionId);
-        const timerStartedAt = this.collectionTimerStartedAt.get(collectionId);
-        if (timerStartedAt === undefined) {
-            return persistedMs;
-        }
-        return persistedMs + Math.max(0, performance.now() - timerStartedAt);
+        const startedAt = this.collectionTimerStartedAt.get(collectionId);
+        return startedAt === undefined
+            ? persistedMs
+            : persistedMs + Math.max(0, performance.now() - startedAt);
     }
 
     public registerWorkItems(
         collectionId: string,
         fileRows: { id: string; remoteId: string }[],
-        workItems: WorkItem[],
-        uploadToken: string,
+        workItems: ServerFileMapping[],
     ) {
-        const fileByRemoteHex = new Map(fileRows.map((file) => [file.remoteId, file.id]));
-
-        const chunks: PendingChunk[] = [];
+        const fileByRemoteId = new Map(fileRows.map((file) => [file.remoteId, file.id]));
+        const chunksByFile = new Map<string, ServerFileMapping[]>();
         for (const item of workItems) {
-            const fileId = fileByRemoteHex.get(item.fileId.toString("hex"));
+            const fileId = fileByRemoteId.get(item.fileId.toString("hex"));
             if (!fileId) {
-                continue;
+                throw new Error(
+                    `서버 파일 ID가 로컬 파일과 일치하지 않습니다: ${item.relativePath}`,
+                );
             }
-            chunks.push({
-                collectionId,
-                fileId,
-                chunkIndex: item.sequence,
-                offset: item.offset,
-                size: item.length,
-                serverFileId: item.fileId,
-                fsPath: item.fsPath,
-                uploadToken,
-            });
+            const chunks = chunksByFile.get(fileId) ?? [];
+            chunks.push(item);
+            chunksByFile.set(fileId, chunks);
         }
+        if (chunksByFile.size !== fileRows.length) {
+            throw new Error("모든 업로드 파일의 청크 작업을 만들지 못했습니다.");
+        }
+        this.registerCollection(collectionId, chunksByFile);
+    }
 
-        this.states.set(collectionId, {
-            chunks,
-            nextIndex: 0,
-            remaining: chunks.length,
-            inFlight: 0,
-            failed: false,
-            completing: false,
-        });
-        this.collectionControllers.set(collectionId, new AbortController());
+    public async restoreFromRepository() {
+        for (const collection of this.repository.listRunnableCollections()) {
+            this.restoreCollection(collection);
+        }
     }
 
     public async schedule() {
-        const maxWorkers = (await this.getSettings()).maxWorkers;
-        this.resize(maxWorkers);
-
+        const settings = await this.getSettings();
+        this.resize(settings.maxWorkers);
         for (const collection of this.repository.listRunnableCollections()) {
-            const state = this.states.get(collection.id);
+            const state = this.collections.get(collection.id) ?? this.restoreCollection(collection);
             if (!state || state.failed || state.completing) {
                 continue;
             }
-
-            while (state.nextIndex < state.chunks.length) {
-                const chunk = state.chunks[state.nextIndex];
-                state.nextIndex += 1;
-                state.inFlight += 1;
-                this.queue.push(chunk);
-                this.activeCollections.add(collection.id);
-                this.ensureProgressPollTimer();
-                this.startCollectionTracking(collection.id);
+            if (
+                [...state.fileIds].every((fileId) => {
+                    const file = this.files.get(fileId);
+                    return file && file.completed.size === file.chunks.length;
+                })
+            ) {
+                await this.finalizeCollection(collection.id);
+                continue;
+            }
+            for (const fileId of state.fileIds) {
+                this.enqueueFile(fileId);
             }
         }
-
         this.wakeWaiters();
     }
 
-    public pauseCollection(collectionId: string) {
-        this.abortCollection(collectionId);
-        const state = this.states.get(collectionId);
-        if (state) {
-            this.removeCollectionFromQueue(collectionId);
-        }
-        this.deactivateCollection(collectionId);
-    }
-
-    public resumeCollection(collectionId: string) {
-        const state = this.states.get(collectionId);
+    public async pauseCollection(collectionId: string) {
+        const state = this.collections.get(collectionId);
         if (!state) {
             return;
         }
-        // Reset nextIndex so un-started and aborted segments re-enter the queue.
-        state.nextIndex = 0;
-        state.inFlight = 0;
-        state.failed = false;
-        this.collectionControllers.set(collectionId, new AbortController());
-        void this.schedule();
-    }
-
-    public pauseFile(fileId: string) {
-        // Abort the collection owning this file (upload scheduling is segment-
-        // granularity, not per-file). The service layer translates file pause
-        // into a collection-level pause for simplicity.
-        const collectionId = this.findCollectionOfFile(fileId);
-        if (collectionId) {
-            this.pauseCollection(collectionId);
+        for (const fileId of state.fileIds) {
+            this.pauseFileState(fileId);
         }
-    }
-
-    public resumeFile(fileId: string) {
-        const collectionId = this.findCollectionOfFile(fileId);
-        if (collectionId) {
-            this.resumeCollection(collectionId);
-        }
-    }
-
-    public removeCollection(collectionId: string) {
-        this.abortCollection(collectionId);
-        this.removeCollectionFromQueue(collectionId);
-        this.states.delete(collectionId);
-        this.collectionControllers.delete(collectionId);
+        await this.waitForCollectionIdle(collectionId);
         this.deactivateCollection(collectionId);
+    }
+
+    public async resumeCollection(collectionId: string) {
+        const collection = this.repository.getCollection(collectionId);
+        const state = collection
+            ? (this.collections.get(collectionId) ?? this.restoreCollection(collection))
+            : null;
+        if (!state) {
+            return;
+        }
+        state.failed = false;
+        state.completing = false;
+        for (const fileId of state.fileIds) {
+            this.resumeFileState(fileId);
+        }
+        if (
+            [...state.fileIds].every((fileId) => {
+                const file = this.files.get(fileId);
+                return file && file.completed.size === file.chunks.length;
+            })
+        ) {
+            await this.finalizeCollection(collectionId);
+            return;
+        }
+        await this.schedule();
+    }
+
+    public async pauseFile(fileId: string) {
+        const state = this.files.get(fileId);
+        if (!state) {
+            return;
+        }
+        this.pauseFileState(fileId);
+        await this.waitForFileIdle(state);
+        if (!this.hasRunnableFile(state.collectionId)) {
+            this.deactivateCollection(state.collectionId);
+        }
+    }
+
+    public async resumeFile(fileId: string) {
+        const state = this.files.get(fileId);
+        if (!state) {
+            const file = this.repository.getFile(fileId);
+            const collection = file ? this.repository.getCollection(file.collectionId) : null;
+            if (!collection) {
+                return;
+            }
+            this.restoreCollection(collection);
+        }
+        this.resumeFileState(fileId);
+        await this.schedule();
+    }
+
+    public async removeCollection(collectionId: string) {
+        await this.pauseCollection(collectionId);
+        this.removeQueuedCollection(collectionId);
+        const state = this.collections.get(collectionId);
+        if (state) {
+            for (const fileId of state.fileIds) {
+                this.files.delete(fileId);
+            }
+        }
+        this.collections.delete(collectionId);
     }
 
     public destroy() {
         this.stopProgressPollTimer();
+        for (const file of this.files.values()) {
+            file.controller.abort();
+        }
         for (const collectionId of [...this.collectionTimerStartedAt.keys()]) {
             this.stopCollectionTimer(collectionId);
-        }
-        for (const controller of this.collectionControllers.values()) {
-            controller.abort();
         }
         this.targetWorkers = 0;
         this.wakeWaiters();
     }
 
+    private restoreCollection(collection: UploadCollectionRow) {
+        const files = this.repository.listFiles(collection.id);
+        const chunksByFile = new Map<string, ServerFileMapping[]>();
+        for (const file of files) {
+            if (file.status === "completed") {
+                continue;
+            }
+            if (!file.remoteId) {
+                this.repository.markCollectionStatus(
+                    collection.id,
+                    "error",
+                    "업로드 복구에 필요한 파일 정보가 없습니다. 새 업로드를 만드세요.",
+                );
+                return null;
+            }
+            chunksByFile.set(file.id, this.buildFileChunks(collection, file));
+        }
+        // Incomplete files always restart from sequence 0; server skips stored segments.
+        this.repository.resetIncompleteCollectionProgress(collection.id);
+        this.registerCollection(collection.id, chunksByFile);
+        return this.collections.get(collection.id) ?? null;
+    }
+
+    private buildFileChunks(collection: UploadCollectionRow, file: UploadFileRow) {
+        const fileId = Buffer.from(file.remoteId, "hex");
+        if (fileId.length === 0) {
+            throw new Error(`업로드 원격 파일 ID가 올바르지 않습니다: ${file.path}`);
+        }
+        if (file.size === 0) {
+            return [
+                {
+                    fileId,
+                    relativePath: file.path,
+                    size: 0,
+                    offset: 0,
+                    sequence: 0,
+                    length: 0,
+                    fsPath: file.fsPath,
+                    sourceMtimeMs: file.sourceMtimeMs,
+                },
+            ];
+        }
+        const chunks: ServerFileMapping[] = [];
+        for (
+            let offset = 0, sequence = 0;
+            offset < file.size;
+            offset += collection.segmentSize, sequence += 1
+        ) {
+            chunks.push({
+                fileId,
+                relativePath: file.path,
+                size: file.size,
+                offset,
+                sequence,
+                length: Math.min(collection.segmentSize, file.size - offset),
+                fsPath: file.fsPath,
+                sourceMtimeMs: file.sourceMtimeMs,
+            });
+        }
+        return chunks;
+    }
+
+    private registerCollection(
+        collectionId: string,
+        chunksByFile: Map<string, ServerFileMapping[]>,
+    ) {
+        const existing = this.collections.get(collectionId);
+        if (existing) {
+            for (const fileId of existing.fileIds) {
+                this.files.delete(fileId);
+            }
+        }
+        const fileIds = new Set<string>();
+        for (const [fileId, chunks] of chunksByFile) {
+            fileIds.add(fileId);
+            this.files.set(fileId, {
+                collectionId,
+                fileId,
+                chunks,
+                completed: new Set(),
+                queued: new Set(),
+                inFlightSequences: new Set(),
+                inFlight: 0,
+                generation: 0,
+                paused: false,
+                failed: false,
+                controller: new AbortController(),
+            });
+        }
+        this.collections.set(collectionId, { fileIds, failed: false, completing: false });
+    }
+
+    private enqueueFile(fileId: string) {
+        const state = this.files.get(fileId);
+        const collection = state ? this.collections.get(state.collectionId) : null;
+        if (
+            !state ||
+            !collection ||
+            state.paused ||
+            state.failed ||
+            collection.failed ||
+            collection.completing
+        ) {
+            return;
+        }
+        for (const chunk of state.chunks) {
+            if (
+                state.completed.has(chunk.sequence) ||
+                state.queued.has(chunk.sequence) ||
+                state.inFlightSequences.has(chunk.sequence)
+            ) {
+                continue;
+            }
+            state.queued.add(chunk.sequence);
+            this.queue.push({
+                ...chunk,
+                collectionId: state.collectionId,
+                localFileId: fileId,
+                generation: state.generation,
+            });
+        }
+        if (state.queued.size > 0 || state.inFlight > 0) {
+            this.activeCollections.add(state.collectionId);
+            this.startCollectionTracking(state.collectionId);
+            this.ensureProgressPollTimer();
+        }
+    }
+
     private resize(maxWorkers: number) {
-        this.targetWorkers = Math.max(1, Math.floor(maxWorkers));
+        this.targetWorkers = maxWorkers;
         while (this.runningWorkers < this.targetWorkers) {
             this.runningWorkers += 1;
             void this.workerLoop(this.runningWorkers);
         }
-        this.wakeWaiters();
     }
 
     private async workerLoop(workerId: number) {
         try {
-            while (true) {
-                if (workerId > this.targetWorkers) {
-                    return;
-                }
-
+            while (workerId <= this.targetWorkers) {
                 const chunk = this.queue.shift();
                 if (!chunk) {
                     await this.waitForWork();
                     continue;
                 }
-
                 await this.processChunk(chunk);
             }
         } finally {
@@ -264,251 +436,337 @@ export class UploadScheduler {
     }
 
     private async processChunk(chunk: PendingChunk) {
-        const state = this.states.get(chunk.collectionId);
-        const controller = this.collectionControllers.get(chunk.collectionId);
-        if (!state || !controller) {
+        const file = this.files.get(chunk.localFileId);
+        const collection = this.collections.get(chunk.collectionId);
+        if (!file || !collection) {
             return;
         }
-
-        const settings = await this.getSettings();
-        const signal = controller.signal;
-        this.metrics.registerFile(chunk.collectionId, chunk.fileId);
-        const chunkRow: UploadChunkRow = {
-            collectionId: chunk.collectionId,
-            fileId: chunk.fileId,
-            chunkIndex: chunk.chunkIndex,
-            offset: chunk.offset,
-            size: chunk.size,
-            status: "uploading",
-            uploadedBytes: 0,
-            attempts: 0,
-            updatedAt: new Date().toISOString(),
-            error: null,
-        };
-
-        const maxAttempts = settings.maxChunkRetries + 1;
-        let attempt = 1;
-
-        while (attempt <= maxAttempts) {
-            if (state.failed || signal.aborted) {
-                this.repository.markChunkPending(chunk.fileId, chunk.chunkIndex);
-                this.releaseChunk(chunk.collectionId);
-                return;
-            }
-
-            let statusChanged = false;
-            const file = this.repository.getFile(chunk.fileId);
-            if (file?.status === "pending") {
-                this.repository.markFileStatus(chunk.fileId, "uploading");
-                statusChanged = true;
-            }
-
-            const collection = this.repository.getCollection(chunk.collectionId);
-            if (collection?.status === "queued") {
-                this.repository.markCollectionStatus(chunk.collectionId, "uploading");
-                statusChanged = true;
-            }
-            if (statusChanged) {
-                await this.emitUpdate(chunk.collectionId);
-            }
-
-            this.repository.markChunkUploading(chunkRow);
-
-            try {
-                const bytes = await this.api.uploadSegment(
-                    {
-                        fileId: chunk.serverFileId,
-                        size: 0,
-                        offset: chunk.offset,
-                        sequence: chunk.chunkIndex,
-                        length: chunk.size,
-                        fsPath: chunk.fsPath,
-                    },
-                    chunk.uploadToken,
-                    signal,
-                    (transferredBytes) => {
-                        if (!signal.aborted) {
-                            this.metrics.setChunkTransferProgress(
-                                chunk.fileId,
-                                chunk.chunkIndex,
-                                transferredBytes,
-                            );
-                        }
-                    },
-                );
-
-                this.repository.markChunkCompleted(chunkRow, bytes);
-                this.repository.addFileUploadedBytes(chunk.fileId, bytes);
-                this.metrics.completeChunk(chunk.fileId, chunk.chunkIndex);
-                state.remaining -= 1;
-                this.releaseChunk(chunk.collectionId);
-                await this.afterChunkSettled(chunk.collectionId);
-                return;
-            } catch (error) {
-                this.metrics.clearChunk(chunk.fileId, chunk.chunkIndex);
-
-                if (isAbortError(error) || signal.aborted) {
-                    this.repository.markChunkPending(chunk.fileId, chunk.chunkIndex);
-                    this.releaseChunk(chunk.collectionId);
+        file.queued.delete(chunk.sequence);
+        if (!this.isCurrentChunk(file, collection, chunk)) {
+            return;
+        }
+        file.inFlight += 1;
+        file.inFlightSequences.add(chunk.sequence);
+        try {
+            const settings = await this.getSettings();
+            const row: UploadChunkRow = {
+                collectionId: chunk.collectionId,
+                fileId: chunk.localFileId,
+                chunkIndex: chunk.sequence,
+                offset: chunk.offset,
+                size: chunk.length,
+                status: "uploading",
+                uploadedBytes: 0,
+                attempts: 0,
+                updatedAt: new Date().toISOString(),
+                error: null,
+            };
+            this.metrics.registerFile(chunk.collectionId, chunk.localFileId);
+            let attempt = 1;
+            let slowReconnects = 0;
+            while (attempt <= settings.maxChunkRetries + 1) {
+                if (!this.isCurrentChunk(file, collection, chunk)) {
+                    this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
                     return;
                 }
-
-                const message = toErrorMessage(error);
-                if (attempt < maxAttempts) {
-                    this.kd.logger.warn(
-                        {
-                            channel: "segment-upload",
-                            collectionId: chunk.collectionId,
-                            fileId: chunk.fileId,
-                            chunkIndex: chunk.chunkIndex,
-                            offset: chunk.offset,
-                            size: chunk.size,
-                            attempt,
-                            maxRetries: settings.maxChunkRetries,
-                            message,
-                        },
-                        "UploadService:uploadSegment",
-                    );
-                    this.repository.markChunkPending(chunk.fileId, chunk.chunkIndex);
-                    try {
-                        await sleepWithAbort(chunkBackoffMs(attempt), signal);
-                    } catch (abortError) {
-                        if (isAbortError(abortError) || signal.aborted) {
-                            this.releaseChunk(chunk.collectionId);
-                            return;
-                        }
-                        throw abortError;
-                    }
-                    attempt += 1;
-                    continue;
+                const persistedFile = this.repository.getFile(chunk.localFileId);
+                const persistedCollection = this.repository.getCollection(chunk.collectionId);
+                if (persistedFile?.status === "pending") {
+                    this.repository.markFileStatus(chunk.localFileId, "uploading");
                 }
-
-                this.kd.logger.error(
-                    {
-                        channel: "segment-upload",
-                        collectionId: chunk.collectionId,
-                        fileId: chunk.fileId,
-                        chunkIndex: chunk.chunkIndex,
-                        offset: chunk.offset,
-                        size: chunk.size,
-                        attempt,
-                        maxRetries: settings.maxChunkRetries,
+                if (persistedCollection?.status === "queued") {
+                    this.repository.markCollectionStatus(chunk.collectionId, "uploading");
+                }
+                this.repository.markChunkUploading(row);
+                const attemptController = new AbortController();
+                const onAbort = () => attemptController.abort();
+                file.controller.signal.addEventListener("abort", onAbort, { once: true });
+                let stalled = false;
+                let stallTimer = setTimeout(() => {
+                    stalled = true;
+                    attemptController.abort();
+                }, STALL_TIMEOUT_MS);
+                const resetStallTimer = () => {
+                    clearTimeout(stallTimer);
+                    stallTimer = setTimeout(() => {
+                        stalled = true;
+                        attemptController.abort();
+                    }, STALL_TIMEOUT_MS);
+                };
+                try {
+                    const bytes = await this.api.uploadSegment(
+                        chunk,
+                        persistedCollection?.uploadToken ?? "",
+                        attemptController.signal,
+                        (transferred) => {
+                            this.metrics.setChunkTransferProgress(
+                                chunk.localFileId,
+                                chunk.sequence,
+                                transferred,
+                            );
+                            resetStallTimer();
+                        },
+                    );
+                    clearTimeout(stallTimer);
+                    file.controller.signal.removeEventListener("abort", onAbort);
+                    if (file.failed || collection.failed || file.generation !== chunk.generation) {
+                        return;
+                    }
+                    this.repository.markChunkCompleted(row, bytes);
+                    this.repository.addFileUploadedBytes(chunk.localFileId, bytes);
+                    file.completed.add(chunk.sequence);
+                    this.metrics.completeChunk(chunk.localFileId, chunk.sequence);
+                    return;
+                } catch (error) {
+                    clearTimeout(stallTimer);
+                    file.controller.signal.removeEventListener("abort", onAbort);
+                    this.metrics.clearChunk(chunk.localFileId, chunk.sequence);
+                    if (!this.isCurrentChunk(file, collection, chunk)) {
+                        this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
+                        return;
+                    }
+                    if (error instanceof UploadSessionExpiredError) {
+                        await this.failCollection(
+                            chunk.collectionId,
+                            "expired",
+                            error.message,
+                            chunk.localFileId,
+                        );
+                        return;
+                    }
+                    if (error instanceof UploadSourceChangedError) {
+                        await this.failCollection(
+                            chunk.collectionId,
+                            "error",
+                            error.message,
+                            chunk.localFileId,
+                        );
+                        return;
+                    }
+                    if (stalled && slowReconnects < MAX_SLOW_RECONNECTS) {
+                        slowReconnects += 1;
+                        this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
+                        this.kd.logger.warn(
+                            {
+                                collectionId: chunk.collectionId,
+                                fileId: chunk.localFileId,
+                                chunkIndex: chunk.sequence,
+                                slowReconnects,
+                            },
+                            "UploadScheduler:slowChunkReconnect",
+                        );
+                        continue;
+                    }
+                    const message = toErrorMessage(error);
+                    if (isAbortError(error) || file.controller.signal.aborted) {
+                        this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
+                        return;
+                    }
+                    if (attempt <= settings.maxChunkRetries) {
+                        this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
+                        this.kd.logger.warn(
+                            {
+                                collectionId: chunk.collectionId,
+                                fileId: chunk.localFileId,
+                                chunkIndex: chunk.sequence,
+                                attempt,
+                                message,
+                            },
+                            "UploadScheduler:retryChunk",
+                        );
+                        await sleepWithAbort(chunkBackoffMs(attempt), file.controller.signal);
+                        attempt += 1;
+                        continue;
+                    }
+                    this.repository.markChunkError(row, message);
+                    await this.failCollection(
+                        chunk.collectionId,
+                        "error",
                         message,
-                        rollback: "chunk marked error; collection will be marked error",
-                    },
-                    "UploadService:uploadSegment",
-                );
-                this.repository.markChunkError(chunkRow, message);
-                this.repository.markFileStatus(chunk.fileId, "error", message);
-                state.failed = true;
-                this.releaseChunk(chunk.collectionId);
-                await this.afterChunkSettled(chunk.collectionId);
-                return;
+                        chunk.localFileId,
+                    );
+                    return;
+                }
             }
-        }
-    }
-
-    private releaseChunk(collectionId: string) {
-        const state = this.states.get(collectionId);
-        if (state) {
-            state.inFlight -= 1;
+        } finally {
+            file.inFlightSequences.delete(chunk.sequence);
+            file.inFlight -= 1;
+            await this.afterChunkSettled(chunk.collectionId);
         }
     }
 
     private async afterChunkSettled(collectionId: string) {
-        const state = this.states.get(collectionId);
-        if (!state || state.inFlight > 0) {
+        const collection = this.collections.get(collectionId);
+        if (!collection) {
             return;
         }
-
-        if (state.failed) {
-            this.repository.recomputeCollectionStatus(collectionId);
-            await this.emitUpdate(collectionId);
-            await this.kd.service.transfer.refreshPowerSaveBlock();
+        if (collection.failed) {
+            if (
+                [...collection.fileIds].every(
+                    (fileId) => (this.files.get(fileId)?.inFlight ?? 0) === 0,
+                )
+            ) {
+                this.deactivateCollection(collectionId);
+            }
             return;
         }
-
-        if (state.remaining > 0) {
-            // All queued chunks drained but remaining > 0 means the queue was
-            // refilled on resume; reschedule.
-            void this.schedule();
+        if (
+            [...collection.fileIds].some((fileId) => {
+                const file = this.files.get(fileId);
+                return file && file.completed.size !== file.chunks.length;
+            })
+        ) {
             return;
         }
-
+        if ([...collection.fileIds].some((fileId) => (this.files.get(fileId)?.inFlight ?? 0) > 0)) {
+            return;
+        }
         await this.finalizeCollection(collectionId);
     }
 
     private async finalizeCollection(collectionId: string) {
-        const state = this.states.get(collectionId);
-        if (!state || state.completing) {
+        const state = this.collections.get(collectionId);
+        const collection = this.repository.getCollection(collectionId);
+        if (!state || !collection || state.completing || state.failed) {
             return;
         }
         state.completing = true;
-
-        const collection = this.repository.getCollection(collectionId);
-        if (!collection) {
-            return;
-        }
-
         try {
-            for (const file of this.repository.listFiles(collectionId)) {
-                if (file.status !== "completed") {
-                    this.repository.syncFileUploadedBytes(file.id);
-                    this.repository.completeFile(file.id);
-                }
-            }
-
             await this.api.completeCollection(collection.uploadToken);
-
-            const collectionUuid = Buffer.from(collection.collectionUuid, "hex");
-            const shareLink = KioUploadClient.buildShareLink(collectionUuid);
-            this.repository.completeCollection(collectionId, shareLink);
-            this.stopCollectionTimer(collectionId);
+            this.repository.completeUpload(
+                collectionId,
+                KioUploadClient.buildShareLink(Buffer.from(collection.collectionUuid, "hex")),
+            );
             await this.emitUpdate(collectionId);
         } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "collection-complete",
-                    stage: "complete",
-                    collectionId,
-                    uploadToken: collection.uploadToken.slice(0, 16) + "...",
-                    message: toErrorMessage(error),
-                    rollback: "segments uploaded but completion failed; manual retry needed",
-                },
-                "UploadService:finalizeCollection",
-            );
-            this.repository.markCollectionStatus(collectionId, "error", toErrorMessage(error));
+            state.completing = false;
+            const status = error instanceof UploadSessionExpiredError ? "expired" : "error";
+            this.repository.markCollectionStatus(collectionId, status, toErrorMessage(error));
             await this.emitUpdate(collectionId);
         } finally {
+            this.stopCollectionTimer(collectionId);
             this.deactivateCollection(collectionId);
             await this.kd.service.transfer.refreshPowerSaveBlock();
         }
     }
 
-    private abortCollection(collectionId: string) {
-        this.collectionControllers.get(collectionId)?.abort();
-    }
-
-    private removeCollectionFromQueue(collectionId: string) {
-        const remaining = this.queue.filter((chunk) => chunk.collectionId !== collectionId);
-        this.queue.length = 0;
-        this.queue.push(...remaining);
-
-        const state = this.states.get(collectionId);
-        if (state) {
-            // Re-queue aborted segments by rewinding nextIndex past un-started work.
-            state.nextIndex = 0;
-            state.inFlight = 0;
+    private async failCollection(
+        collectionId: string,
+        status: "error" | "expired",
+        message: string,
+        failedFileId: string,
+    ) {
+        const collection = this.collections.get(collectionId);
+        if (!collection || collection.failed) {
+            return;
         }
-    }
-
-    private findCollectionOfFile(fileId: string): string | null {
-        for (const [collectionId, state] of this.states) {
-            if (state.chunks.some((chunk) => chunk.fileId === fileId)) {
-                return collectionId;
+        collection.failed = true;
+        this.removeQueuedCollection(collectionId);
+        for (const fileId of collection.fileIds) {
+            const file = this.files.get(fileId);
+            if (!file || fileId === failedFileId) {
+                continue;
+            }
+            file.failed = true;
+            file.controller.abort();
+            const persisted = this.repository.getFile(fileId);
+            if (persisted?.status !== "completed") {
+                this.repository.markFileStatus(fileId, "error", message);
             }
         }
-        return null;
+        this.repository.markFileStatus(failedFileId, "error", message);
+        this.repository.markCollectionStatus(collectionId, status, message);
+        await this.emitUpdate(collectionId);
+    }
+
+    private isCurrentChunk(
+        file: FileWorkState,
+        collection: CollectionWorkState,
+        chunk: PendingChunk,
+    ) {
+        return (
+            !file.paused &&
+            !file.failed &&
+            !collection.failed &&
+            !collection.completing &&
+            file.generation === chunk.generation &&
+            !file.controller.signal.aborted
+        );
+    }
+
+    private pauseFileState(fileId: string) {
+        const file = this.files.get(fileId);
+        if (!file) {
+            return;
+        }
+        // Stop scheduling; let in-flight PUTs finish so more segments land on the server.
+        file.paused = true;
+        this.removeQueuedFile(fileId);
+    }
+
+    private resumeFileState(fileId: string) {
+        const file = this.files.get(fileId);
+        if (!file) {
+            return;
+        }
+        if (this.repository.getFile(fileId)?.status === "completed") {
+            return;
+        }
+        file.completed.clear();
+        file.queued.clear();
+        this.metrics.clearFile(fileId);
+        file.paused = false;
+        file.failed = false;
+        file.generation += 1;
+        file.controller = new AbortController();
+    }
+
+    private removeQueuedCollection(collectionId: string) {
+        this.removeFromQueue((chunk) => chunk.collectionId === collectionId);
+    }
+
+    private removeQueuedFile(fileId: string) {
+        this.removeFromQueue((chunk) => chunk.localFileId === fileId);
+    }
+
+    private removeFromQueue(predicate: (chunk: PendingChunk) => boolean) {
+        const retained = this.queue.filter((chunk) => !predicate(chunk));
+        for (const chunk of this.queue) {
+            if (predicate(chunk)) {
+                this.files.get(chunk.localFileId)?.queued.delete(chunk.sequence);
+            }
+        }
+        this.queue.length = 0;
+        this.queue.push(...retained);
+    }
+
+    private hasRunnableFile(collectionId: string) {
+        return [...(this.collections.get(collectionId)?.fileIds ?? [])].some((fileId) => {
+            const file = this.files.get(fileId);
+            return (
+                file && !file.paused && !file.failed && file.completed.size !== file.chunks.length
+            );
+        });
+    }
+
+    private waitForFileIdle(file: FileWorkState) {
+        return new Promise<void>((resolve) => {
+            const timer = setInterval(() => {
+                if (file.inFlight === 0) {
+                    clearInterval(timer);
+                    resolve();
+                }
+            }, 10);
+        });
+    }
+
+    private async waitForCollectionIdle(collectionId: string) {
+        await Promise.all(
+            [...(this.collections.get(collectionId)?.fileIds ?? [])]
+                .map((fileId) => this.files.get(fileId))
+                .filter((file): file is FileWorkState => Boolean(file))
+                .map((file) => this.waitForFileIdle(file)),
+        );
     }
 
     private startCollectionTracking(collectionId: string) {
@@ -518,12 +776,12 @@ export class UploadScheduler {
     }
 
     private stopCollectionTimer(collectionId: string) {
-        const timerStartedAt = this.collectionTimerStartedAt.get(collectionId);
-        if (timerStartedAt === undefined) {
+        const startedAt = this.collectionTimerStartedAt.get(collectionId);
+        if (startedAt === undefined) {
             return;
         }
         this.collectionTimerStartedAt.delete(collectionId);
-        this.repository.addCollectionElapsedMs(collectionId, performance.now() - timerStartedAt);
+        this.repository.addCollectionElapsedMs(collectionId, performance.now() - startedAt);
     }
 
     private deactivateCollection(collectionId: string) {
@@ -544,11 +802,10 @@ export class UploadScheduler {
     }
 
     private stopProgressPollTimer() {
-        if (!this.progressPollTimer) {
-            return;
+        if (this.progressPollTimer) {
+            clearInterval(this.progressPollTimer);
+            this.progressPollTimer = null;
         }
-        clearInterval(this.progressPollTimer);
-        this.progressPollTimer = null;
     }
 
     private stopProgressPollTimerIfIdle() {
@@ -558,18 +815,10 @@ export class UploadScheduler {
     }
 
     private pollProgressUpdates() {
-        try {
-            if (this.activeCollections.size === 0) {
-                this.stopProgressPollTimer();
-                return;
-            }
-            for (const collectionId of this.activeCollections) {
-                void this.emitProgressUpdateOnce(collectionId).catch((error) => {
-                    this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");
-                });
-            }
-        } catch (error) {
-            this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");
+        for (const collectionId of this.activeCollections) {
+            void this.emitProgressUpdateOnce(collectionId).catch((error) => {
+                this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");
+            });
         }
     }
 
@@ -577,7 +826,6 @@ export class UploadScheduler {
         if (this.progressUpdatesInFlight.has(collectionId)) {
             return;
         }
-
         this.progressUpdatesInFlight.add(collectionId);
         try {
             await this.emitProgressUpdate(collectionId);
@@ -593,24 +841,13 @@ export class UploadScheduler {
     }
 
     private waitForWork() {
-        return new Promise<void>((resolve) => {
-            this.waiters.push(resolve);
-        });
+        return new Promise<void>((resolve) => this.waiters.push(resolve));
     }
 
     private async getSettings(): Promise<SchedulerSettings> {
         return {
-            maxWorkers: MAX_UPLOAD_THREADS,
+            maxWorkers: clampSegmentPoolSize(await this.kd.setting.transfer.getSegmentPoolSize()),
             maxChunkRetries: clampChunkRetries(await this.kd.setting.transfer.getMaxChunkRetries()),
         };
     }
 }
-
-type WorkItem = {
-    fileId: Buffer;
-    size: number;
-    offset: number;
-    sequence: number;
-    length: number;
-    fsPath: string;
-};

@@ -27,6 +27,7 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useRemoveUpload } from "./remove-upload";
 import { UploadCard } from "./upload-card";
 
 type UploadFilter = "all" | "active" | "completed";
@@ -44,7 +45,6 @@ export function UploadList({
 }) {
   const [selectedId, setSelectedId] = React.useState<string | null>(items[0]?.id ?? null);
   const [filter, setFilter] = React.useState<UploadFilter>("all");
-  const [removing, setRemoving] = React.useState(false);
 
   React.useEffect(() => {
     if (!focusUploadId) return;
@@ -74,6 +74,7 @@ export function UploadList({
   }, [filtered, selectedId]);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
+  const { remove, dialog, removing } = useRemoveUpload();
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {
     try {
@@ -83,19 +84,6 @@ export function UploadList({
       toast.error("작업을 완료하지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
       });
-    }
-  };
-
-  const handleRemove = async (item: UploadItem) => {
-    setRemoving(true);
-    try {
-      await window.api.invoke("upload:remove", item.id);
-    } catch (error) {
-      toast.error("삭제하지 못했습니다", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setRemoving(false);
     }
   };
 
@@ -200,7 +188,7 @@ export function UploadList({
                     <ContextMenuItem
                       variant="destructive"
                       disabled={removing}
-                      onClick={() => handleRemove(item)}
+                      onClick={() => remove(item)}
                     >
                       <Trash2Icon />
                       삭제
@@ -216,11 +204,13 @@ export function UploadList({
       <div className="flex-1">
         <UploadDetail
           item={selected}
-          onRemove={handleRemove}
+          onRemove={remove}
           removing={removing}
           onCopyLink={handleCopyLink}
+          onNewUpload={onNewUpload}
         />
       </div>
+      {dialog}
     </div>
   );
 }
@@ -230,11 +220,13 @@ function UploadDetail({
   onRemove,
   removing,
   onCopyLink,
+  onNewUpload,
 }: {
   item: UploadItem | null;
   onRemove: (item: UploadItem) => void;
   removing: boolean;
   onCopyLink: (item: UploadItem) => void;
+  onNewUpload: () => void;
 }) {
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
 
@@ -273,15 +265,13 @@ function UploadDetail({
       ? formatTime(item.elapsedMs / 1000, navigator.language)
       : null;
 
-  const expiresLabel = item.eternal
-    ? "만료 없음"
-    : new Date(item.expires).toLocaleString("ko-KR", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
+  const expiresLabel = new Date(item.expires).toLocaleString("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
   return (
     <div className="flex h-full flex-col">
@@ -293,7 +283,17 @@ function UploadDetail({
               {item.shareLink ? (
                 <span className="flex items-center gap-1 font-mono">
                   <LinkIcon className="size-3" />
-                  {item.shareLink}
+                  <button
+                    type="button"
+                    className="truncate text-primary underline underline-offset-2 hover:opacity-80"
+                    onClick={() =>
+                      runAction("open", () =>
+                        window.api.invoke("util:openExternal", item.shareLink!),
+                      )
+                    }
+                  >
+                    {item.shareLink}
+                  </button>
                 </span>
               ) : (
                 <span className="text-muted-foreground/60">링크 생성 대기 중</span>
@@ -398,11 +398,43 @@ function UploadDetail({
             </span>
           </div>
         </div>
+
+        {status === "expired" && (
+          <div className="flex items-center justify-between gap-3 rounded-md border border-muted-foreground/20 bg-muted/50 px-3 py-2 text-xs">
+            <div>
+              <p className="font-medium">업로드 세션이 만료되었습니다</p>
+              <p className="mt-0.5 text-muted-foreground">
+                기존 파일을 재사용하지 않습니다. 새 업로드에서 파일을 다시 선택하세요.
+              </p>
+            </div>
+            <Button size="xs" variant="outline" onClick={onNewUpload}>
+              새 업로드 만들기
+            </Button>
+          </div>
+        )}
+
+        {status === "error" && item.error && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {item.error}
+          </div>
+        )}
       </div>
 
       <ScrollArea className="flex-1">
         <div className="p-2">
-          <UploadFileList progress={progress} />
+          <UploadFileList
+            collectionStatus={status}
+            pendingAction={pendingAction}
+            progress={progress}
+            onPauseFile={(fileId) =>
+              runAction("file", () => window.api.invoke("upload:pauseFile", item.id, fileId))
+            }
+            onResumeFile={(fileId, force) =>
+              runAction("file", () =>
+                window.api.invoke("upload:resumeFile", item.id, fileId, { force }),
+              )
+            }
+          />
         </div>
       </ScrollArea>
 
@@ -418,7 +450,19 @@ function UploadDetail({
   );
 }
 
-function UploadFileList({ progress }: { progress: UploadItem["progress"] }) {
+function UploadFileList({
+  collectionStatus,
+  pendingAction,
+  progress,
+  onPauseFile,
+  onResumeFile,
+}: {
+  collectionStatus: UploadItem["status"];
+  pendingAction: string | null;
+  progress: UploadItem["progress"];
+  onPauseFile: (fileId: string) => void;
+  onResumeFile: (fileId: string, force: boolean) => void;
+}) {
   const entries = Object.values(progress).sort((a, b) => a.path.localeCompare(b.path));
 
   if (entries.length === 0) {
@@ -431,47 +475,80 @@ function UploadFileList({ progress }: { progress: UploadItem["progress"] }) {
         const pct = file.size > 0 ? Math.min(100, (file.uploaded / file.size) * 100) : 100;
         const speedLabel = file.status === "uploading" ? formatSpeed(file.speedBps) : null;
         return (
-          <div
-            key={file.fileId}
-            className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/40"
-          >
-            <span className="min-w-0 flex-1 truncate" title={file.path}>
-              {file.path}
-            </span>
-            <span className="shrink-0 tabular-nums text-muted-foreground">
-              {formatSize(file.uploaded)} / {formatSize(file.size)}
-            </span>
-            <span
-              className={cn(
-                "w-[5.5rem] shrink-0 whitespace-nowrap text-right tabular-nums",
-                speedLabel ? "text-primary" : "invisible",
-              )}
-            >
-              {speedLabel ?? "0 B/s"}
-            </span>
-            <span
-              className={cn(
-                "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                file.status === "completed"
-                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+          <React.Fragment key={file.fileId}>
+            <div className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/40">
+              <span className="min-w-0 flex-1 truncate" title={file.path}>
+                {file.path}
+              </span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatSize(file.uploaded)} / {formatSize(file.size)}
+              </span>
+              <span
+                className={cn(
+                  "w-[5.5rem] shrink-0 whitespace-nowrap text-right tabular-nums",
+                  speedLabel ? "text-primary" : "invisible",
+                )}
+              >
+                {speedLabel ?? "0 B/s"}
+              </span>
+              <span
+                className={cn(
+                  "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                  file.status === "completed"
+                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                    : file.status === "error"
+                      ? "bg-destructive/10 text-destructive"
+                      : file.status === "uploading"
+                        ? "bg-primary/10 text-primary"
+                        : "bg-muted text-muted-foreground",
+                )}
+              >
+                {file.status === "completed"
+                  ? "완료"
                   : file.status === "error"
-                    ? "bg-destructive/10 text-destructive"
+                    ? "오류"
                     : file.status === "uploading"
-                      ? "bg-primary/10 text-primary"
-                      : "bg-muted text-muted-foreground",
-              )}
-            >
-              {file.status === "completed"
-                ? "완료"
-                : file.status === "error"
-                  ? "오류"
-                  : file.status === "uploading"
-                    ? `${pct.toFixed(0)}%`
-                    : file.status === "paused"
-                      ? "일시정지"
-                      : "대기"}
-            </span>
-          </div>
+                      ? `${pct.toFixed(0)}%`
+                      : file.status === "paused"
+                        ? "일시정지"
+                        : "대기"}
+              </span>
+              <div className="flex w-5 shrink-0 items-center justify-end">
+                {file.status === "uploading" ? (
+                  <button
+                    type="button"
+                    className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                    disabled={pendingAction === "file"}
+                    onClick={() => onPauseFile(file.fileId)}
+                    title="일시정지"
+                  >
+                    <PauseIcon className="size-3" />
+                  </button>
+                ) : (file.status === "paused" ||
+                    file.status === "pending" ||
+                    file.status === "error") &&
+                  collectionStatus !== "expired" ? (
+                  <button
+                    type="button"
+                    className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                    disabled={pendingAction === "file"}
+                    onClick={() => onResumeFile(file.fileId, file.status === "error")}
+                    title={file.status === "error" ? "재시도" : "시작"}
+                  >
+                    <PlayIcon className="size-3" />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            {file.error && (
+              <p
+                className="-mt-0.5 truncate px-2 pb-1 text-[10px] text-destructive"
+                title={file.error}
+              >
+                {file.error}
+              </p>
+            )}
+          </React.Fragment>
         );
       })}
     </div>

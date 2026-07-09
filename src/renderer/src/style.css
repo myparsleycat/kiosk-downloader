@@ -140,3 +140,7 @@
 .titlebar :is(button, a, input, label, select, textarea, [role="tablist"], [role="tab"]) {
     -webkit-app-region: no-drag;
 }
+
+button {
+    cursor: pointer;
+}

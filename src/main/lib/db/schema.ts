@@ -48,7 +48,7 @@ export type TableSpec = {
     foreignKeys?: TableForeignKeySpec[];
 };
 
-export const APP_SCHEMA_VERSION = 3;
+export const APP_SCHEMA_VERSION = 4;
 
 export const TABLE_SPECS: TableSpec[] = [
     {
@@ -184,7 +184,7 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "collection_uuid", type: "TEXT", notNull: true },
             { name: "upload_token", type: "TEXT", notNull: true },
             { name: "tree_json", type: "TEXT", notNull: true },
-            { name: "eternal", type: "INTEGER", notNull: true, defaultSql: "0", boolean: true },
+            { name: "segment_size", type: "INTEGER", notNull: true, defaultSql: "16777216" },
             { name: "expires", type: "INTEGER", notNull: true },
             { name: "status", type: "TEXT", notNull: true },
             { name: "created_at", type: "TEXT", notNull: true },
@@ -207,6 +207,7 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "name", type: "TEXT", notNull: true },
             { name: "size", type: "INTEGER", notNull: true },
             { name: "fs_path", type: "TEXT", notNull: true },
+            { name: "source_mtime_ms", type: "INTEGER", notNull: true },
             { name: "status", type: "TEXT", notNull: true },
             { name: "uploaded_bytes", type: "INTEGER", notNull: true, defaultSql: "0" },
             {
