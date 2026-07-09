@@ -148,7 +148,8 @@ function buildRequestTree(files: UploadSourceFile[]): BuiltTree {
         const dir = ensureDir(dirSegments);
 
         const fileId = randomUuidBytes();
-        dir.files.push({ id: fileId, name: fileName, size: file.size });
+        // Server CreateRequest expects CBOR uint64 (bigint), not JS number.
+        dir.files.push({ id: fileId, name: fileName, size: BigInt(file.size) });
         filesByRelativePath.set(relativePath, { ...file, path: relativePath });
     }
 
@@ -260,7 +261,8 @@ export class KioUploadClient {
             description: options.description.slice(0, 2500),
             protector,
             root,
-            segment_size: UPLOAD_SEGMENT_SIZE,
+            segment_size: BigInt(UPLOAD_SEGMENT_SIZE),
+            eternal: false,
             expires: new Date(options.expires),
         };
 

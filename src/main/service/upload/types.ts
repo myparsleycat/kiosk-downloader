@@ -24,7 +24,7 @@ export type UploadRequestDir = {
 export type UploadRequestFile = {
     id: Buffer;
     name: string;
-    size: number;
+    size: bigint;
 };
 
 // Server-assigned tree echoed back by collection/create with new ids.
