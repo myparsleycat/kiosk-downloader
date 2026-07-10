@@ -18,6 +18,7 @@ import fse from "fs-extra";
 import type { KioskDownloader } from "../..";
 import type { DownloadCollectionRow, DownloadFileRow } from "./types";
 
+import { toOsProgressTransfer } from "../os-progress-bar";
 import { KioApiClient } from "./kio-api-client";
 import { DownloadTransferMetrics } from "./metrics";
 import { PartFileWriter } from "./part-file";
@@ -66,6 +67,18 @@ export class DownloadService {
 
     public hasActiveTransfers() {
         return this.scheduler.hasActiveTransfers();
+    }
+
+    public listOsProgressTransfers() {
+        return this.repository.listOsProgressRows().map((row) =>
+            toOsProgressTransfer({
+                status: row.status,
+                transferredBytes:
+                    Number(row.transferredBytes) +
+                    this.metrics.getCollectionSnapshot(row.id).activeTransferredBytes,
+                totalBytes: Number(row.totalBytes),
+            }),
+        );
     }
 
     public destroy() {
@@ -442,6 +455,7 @@ export class DownloadService {
             updatedAt: Date.parse(collection.updatedAt),
         };
         this.kd.ipc.sendToMainWindow("download:progress-update", patch);
+        this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
     private async emitUpdate(collectionId?: string, options: { sampleSpeeds?: boolean } = {}) {
@@ -453,6 +467,7 @@ export class DownloadService {
                     this.enrichItem(item, options),
                 );
             }
+            this.kd.service.transfer.syncMainWindowProgressBar();
             return;
         }
 
@@ -460,5 +475,6 @@ export class DownloadService {
             "download:update",
             this.repository.listItems().map((item) => this.enrichItem(item, options)),
         );
+        this.kd.service.transfer.syncMainWindowProgressBar();
     }
 }

@@ -21,6 +21,7 @@ import fse from "fs-extra";
 import type { KioskDownloader } from "../..";
 import type { ServerFileMapping, UploadSourceFile } from "./types";
 
+import { toOsProgressTransfer } from "../os-progress-bar";
 import { KioUploadClient } from "./kio-upload-client";
 import { UploadTransferMetrics } from "./metrics";
 import { UploadRepository } from "./repository";
@@ -286,6 +287,18 @@ export class UploadService {
         return this.scheduler.hasActiveTransfers();
     }
 
+    public listOsProgressTransfers() {
+        return this.repository.listOsProgressRows().map((row) =>
+            toOsProgressTransfer({
+                status: row.status,
+                transferredBytes:
+                    Number(row.transferredBytes) +
+                    this.metrics.getCollectionSnapshot(row.id).activeTransferredBytes,
+                totalBytes: Number(row.totalBytes),
+            }),
+        );
+    }
+
     public async restoreStartupState() {
         const mode = await this.kd.setting.transfer.getUploadStartupResumeMode();
         this.repository.restoreStartupState(mode);
@@ -459,6 +472,7 @@ export class UploadService {
             updatedAt: Date.parse(collection.updatedAt),
         };
         this.kd.ipc.sendToMainWindow("upload:progress-update", patch);
+        this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
     private async emitUpdate(collectionId?: string, options: { sampleSpeeds?: boolean } = {}) {
@@ -467,6 +481,7 @@ export class UploadService {
             if (item) {
                 this.kd.ipc.sendToMainWindow("upload:item-update", this.enrichItem(item, options));
             }
+            this.kd.service.transfer.syncMainWindowProgressBar();
             return;
         }
 
@@ -474,6 +489,7 @@ export class UploadService {
             "upload:update",
             this.repository.listItems().map((item) => this.enrichItem(item, options)),
         );
+        this.kd.service.transfer.syncMainWindowProgressBar();
     }
 }
 

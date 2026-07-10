@@ -138,6 +138,25 @@ export class UploadRepository {
         );
     }
 
+    public listOsProgressRows() {
+        return this.kd.lib.db.all<{
+            id: string;
+            status: UploadStatus;
+            transferredBytes: number;
+            totalBytes: number;
+        }>(
+            `SELECT c."id" AS "id",
+                    c."status" AS "status",
+                    COALESCE(SUM(f."uploaded_bytes"), 0) AS "transferredBytes",
+                    COALESCE(SUM(f."size"), 0) AS "totalBytes"
+             FROM "upload_collection" c
+             LEFT JOIN "upload_file" f ON f."collection_id" = c."id"
+             WHERE c."status" NOT IN ('completed', 'expired')
+             GROUP BY c."id"
+             ORDER BY c."created_at" ASC`,
+        );
+    }
+
     public listFiles(collectionId: string): UploadFileRow[] {
         return this.kd.lib.db.all<UploadFileRow>(
             fileSelectSql() + ` WHERE "collection_id" = ? ORDER BY "path" ASC`,

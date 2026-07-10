@@ -1,15 +1,27 @@
 import type { KioskDownloader } from "..";
 
+import { syncMainWindowProgressBar } from "./os-progress-bar";
+
 export class TransferService {
     private isPowerSaveBlockerActive = false;
 
     public constructor(private readonly kd: KioskDownloader) {}
+
+    public syncMainWindowProgressBar() {
+        const transfers = [
+            ...this.kd.service.download.listOsProgressTransfers(),
+            ...this.kd.service.upload.listOsProgressTransfers(),
+        ];
+        syncMainWindowProgressBar(this.kd.window.main.window, transfers);
+    }
 
     public async refreshPowerSaveBlock() {
         const shouldBlock =
             (this.kd.service.download.hasActiveTransfers() ||
                 this.kd.service.upload.hasActiveTransfers()) &&
             (await this.kd.setting.general.getPowerSaveBlockInTransfer());
+
+        this.syncMainWindowProgressBar();
 
         if (shouldBlock && !this.isPowerSaveBlockerActive) {
             try {

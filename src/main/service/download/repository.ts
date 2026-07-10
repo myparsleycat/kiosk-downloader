@@ -311,6 +311,27 @@ export class DownloadRepository {
         );
     }
 
+    public listOsProgressRows() {
+        return this.kd.lib.db.all<{
+            id: string;
+            status: DownloadStatus;
+            transferredBytes: number;
+            totalBytes: number;
+        }>(
+            `SELECT c."id" AS "id",
+                    c."status" AS "status",
+                    COALESCE(SUM(CASE WHEN f."selected" = 1 THEN f."downloaded_bytes" ELSE 0 END), 0)
+                        AS "transferredBytes",
+                    COALESCE(SUM(CASE WHEN f."selected" = 1 THEN f."size" ELSE 0 END), 0)
+                        AS "totalBytes"
+             FROM "download_collection" c
+             LEFT JOIN "download_file" f ON f."collection_id" = c."id"
+             WHERE c."status" NOT IN ('completed', 'expired')
+             GROUP BY c."id"
+             ORDER BY c."created_at" ASC`,
+        );
+    }
+
     public listFiles(collectionId: string) {
         return this.kd.lib.db.all<DownloadFileRow>(
             `SELECT "id",
