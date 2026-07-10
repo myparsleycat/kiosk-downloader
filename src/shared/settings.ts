@@ -55,8 +55,9 @@ export const INFLATE_BUFFER_BYTES_OPTIONS = [
     2 * 1024 * 1024,
     4 * 1024 * 1024,
     8 * 1024 * 1024,
+    16 * 1024 * 1024,
 ] as const;
-export const INFLATE_BUFFER_BYTES_DEFAULT = 4 * 1024 * 1024;
+export const INFLATE_BUFFER_BYTES_DEFAULT = 8 * 1024 * 1024;
 
 export const BANDWIDTH_LIMIT_MIBPS_MIN = 0;
 export const BANDWIDTH_LIMIT_MIBPS_MAX = 1024;
