@@ -1,3 +1,32 @@
+# [1.3.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.2.0...v1.3.0) (2026-07-10)
+
+
+### Bug Fixes
+
+* **download:** preserve and resume partial chunks ([7bbbb84](https://github.com/myparsleycat/kiosk-downloader/commit/7bbbb84e18f35b03b0461f44c50f7e09bf95d114))
+* **settings:** default asciiFilenames to off ([b88db69](https://github.com/myparsleycat/kiosk-downloader/commit/b88db695872d8c1766e2e669aba2cf597801dd96))
+* **upload:** encode collection create sizes as bigint ([cf3c9c2](https://github.com/myparsleycat/kiosk-downloader/commit/cf3c9c2ea4ff3bba3bb267fb0afbd42f1ab661bb))
+* **upload:** preserve completed files and elapsed time on pause ([f34fe46](https://github.com/myparsleycat/kiosk-downloader/commit/f34fe469b3ecbcbb0926b27b0b0a9b962fdc573b))
+
+
+### Features
+
+* auto-paste share URL into new download tab ([d8e6c89](https://github.com/myparsleycat/kiosk-downloader/commit/d8e6c89c32c9fc45e15d87a04a32539703a7ed68))
+* **download:** add ASCII filename sanitization setting ([a3c0cff](https://github.com/myparsleycat/kiosk-downloader/commit/a3c0cffecc4563eec6b9525694d1920eabe97334))
+* **download:** add transfer.it share download support ([7a98450](https://github.com/myparsleycat/kiosk-downloader/commit/7a984509e39934c219b4c1bb994aaafeb20ea6f1))
+* **download:** browse and selectively extract ZIP entries ([76549ea](https://github.com/myparsleycat/kiosk-downloader/commit/76549ea5607c1c7925da942684bcbd3f9d614cf8))
+* **settings:** separate upload queue retry and resume settings ([94c44d5](https://github.com/myparsleycat/kiosk-downloader/commit/94c44d5ef1ab17b64ed514008d5577c5b14b725a))
+* **transfer:** add download and upload bandwidth limits ([46eea8f](https://github.com/myparsleycat/kiosk-downloader/commit/46eea8fced83442b7e6c31f1a0766ff564aa17f5))
+* **transfer:** show OS taskbar progress for uploads and downloads ([d84a2fa](https://github.com/myparsleycat/kiosk-downloader/commit/d84a2faf963566e5a8c2267868763c3284a708bd))
+* **upload:** add upload feature with kio.ac collection creation ([db38fee](https://github.com/myparsleycat/kiosk-downloader/commit/db38fee94e921c35a40527a6674e2fdf6d4e222c))
+* **upload:** show file tree and error details in upload UI ([b704edc](https://github.com/myparsleycat/kiosk-downloader/commit/b704edcb06d891e1e2c0b3818f38bb5896d18795))
+* **upload:** track real-time upload progress with streaming ([3b44269](https://github.com/myparsleycat/kiosk-downloader/commit/3b44269e44f9e1a51eab47546e6c2363c033a4b2))
+
+
+### Performance Improvements
+
+* **transfer:** batch incremental progress updates ([dcb6398](https://github.com/myparsleycat/kiosk-downloader/commit/dcb6398140d952aff8994a9030378a24719091af))
+
 # [1.2.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.1.0...v1.2.0) (2026-07-09)
 
 
