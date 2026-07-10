@@ -82,7 +82,7 @@ export class MainWindow {
             theme === "dark" || (theme === "system" && nativeTheme.shouldUseDarkColors);
 
         this.window = new BrowserWindow({
-            title: "Nahida Desktop",
+            title: "Kiosk Desktop",
             x: bounds?.x || undefined,
             y: bounds?.y || undefined,
             width: bounds?.width || 1200,
