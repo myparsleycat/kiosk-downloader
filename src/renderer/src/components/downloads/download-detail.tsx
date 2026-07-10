@@ -122,7 +122,7 @@ export function DownloadDetail({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {status === "downloading" ? (
+            {status === "downloading" || status === "inflating" ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -255,6 +255,8 @@ function statusLabel(status: DownloadItem["status"]): string {
   switch (status) {
     case "downloading":
       return "다운로드 중";
+    case "inflating":
+      return "해제 중";
     case "paused":
       return "일시정지";
     case "completed":

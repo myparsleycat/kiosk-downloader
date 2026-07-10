@@ -18,6 +18,11 @@ export function getPartDigestPath(partPath: string) {
     return `${partPath}.crc`;
 }
 
+/** Staging file for deflate compressed payload (`file.part` → `file.part.z`). */
+export function getStagingPartPath(partPath: string) {
+    return `${partPath}.z`;
+}
+
 export class PartFileWriter {
     private handle: FileHandle | null = null;
     private digestHandle: FileHandle | null = null;
@@ -63,10 +68,15 @@ export class PartFileWriter {
             onTransferProgress?: (transferredBytes: number) => void;
             onWriteProgress?: (writtenBytes: number) => void;
         },
+        options?: { alreadyWritten?: number },
     ) {
+        const alreadyWritten = Math.max(
+            0,
+            Math.min(expectedSize, Math.floor(options?.alreadyWritten ?? 0)),
+        );
         let transferred = 0;
-        let written = 0;
-        let crc = 0;
+        let written = alreadyWritten;
+        let crc = alreadyWritten > 0 ? await this.readCrcSeed(offset, alreadyWritten) : 0;
         const pending: Uint8Array[] = [];
         let pendingBytes = 0;
 
@@ -89,7 +99,7 @@ export class PartFileWriter {
                 await this.writePartialInternal(writeOffset, batch);
                 crc = crc32(batch, crc);
                 written += batch.length;
-                callbacks?.onWriteProgress?.(written);
+                callbacks?.onWriteProgress?.(written - alreadyWritten);
             }
 
             if (written + pendingBytes >= expectedSize) {
@@ -102,12 +112,12 @@ export class PartFileWriter {
             await this.writePartialInternal(offset + written, batch);
             crc = crc32(batch, crc);
             written += batch.length;
-            callbacks?.onWriteProgress?.(written);
+            callbacks?.onWriteProgress?.(written - alreadyWritten);
         }
 
         if (written < expectedSize) {
             throw new Error(
-                `Segment ${chunkIndex} returned ${written}B, expected ${expectedSize}B.`,
+                `Segment ${chunkIndex} returned ${written - alreadyWritten}B, expected ${expectedSize - alreadyWritten}B.`,
             );
         }
 
@@ -172,6 +182,32 @@ export class PartFileWriter {
         const digestBuffer = Buffer.allocUnsafe(CRC_BYTES);
         digestBuffer.writeUInt32BE(digest, 0);
         await this.digestHandle.write(digestBuffer, 0, CRC_BYTES, chunkIndex * CRC_BYTES);
+    }
+
+    private async readCrcSeed(offset: number, length: number) {
+        if (!this.handle) {
+            throw new Error("Part file is not open.");
+        }
+
+        let crc = 0;
+        let readOffset = offset;
+        let remaining = length;
+        const buffer = Buffer.allocUnsafe(Math.min(remaining, 1024 * 1024));
+
+        while (remaining > 0) {
+            const toRead = Math.min(remaining, buffer.length);
+            const result = await this.handle.read(buffer, 0, toRead, readOffset);
+            if (result.bytesRead !== toRead) {
+                throw new Error(
+                    `Part file is shorter than resume offset: expected ${toRead}B at ${readOffset}, got ${result.bytesRead}B.`,
+                );
+            }
+            crc = crc32(buffer.subarray(0, toRead), crc);
+            readOffset += toRead;
+            remaining -= toRead;
+        }
+
+        return crc;
     }
 }
 

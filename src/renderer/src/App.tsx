@@ -54,7 +54,7 @@ function MainComponent() {
 
   const downloadActivity = React.useMemo(
     () =>
-      downloads.some((item) => item.status === "downloading")
+      downloads.some((item) => item.status === "downloading" || item.status === "inflating")
         ? "active"
         : downloads.some((item) => item.status === "paused")
           ? "paused"

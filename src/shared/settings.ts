@@ -20,6 +20,7 @@ export interface AppSettings {
     "transfer.maxChunkRetries": number;
     "transfer.uploadMaxChunkRetries": number;
     "transfer.streamWriteBatchBytes": number;
+    "transfer.inflateBufferBytes": number;
     "transfer.startupResumeMode": StartupResumeMode;
     "transfer.uploadStartupResumeMode": StartupResumeMode;
     "transfer.downloadBandwidthLimitMibps": number;
@@ -46,6 +47,14 @@ export const STREAM_WRITE_BATCH_BYTES_OPTIONS = [
     4 * 1024 * 1024,
 ] as const;
 export const STREAM_WRITE_BATCH_BYTES_DEFAULT = 1024 * 1024;
+
+export const INFLATE_BUFFER_BYTES_OPTIONS = [
+    1024 * 1024,
+    2 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+] as const;
+export const INFLATE_BUFFER_BYTES_DEFAULT = 4 * 1024 * 1024;
 
 export const BANDWIDTH_LIMIT_MIBPS_MIN = 0;
 export const BANDWIDTH_LIMIT_MIBPS_MAX = 1024;
@@ -122,6 +131,11 @@ export const APP_SETTINGS = {
         publicKey: "transfer.streamWriteBatchBytes",
         scope: "transfer",
         storageKey: "transfer.streamWriteBatchBytes",
+    },
+    "transfer.inflateBufferBytes": {
+        publicKey: "transfer.inflateBufferBytes",
+        scope: "transfer",
+        storageKey: "transfer.inflateBufferBytes",
     },
     "transfer.startupResumeMode": {
         publicKey: "transfer.startupResumeMode",

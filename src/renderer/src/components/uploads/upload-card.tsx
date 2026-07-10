@@ -1,7 +1,7 @@
 import { cn } from "@renderer/lib/utils";
 import type { UploadItem, UploadStatus } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
-import { ClockIcon, FolderIcon, LockIcon, LinkIcon, TimerIcon } from "lucide-react";
+import { ClockIcon, CopyIcon, FolderIcon, LockIcon, TimerIcon } from "lucide-react";
 import { toast } from "sonner";
 
 export function UploadCard({
@@ -51,16 +51,18 @@ export function UploadCard({
           </div>
           {item.shareLink && (
             <div className="mt-0.5 flex items-center gap-0.5 truncate font-mono text-[10px]">
-              <LinkIcon className="size-2.5 shrink-0 text-muted-foreground" />
+              <CopyIcon className="size-2.5 shrink-0 text-muted-foreground" />
               <span
-                role="link"
+                role="button"
+                title="링크 복사"
                 className="cursor-pointer truncate text-primary underline underline-offset-2"
                 onClick={async (e) => {
                   e.stopPropagation();
                   try {
-                    await window.api.invoke("util:openExternal", item.shareLink!);
+                    await window.api.invoke("upload:copyLink", item.id);
+                    toast.success("링크를 복사했습니다");
                   } catch (error) {
-                    toast.error("링크를 열지 못했습니다", {
+                    toast.error("복사하지 못했습니다", {
                       description: error instanceof Error ? error.message : String(error),
                     });
                   }

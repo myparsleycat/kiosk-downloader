@@ -6,6 +6,7 @@ export type IpcHandlers = {
     "download:includeFile": (...args: any[]) => any;
     "download:includeFolder": (...args: any[]) => any;
     "download:list": () => Promise<import("./types").DownloadItem[]>;
+    "download:listZipEntries": (payload: import("./types").ListZipEntriesPayload) => Promise<import("./types").ListZipEntriesResult>;
     "download:loadCollection": (payload: import("./types").LoadCollectionPayload) => Promise<import("./types").Collection>;
     "download:openFolder": (id: string) => Promise<void>;
     "download:pauseCollection": (id: string) => Promise<void>;

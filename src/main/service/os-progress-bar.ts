@@ -132,6 +132,7 @@ function mapTransferStatus(status: string): OsProgressTransferStatus {
         case "queued":
             return "pending";
         case "downloading":
+        case "inflating":
         case "uploading":
             return "progress";
         case "paused":

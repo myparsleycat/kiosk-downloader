@@ -435,6 +435,7 @@ export class KioUploadClient {
                 "Kiosk-ESUT": token,
             },
             signal,
+            timeout: false,
             retry: { limit: 0 },
             onUploadProgress: (progress) => {
                 onProgress?.(progress.transferredBytes);

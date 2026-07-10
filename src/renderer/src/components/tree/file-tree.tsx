@@ -5,15 +5,19 @@ import type {
   FileNode,
   FileProgress,
   TreeEntry,
+  ZipNode,
 } from "@renderer/lib/types";
+import { getSelectionCheckState } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { useDownloadTreeExpanded } from "@renderer/stores/download-tree-expanded";
 import { formatSize, formatSpeed } from "@shared/utils";
 import {
+  ArchiveIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FileIcon,
   FolderIcon,
+  Loader2Icon,
   PauseIcon,
   PlayIcon,
   Trash2Icon,
@@ -26,6 +30,8 @@ export interface FileTreeSelectionProps {
   selected?: Set<string>;
   onToggle?: (key: string) => void;
   onDelete?: (key: string) => void;
+  onExpandZip?: (key: string, zipId: string) => void | Promise<void>;
+  zipLoadingPaths?: Set<string>;
 }
 
 export interface FileTreeProgressProps {
@@ -113,6 +119,22 @@ function TreeNode({ entry, depth, pathStack, rootKey, props, dirSummaries }: Tre
       />
     );
   }
+
+  if (entry.kind === "zip") {
+    return (
+      <ZipRow
+        node={entry.node as ZipNode}
+        depth={depth}
+        indent={indent}
+        pathStack={pathStack}
+        rootKey={rootKey}
+        props={props}
+        rightCols={rightCols}
+        dirSummaries={dirSummaries}
+      />
+    );
+  }
+
   return (
     <DirRow
       node={entry.node as DirNode}
@@ -260,16 +282,19 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
           />
         </div>,
         <div key="action" className="flex items-center justify-end">
-          {selected && prog && status === "downloading" && onPauseFile && (
-            <button
-              type="button"
-              className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-              onClick={() => onPauseFile(prog.fileId)}
-              title="일시정지"
-            >
-              <PauseIcon className="size-3" />
-            </button>
-          )}
+          {selected &&
+            prog &&
+            (status === "downloading" || status === "inflating") &&
+            onPauseFile && (
+              <button
+                type="button"
+                className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={() => onPauseFile(prog.fileId)}
+                title="일시정지"
+              >
+                <PauseIcon className="size-3" />
+              </button>
+            )}
           {selected &&
             prog &&
             (status === "paused" || status === "pending" || status === "error") &&
@@ -351,7 +376,7 @@ function DirRow({
 
   const checked =
     props.mode === "selection" && dirKey !== "" && props.selected
-      ? props.selected.has(dirKey)
+      ? getSelectionCheckState(props.selected, dirKey, node)
       : undefined;
 
   const total = props.mode === "selection" ? dirSize(node) : 0;
@@ -362,6 +387,7 @@ function DirRow({
     !showDirExcluded &&
     dirSummary.selectedCount > 0 &&
     (dirSummary.hasDownloading ||
+      dirSummary.hasInflating ||
       dirSummary.hasPaused ||
       dirSummary.hasError ||
       dirSummary.downloaded > 0);
@@ -500,15 +526,149 @@ function DirRow({
   );
 }
 
-function dirSize(dir: DirNode): number {
-  const cached = dirSizeCache.get(dir);
+function ZipRow({
+  node,
+  depth,
+  indent,
+  pathStack,
+  rootKey,
+  props,
+  rightCols,
+  dirSummaries,
+}: {
+  node: ZipNode;
+  depth: number;
+  indent: number;
+  pathStack: string[];
+  rootKey: string;
+  props: FileTreeProps;
+  rightCols: string[];
+  dirSummaries: Map<string, DirProgressSummary> | null;
+}) {
+  const zipKey = [...pathStack, node.name].join("/");
+  const childPathStack = [...pathStack, node.name];
+  const childRootKey = rootKey ? `${rootKey}/${node.name}` : node.name;
+  const progressDownloadId = props.mode === "progress" ? props.downloadId : null;
+  const storedExpanded = useDownloadTreeExpanded((state) =>
+    progressDownloadId
+      ? (state.expandedByDownload[progressDownloadId]?.has(zipKey) ?? false)
+      : false,
+  );
+  const toggleStoredExpanded = useDownloadTreeExpanded((state) => state.toggleExpanded);
+  const [selectionExpanded, setSelectionExpanded] = React.useState(false);
+  const expanded = props.mode === "progress" ? storedExpanded : selectionExpanded;
+  const loading = props.mode === "selection" ? Boolean(props.zipLoadingPaths?.has(zipKey)) : false;
+  const checked =
+    props.mode === "selection" && props.selected
+      ? getSelectionCheckState(props.selected, zipKey, node)
+      : undefined;
+  const dirSummary = props.mode === "progress" ? (dirSummaries?.get(zipKey) ?? null) : null;
+  const hasEntries = Boolean(node.entries);
+
+  const handleExpand = () => {
+    if (props.mode === "progress" && progressDownloadId) {
+      toggleStoredExpanded(progressDownloadId, zipKey);
+      return;
+    }
+    if (!hasEntries) {
+      if (props.mode === "selection") {
+        void props.onExpandZip?.(zipKey, node.id);
+      }
+      setSelectionExpanded(true);
+      return;
+    }
+    setSelectionExpanded((value) => !value);
+  };
+
+  return (
+    <>
+      <TreeRow
+        indent={indent}
+        expandable
+        expanded={expanded && hasEntries}
+        onExpand={handleExpand}
+        checked={checked}
+        onToggle={
+          props.mode === "selection" && props.onToggle ? () => props.onToggle?.(zipKey) : undefined
+        }
+        icon={
+          loading ? (
+            <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+          ) : (
+            <ArchiveIcon
+              className={cn(
+                "size-4 text-muted-foreground",
+                expanded && hasEntries && "text-primary",
+              )}
+            />
+          )
+        }
+        label={node.name}
+        rightCols={rightCols}
+        right={
+          props.mode === "progress"
+            ? dirSummary
+              ? [
+                  null,
+                  <span
+                    key="progress"
+                    className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground"
+                  >
+                    {formatSize(dirSummary.downloaded)} / {formatSize(dirSummary.totalSize)}
+                  </span>,
+                  <div key="status" className="flex justify-end">
+                    <StatusPill status={dirSummary.status} pct={0} />
+                  </div>,
+                  null,
+                ]
+              : [null, null, null, null]
+            : [
+                <span key="size" className="text-right text-xs text-muted-foreground tabular-nums">
+                  {formatSize(node.size)}
+                </span>,
+                null,
+              ]
+        }
+      />
+      {expanded &&
+        node.entries?.map((e, i) => (
+          <TreeNode
+            key={`${e.kind}-${(e.node as { id: string }).id ?? i}`}
+            entry={e}
+            depth={depth + 1}
+            pathStack={childPathStack}
+            rootKey={childRootKey}
+            props={props}
+            dirSummaries={dirSummaries}
+          />
+        ))}
+    </>
+  );
+}
+
+function dirSize(dir: DirNode | ZipNode): number {
+  const entries = dir.type === "zip" ? (dir.entries ?? []) : dir.entries;
+  if (dir.type === "zip" && !dir.entries) {
+    return dir.size;
+  }
+  const cached = dirSizeCache.get(dir as DirNode);
   if (cached !== undefined) return cached;
 
   let total = 0;
-  for (const e of dir.entries) {
-    total += e.kind === "file" ? (e.node as FileNode).size : dirSize(e.node as DirNode);
+  for (const e of entries) {
+    if (e.kind === "file") {
+      total += (e.node as FileNode).size;
+      continue;
+    }
+    if (e.kind === "zip") {
+      total += dirSize(e.node as ZipNode);
+      continue;
+    }
+    total += dirSize(e.node as DirNode);
   }
-  dirSizeCache.set(dir, total);
+  if (dir.type === "dir") {
+    dirSizeCache.set(dir, total);
+  }
   return total;
 }
 
@@ -525,10 +685,11 @@ interface DirProgressSummary {
   completedCount: number;
   allExcluded: boolean;
   hasDownloading: boolean;
+  hasInflating: boolean;
   hasPaused: boolean;
   hasError: boolean;
   errors: FileTreeError[];
-  status: "skipped" | "completed" | "downloading" | "error" | "paused" | "pending";
+  status: "skipped" | "completed" | "downloading" | "inflating" | "error" | "paused" | "pending";
 }
 
 function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileProgress>) {
@@ -544,6 +705,7 @@ function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileP
     let folderTotalSize = 0;
     let completedCount = 0;
     let hasDownloading = false;
+    let hasInflating = false;
     let hasPaused = false;
     let hasError = false;
     const errors: FileTreeError[] = [];
@@ -571,6 +733,8 @@ function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileP
         if (status === "downloading") {
           hasDownloading = true;
           speedBps += prog?.speedBps ?? 0;
+        } else if (status === "inflating") {
+          hasInflating = true;
         } else if (status === "paused") {
           hasPaused = true;
         } else if (status === "error") {
@@ -579,6 +743,58 @@ function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileP
         } else if (status === "completed") {
           completedCount += 1;
         }
+        continue;
+      }
+
+      if (e.kind === "zip") {
+        const zip = e.node as ZipNode;
+        if (!zip.entries) {
+          const key = [...pathStack, zip.name].join("/");
+          const prog = progress[key];
+          const selected = prog?.selected ?? true;
+          fileCount += 1;
+          folderTotalSize += zip.size;
+          if (!selected) {
+            excludedCount += 1;
+            continue;
+          }
+          selectedCount += 1;
+          totalSize += zip.size;
+          downloaded += prog?.downloaded ?? 0;
+          const status = prog?.status ?? "pending";
+          if (status === "downloading") {
+            hasDownloading = true;
+            speedBps += prog?.speedBps ?? 0;
+          } else if (status === "inflating") {
+            hasInflating = true;
+          } else if (status === "paused") {
+            hasPaused = true;
+          } else if (status === "error") {
+            hasError = true;
+            errors.push({ path: key, message: prog?.error ?? "오류 정보가 없습니다." });
+          } else if (status === "completed") {
+            completedCount += 1;
+          }
+          continue;
+        }
+        const childStack = [...pathStack, zip.name];
+        const childSummary = walk(
+          { type: "dir", id: zip.id, name: zip.name, entries: zip.entries },
+          childStack,
+        );
+        totalSize += childSummary.totalSize;
+        downloaded += childSummary.downloaded;
+        speedBps += childSummary.speedBps;
+        fileCount += childSummary.fileCount;
+        excludedCount += childSummary.excludedCount;
+        selectedCount += childSummary.selectedCount;
+        folderTotalSize += childSummary.folderTotalSize;
+        completedCount += childSummary.completedCount;
+        hasDownloading ||= childSummary.hasDownloading;
+        hasInflating ||= childSummary.hasInflating;
+        hasPaused ||= childSummary.hasPaused;
+        hasError ||= childSummary.hasError;
+        errors.push(...childSummary.errors);
         continue;
       }
 
@@ -594,6 +810,7 @@ function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileP
       folderTotalSize += childSummary.folderTotalSize;
       completedCount += childSummary.completedCount;
       hasDownloading ||= childSummary.hasDownloading;
+      hasInflating ||= childSummary.hasInflating;
       hasPaused ||= childSummary.hasPaused;
       hasError ||= childSummary.hasError;
       errors.push(...childSummary.errors);
@@ -606,11 +823,13 @@ function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileP
         ? "completed"
         : hasDownloading
           ? "downloading"
-          : hasError
-            ? "error"
-            : hasPaused
-              ? "paused"
-              : "pending";
+          : hasInflating
+            ? "inflating"
+            : hasError
+              ? "error"
+              : hasPaused
+                ? "paused"
+                : "pending";
 
     const summary: DirProgressSummary = {
       totalSize,
@@ -623,6 +842,7 @@ function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileP
       completedCount,
       allExcluded,
       hasDownloading,
+      hasInflating,
       hasPaused,
       hasError,
       errors,
@@ -641,7 +861,7 @@ interface TreeRowProps {
   expandable?: boolean;
   expanded?: boolean;
   onExpand?: () => void;
-  checked?: boolean;
+  checked?: boolean | "indeterminate";
   onToggle?: () => void;
   icon: React.ReactNode;
   label: string;
@@ -661,6 +881,9 @@ function TreeRow({
   right,
   rightCols,
 }: TreeRowProps) {
+  const isIndeterminate = checked === "indeterminate";
+  const isChecked = checked === true;
+
   return (
     <div
       className={cn(
@@ -691,7 +914,8 @@ function TreeRow({
         {onToggle && (
           <div onClick={(e) => e.stopPropagation()}>
             <Checkbox
-              checked={checked ?? false}
+              checked={isChecked}
+              indeterminate={isIndeterminate}
               onCheckedChange={onToggle}
               className="shrink-0 after:hidden"
             />
@@ -728,19 +952,21 @@ function StatusPill({
   const label =
     status === "completed"
       ? "완료"
-      : status === "downloading"
-        ? `${pct.toFixed(0)}%`
-        : status === "paused"
-          ? "일시정지"
-          : status === "error"
-            ? "오류"
-            : status === "skipped"
-              ? "제외"
-              : "대기";
+      : status === "inflating"
+        ? "해제 중"
+        : status === "downloading"
+          ? `${pct.toFixed(0)}%`
+          : status === "paused"
+            ? "일시정지"
+            : status === "error"
+              ? "오류"
+              : status === "skipped"
+                ? "제외"
+                : "대기";
   const cls =
     status === "completed"
       ? "text-emerald-600 dark:text-emerald-400"
-      : status === "downloading"
+      : status === "downloading" || status === "inflating"
         ? "text-primary"
         : status === "error"
           ? "text-destructive"
@@ -750,6 +976,7 @@ function StatusPill({
     cls,
     onClick && "cursor-pointer underline decoration-dotted underline-offset-2",
   );
+  const title = status === "inflating" ? "압축 해제 중" : onClick ? "오류 상세 보기" : undefined;
 
   if (onClick) {
     return (
@@ -760,12 +987,16 @@ function StatusPill({
           event.stopPropagation();
           onClick();
         }}
-        title="오류 상세 보기"
+        title={title}
       >
         {label}
       </button>
     );
   }
 
-  return <span className={className}>{label}</span>;
+  return (
+    <span className={className} title={title}>
+      {label}
+    </span>
+  );
 }

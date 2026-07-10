@@ -10,7 +10,10 @@ import {
     SEGMENT_POOL_SIZE_MIN,
     STREAM_WRITE_BATCH_BYTES_DEFAULT,
     STREAM_WRITE_BATCH_BYTES_OPTIONS,
+    INFLATE_BUFFER_BYTES_DEFAULT,
+    INFLATE_BUFFER_BYTES_OPTIONS,
 } from "@shared/settings";
+import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
 import fse from "fs-extra";
 
@@ -23,11 +26,25 @@ import type {
     DownloadCollectionRow,
     DownloadFileRow,
     SchedulerSettings,
+    SegmentDescriptor,
+    ZipEntryStoredMeta,
 } from "./types";
 
 import { TransferProgressBatcher } from "../transfer-progress-batcher";
-import { PartFileWriter } from "./part-file";
+import { getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
+import { openZipFileEntry } from "./zip-index";
+import { inflateRawFile, zipDeflateProgressScale } from "./zip-inflate";
+import { ZipRangeReader } from "./zip-range-reader";
+import {
+    buildZipEntrySegmentChunks,
+    computeStoredDataOffset,
+    supportsZipEntryPoolDownload,
+} from "./zip-segment-map";
+
+function isActiveFileDownloadStatus(status: FileDownloadStatus | undefined) {
+    return status === "downloading" || status === "inflating";
+}
 
 function clampChunkRetries(value: number) {
     return Math.min(
@@ -54,11 +71,57 @@ function clampStreamWriteBatchBytes(value: number) {
     return STREAM_WRITE_BATCH_BYTES_DEFAULT;
 }
 
+function clampInflateBufferBytes(value: number) {
+    if (
+        INFLATE_BUFFER_BYTES_OPTIONS.includes(
+            value as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
+        )
+    ) {
+        return value;
+    }
+    return INFLATE_BUFFER_BYTES_DEFAULT;
+}
+
 function ensurePositiveInteger(value: number, fallback: number) {
     if (!Number.isFinite(value) || value < 1) {
         return fallback;
     }
     return Math.max(1, Math.floor(value));
+}
+
+function parseZipEntryMeta(raw: string | null): ZipEntryStoredMeta {
+    if (!raw) {
+        throw new Error("Missing zip entry metadata.");
+    }
+    const parsed = JSON.parse(raw) as ZipEntryStoredMeta;
+    if (
+        typeof parsed.path !== "string" ||
+        typeof parsed.offset !== "number" ||
+        typeof parsed.uncompressedSize !== "number" ||
+        typeof parsed.archiveSize !== "number"
+    ) {
+        throw new Error("Invalid zip entry metadata.");
+    }
+    return parsed;
+}
+
+async function* readableStreamToAsyncIterable(
+    stream: ReadableStream<Uint8Array>,
+): AsyncGenerator<Uint8Array> {
+    const reader = stream.getReader();
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                return;
+            }
+            if (value && value.length > 0) {
+                yield value;
+            }
+        }
+    } finally {
+        reader.releaseLock();
+    }
 }
 
 export class DownloadScheduler {
@@ -75,6 +138,7 @@ export class DownloadScheduler {
     private readonly fileStartedAt = new Map<string, number>();
     private readonly collectionStartedAt = new Map<string, number>();
     private readonly collectionTimerStartedAt = new Map<string, number>();
+    private readonly nonPooledZipEntries = new Set<string>();
     private isPumping = false;
     private pumpAgain = false;
 
@@ -166,6 +230,7 @@ export class DownloadScheduler {
 
     public pauseFile(fileId: string) {
         this.manualFiles.delete(fileId);
+        this.nonPooledZipEntries.delete(fileId);
         this.segmentPool.cancelSession(fileId);
         this.fileControllers.get(fileId)?.abort();
         this.metrics.clearFile(fileId);
@@ -202,8 +267,11 @@ export class DownloadScheduler {
         await Promise.all(
             files.map(async (file) => {
                 const partPath = this.getPartPath(collection, file);
+                const stagingPath = getStagingPartPath(partPath);
                 await fse.remove(partPath).catch(() => undefined);
                 await PartFileWriter.removeSidecar(partPath);
+                await fse.remove(stagingPath).catch(() => undefined);
+                await PartFileWriter.removeSidecar(stagingPath);
             }),
         );
         await fse
@@ -274,6 +342,9 @@ export class DownloadScheduler {
             streamWriteBatchBytes: clampStreamWriteBatchBytes(
                 await this.kd.setting.transfer.getStreamWriteBatchBytes(),
             ),
+            inflateBufferBytes: clampInflateBufferBytes(
+                await this.kd.setting.transfer.getInflateBufferBytes(),
+            ),
         };
     }
 
@@ -309,12 +380,22 @@ export class DownloadScheduler {
         }
 
         let outstandingChunks = 0;
+        let nonPooledCount = 0;
         for (const fileId of activeFileIds) {
             const outstanding = this.segmentPool.getOutstandingChunks(fileId);
             if (outstanding === null) {
+                if (this.nonPooledZipEntries.has(fileId)) {
+                    nonPooledCount += 1;
+                    continue;
+                }
+                // Still in pre-register setup; do not start more files in this collection.
                 return false;
             }
             outstandingChunks += outstanding;
+        }
+
+        if (nonPooledCount >= 1) {
+            return false;
         }
 
         // If active files have fewer outstanding chunks than the pool size, they cannot
@@ -505,6 +586,11 @@ export class DownloadScheduler {
             this.repository.markCollectionStatus(collectionId, "downloading");
             this.progressBatcher.mark(collectionId, fileId);
 
+            if (file.sourceKind === "zip_entry") {
+                await this.runZipEntry(collection, file, settings, controller);
+                return;
+            }
+
             const chunks = this.repository.listChunks(file.id);
             await this.validateCompletedChunks(collection, file, chunks);
             this.repository.syncFileDownloadedBytes(fileId);
@@ -546,7 +632,7 @@ export class DownloadScheduler {
             if (outcome === "paused") {
                 if (!this.repository.hasErroredChunk(fileId)) {
                     const currentFile = this.repository.getFile(fileId);
-                    if (currentFile?.status === "downloading") {
+                    if (isActiveFileDownloadStatus(currentFile?.status)) {
                         this.repository.markFileStatus(fileId, "pending");
                         this.progressBatcher.mark(collectionId, fileId);
                     }
@@ -567,7 +653,7 @@ export class DownloadScheduler {
 
             if ((error instanceof DOMException && error.name === "AbortError") || signal.aborted) {
                 if (!this.repository.hasErroredChunk(fileId)) {
-                    if (currentFile?.status === "downloading") {
+                    if (isActiveFileDownloadStatus(currentFile?.status)) {
                         this.repository.markFileStatus(fileId, "pending");
                     }
                 }
@@ -584,6 +670,389 @@ export class DownloadScheduler {
             await partWriter?.close();
             this.metrics.clearFile(fileId);
         }
+    }
+
+    private async runZipEntry(
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        settings: SchedulerSettings,
+        controller: AbortController,
+    ) {
+        const signal = controller.signal;
+        let meta = parseZipEntryMeta(file.zipEntryJson);
+        const partPath = this.getPartPath(collection, file);
+        const stagingPath = getStagingPartPath(partPath);
+
+        if (file.size === 0) {
+            await this.finalizeFile(collection, file);
+            return;
+        }
+
+        if (!supportsZipEntryPoolDownload(meta)) {
+            this.nonPooledZipEntries.add(file.id);
+            try {
+                await this.runZipEntryWithZipJs(collection, file, meta, settings, controller);
+            } finally {
+                this.nonPooledZipEntries.delete(file.id);
+            }
+            return;
+        }
+
+        let partWriter: PartFileWriter | null = null;
+        let removeStaging = false;
+
+        try {
+            const cat = await this.getCollectionToken(collection);
+            const segments = await this.api.getSegments(file.remoteId, cat);
+
+            meta = await this.ensureZipEntryDataOffset(collection, file, meta, segments, signal);
+            file = this.repository.getFile(file.id) ?? file;
+
+            const spans = buildZipEntrySegmentChunks(
+                meta.dataOffset!,
+                meta.compressedSize,
+                collection.segmentSize,
+                meta.archiveSize,
+            );
+            if (spans.length === 0) {
+                throw new Error("ZIP entry payload maps to zero segment chunks.");
+            }
+
+            await this.ensureZipEntryChunkLayout(file, spans, partPath, stagingPath);
+            file = this.repository.getFile(file.id) ?? file;
+
+            const isDeflate = meta.compressionMethod === 8;
+            const downloadPartPath = isDeflate ? stagingPath : partPath;
+            const downloadPartSize = isDeflate ? meta.compressedSize : meta.uncompressedSize;
+
+            let chunks = this.repository.listChunks(file.id);
+            await this.validateCompletedChunksAt(downloadPartPath, chunks);
+            if (isDeflate) {
+                const scale = zipDeflateProgressScale(meta.compressedSize, meta.uncompressedSize);
+                this.repository.syncScaledDownloadedBytes(
+                    file.id,
+                    scale.sourceTotal,
+                    scale.displayTotal,
+                );
+            } else {
+                this.repository.syncFileDownloadedBytes(file.id);
+            }
+
+            chunks = this.repository.listChunks(file.id);
+            if (this.areChunksComplete(chunks)) {
+                if (isDeflate) {
+                    await this.inflateZipEntryStaging(
+                        collection,
+                        file,
+                        meta,
+                        stagingPath,
+                        partPath,
+                        signal,
+                        settings.inflateBufferBytes,
+                    );
+                }
+                await this.finalizeFile(collection, file);
+                removeStaging = true;
+                return;
+            }
+
+            const pendingChunks = chunks.filter(
+                (chunk) => chunk.status === "pending" || chunk.status === "error",
+            );
+            const ranges = new Map(
+                spans.map((span) => [
+                    span.chunkIndex,
+                    {
+                        segmentIndex: span.segmentIndex,
+                        localStart: span.localStart,
+                        localEnd: span.localEnd,
+                    },
+                ]),
+            );
+
+            partWriter = new PartFileWriter(downloadPartPath);
+            await partWriter.open(downloadPartSize, chunks.length);
+
+            const outcome = await this.segmentPool.register({
+                collection,
+                file,
+                segments,
+                partWriter,
+                controller,
+                maxChunkRetries: settings.maxChunkRetries,
+                streamWriteBatchBytes: settings.streamWriteBatchBytes,
+                priority: this.getFilePriority(collection.id, file.id),
+                chunks: pendingChunks,
+                startedAt: this.fileStartedAt.get(file.id) ?? Date.now(),
+                collectionStartedAt: this.collectionStartedAt.get(collection.id) ?? Date.now(),
+                mode: "byte-range",
+                ranges,
+                progressScale: isDeflate
+                    ? zipDeflateProgressScale(meta.compressedSize, meta.uncompressedSize)
+                    : undefined,
+            });
+
+            if (outcome === "paused") {
+                if (!this.repository.hasErroredChunk(file.id)) {
+                    const currentFile = this.repository.getFile(file.id);
+                    if (isActiveFileDownloadStatus(currentFile?.status)) {
+                        this.repository.markFileStatus(file.id, "pending");
+                        this.progressBatcher.mark(collection.id, file.id);
+                    }
+                }
+                return;
+            }
+
+            if (outcome === "failed") {
+                return;
+            }
+
+            if (!this.areChunksComplete(this.repository.listChunks(file.id))) {
+                return;
+            }
+
+            if (isDeflate) {
+                await this.inflateZipEntryStaging(
+                    collection,
+                    file,
+                    meta,
+                    stagingPath,
+                    partPath,
+                    signal,
+                    settings.inflateBufferBytes,
+                );
+            }
+            await this.finalizeFile(collection, file);
+            removeStaging = true;
+        } catch (error) {
+            this.repository.resetRunningChunksForFile(file.id);
+            const currentFile = this.repository.getFile(file.id);
+
+            if ((error instanceof DOMException && error.name === "AbortError") || signal.aborted) {
+                // Drop partial inflate output; keep staging + completed compressed chunks for resume.
+                if (meta.compressionMethod === 8) {
+                    await fse.remove(partPath).catch(() => undefined);
+                    await PartFileWriter.removeSidecar(partPath);
+                }
+                if (!this.repository.hasErroredChunk(file.id)) {
+                    if (isActiveFileDownloadStatus(currentFile?.status)) {
+                        this.repository.markFileStatus(file.id, "pending");
+                    }
+                }
+                return;
+            }
+
+            const message = toErrorMessage(error);
+            if (currentFile) {
+                this.repository.markFileStatus(file.id, "error", message);
+                this.progressBatcher.mark(collection.id, file.id);
+            }
+            this.kd.logger.error(error, "DownloadService:runZipEntry");
+        } finally {
+            await partWriter?.close();
+            if (removeStaging) {
+                await this.cleanupZipEntryStaging(partPath);
+            }
+            this.metrics.clearFile(file.id);
+            this.progressBatcher.mark(collection.id, file.id);
+        }
+    }
+
+    private async runZipEntryWithZipJs(
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        meta: ZipEntryStoredMeta,
+        settings: SchedulerSettings,
+        controller: AbortController,
+    ) {
+        const signal = controller.signal;
+        const chunk = this.repository.listChunks(file.id)[0];
+        if (!chunk) {
+            throw new Error("Missing zip entry chunk descriptor.");
+        }
+
+        const partPath = this.getPartPath(collection, file);
+        const chunkRange = { chunkIndex: 0, offset: 0, size: file.size };
+        if (await PartFileWriter.isChunkValid(partPath, chunkRange)) {
+            if (chunk.status !== "completed") {
+                this.repository.markChunkCompleted(chunk, file.size);
+                this.repository.syncFileDownloadedBytes(file.id);
+            }
+            await this.finalizeFile(collection, file);
+            return;
+        }
+
+        await fse.remove(partPath);
+        await PartFileWriter.removeSidecar(partPath);
+        this.repository.markChunkPending(file.id, 0);
+        this.repository.syncFileDownloadedBytes(file.id);
+
+        this.repository.markChunkDownloading(chunk);
+        this.metrics.registerFile(collection.id, file.id, 0);
+
+        const partWriter = new PartFileWriter(partPath);
+        await partWriter.open(file.size, 1);
+
+        try {
+            const cat = await this.getCollectionToken(collection);
+            const segments = await this.api.getSegments(file.remoteId, cat);
+            const opened = await openZipFileEntry({
+                kd: this.kd,
+                segments,
+                segmentSize: collection.segmentSize,
+                fileSize: meta.archiveSize,
+                entryPath: meta.path,
+                zipPassword: meta.password,
+                signal,
+            });
+            try {
+                const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+                const getDataPromise = opened.entry.getData(writable, {
+                    password: meta.password,
+                    signal,
+                });
+                const bytes = await partWriter.writeChunkFromStream(
+                    0,
+                    0,
+                    readableStreamToAsyncIterable(readable),
+                    meta.uncompressedSize,
+                    settings.streamWriteBatchBytes,
+                    {
+                        onTransferProgress: (transferredBytes) => {
+                            this.metrics.setChunkTransferProgress(file.id, 0, transferredBytes);
+                        },
+                        onWriteProgress: (writtenBytes) => {
+                            this.metrics.setChunkWriteProgress(file.id, 0, writtenBytes);
+                        },
+                    },
+                );
+                await getDataPromise;
+
+                if (signal.aborted) {
+                    this.repository.markChunkPending(file.id, 0);
+                    this.repository.markFileStatus(file.id, "pending");
+                    return;
+                }
+
+                this.repository.markChunkCompleted(chunk, bytes);
+                this.repository.syncFileDownloadedBytes(file.id);
+                const updated = this.repository.getFile(file.id);
+                if (updated) {
+                    this.metrics.clearChunk(file.id, 0, updated.downloadedBytes);
+                }
+                await this.finalizeFile(collection, file);
+            } finally {
+                await opened.zipReader.close();
+            }
+        } catch (error) {
+            if ((error instanceof DOMException && error.name === "AbortError") || signal.aborted) {
+                this.repository.markChunkPending(file.id, 0);
+                if (isActiveFileDownloadStatus(this.repository.getFile(file.id)?.status)) {
+                    this.repository.markFileStatus(file.id, "pending");
+                }
+                return;
+            }
+            const message = toErrorMessage(error);
+            this.repository.markChunkError(chunk, message);
+            this.repository.markFileStatus(file.id, "error", message);
+            this.progressBatcher.mark(collection.id, file.id);
+            this.kd.logger.error(error, "DownloadService:runZipEntry");
+        } finally {
+            await partWriter.close();
+            this.metrics.clearFile(file.id);
+            this.progressBatcher.mark(collection.id, file.id);
+        }
+    }
+
+    private async ensureZipEntryDataOffset(
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        meta: ZipEntryStoredMeta,
+        segments: SegmentDescriptor[],
+        signal: AbortSignal,
+    ) {
+        if (typeof meta.dataOffset === "number" && meta.dataOffset >= 0) {
+            return meta;
+        }
+
+        const rangeReader = new ZipRangeReader({
+            kd: this.kd,
+            segments,
+            segmentSize: collection.segmentSize,
+            fileSize: meta.archiveSize,
+            signal,
+        });
+        const headerFields = await rangeReader.readUint8Array(meta.offset + 26, 4);
+        const dataOffset = computeStoredDataOffset(meta.offset, headerFields);
+        const updated = { ...meta, dataOffset };
+        this.repository.updateZipEntryJson(file.id, updated);
+        return updated;
+    }
+
+    private async ensureZipEntryChunkLayout(
+        file: DownloadFileRow,
+        spans: ReturnType<typeof buildZipEntrySegmentChunks>,
+        partPath: string,
+        stagingPath: string,
+    ) {
+        const existing = this.repository.listChunks(file.id);
+        const layoutMatches =
+            existing.length === spans.length &&
+            spans.every((span, index) => {
+                const chunk = existing[index];
+                return (
+                    chunk &&
+                    chunk.chunkIndex === span.chunkIndex &&
+                    chunk.offset === span.offset &&
+                    chunk.size === span.size
+                );
+            });
+
+        if (layoutMatches) {
+            return;
+        }
+
+        this.repository.deleteAllChunksForFile(file.id);
+        await fse.remove(partPath).catch(() => undefined);
+        await PartFileWriter.removeSidecar(partPath);
+        await fse.remove(stagingPath).catch(() => undefined);
+        await PartFileWriter.removeSidecar(stagingPath);
+        this.repository.syncFileDownloadedBytes(file.id);
+    }
+
+    private async inflateZipEntryStaging(
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        meta: ZipEntryStoredMeta,
+        stagingPath: string,
+        partPath: string,
+        signal: AbortSignal,
+        inflateBufferBytes: number,
+    ) {
+        // Hold UI near 100% while inflating; reserve the final byte until completeFile.
+        const almostDone = Math.max(0, meta.uncompressedSize - 1);
+        this.repository.markFileStatus(file.id, "inflating");
+        this.repository.recomputeCollectionStatus(collection.id);
+        this.metrics.registerFile(collection.id, file.id, almostDone);
+        this.repository.setFileDownloadedBytes(file.id, almostDone);
+        this.progressBatcher.mark(collection.id, file.id);
+
+        try {
+            await inflateRawFile(
+                stagingPath,
+                partPath,
+                meta.uncompressedSize,
+                inflateBufferBytes,
+                signal,
+            );
+        } catch (error) {
+            await fse.remove(partPath).catch(() => undefined);
+            await PartFileWriter.removeSidecar(partPath);
+            throw error;
+        }
+
+        this.repository.setFileDownloadedBytes(file.id, almostDone);
+        this.progressBatcher.mark(collection.id, file.id);
     }
 
     private deactivateCollectionTransfer(collectionId: string) {
@@ -611,7 +1080,10 @@ export class DownloadScheduler {
         file: DownloadFileRow,
         chunks: DownloadChunkRow[],
     ) {
-        const partPath = this.getPartPath(collection, file);
+        await this.validateCompletedChunksAt(this.getPartPath(collection, file), chunks);
+    }
+
+    private async validateCompletedChunksAt(partPath: string, chunks: DownloadChunkRow[]) {
         const completedChunks = chunks.filter((chunk) => chunk.status === "completed");
         if (completedChunks.length === 0) {
             return;
@@ -626,7 +1098,7 @@ export class DownloadScheduler {
     }
 
     private areChunksComplete(chunks: DownloadChunkRow[]) {
-        return chunks.every((chunk) => chunk.status === "completed");
+        return chunks.length > 0 && chunks.every((chunk) => chunk.status === "completed");
     }
 
     private async finalizeFile(collection: DownloadCollectionRow, file: DownloadFileRow) {
@@ -648,8 +1120,15 @@ export class DownloadScheduler {
         }
 
         await PartFileWriter.removeSidecar(partPath);
+        // Mark complete before slow staging cleanup so the UI does not sit at 100%.
         this.repository.completeFile(file.id);
         this.progressBatcher.mark(collection.id, file.id);
+    }
+
+    private async cleanupZipEntryStaging(partPath: string) {
+        const stagingPath = getStagingPartPath(partPath);
+        await fse.remove(stagingPath).catch(() => undefined);
+        await PartFileWriter.removeSidecar(stagingPath);
     }
 
     private getPartPath(collection: DownloadCollectionRow, file: DownloadFileRow) {

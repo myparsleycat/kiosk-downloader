@@ -23,6 +23,8 @@ import {
     type StartupResumeMode,
     STREAM_WRITE_BATCH_BYTES_DEFAULT,
     STREAM_WRITE_BATCH_BYTES_OPTIONS,
+    INFLATE_BUFFER_BYTES_DEFAULT,
+    INFLATE_BUFFER_BYTES_OPTIONS,
 } from "@shared/settings";
 import AutoLaunch from "auto-launch";
 import { app, nativeTheme } from "electron";
@@ -124,6 +126,30 @@ function normalizeStreamWriteBatchBytes(value: number) {
         return value;
     }
     return STREAM_WRITE_BATCH_BYTES_DEFAULT;
+}
+
+function parseInflateBufferBytes(value: string | null | undefined) {
+    const parsed = Number.parseInt(value ?? "", 10);
+    if (
+        !Number.isFinite(parsed) ||
+        !INFLATE_BUFFER_BYTES_OPTIONS.includes(
+            parsed as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
+        )
+    ) {
+        return INFLATE_BUFFER_BYTES_DEFAULT;
+    }
+    return parsed;
+}
+
+function normalizeInflateBufferBytes(value: number) {
+    if (
+        INFLATE_BUFFER_BYTES_OPTIONS.includes(
+            value as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
+        )
+    ) {
+        return value;
+    }
+    return INFLATE_BUFFER_BYTES_DEFAULT;
 }
 
 function parseStartupResumeMode(value: string | null | undefined): StartupResumeMode {
@@ -291,6 +317,13 @@ export class Setting {
                 fromStored: parseStreamWriteBatchBytes,
                 toStored: (value) => String(value),
                 normalize: normalizeStreamWriteBatchBytes,
+            },
+            "transfer.inflateBufferBytes": {
+                definition: APP_SETTINGS["transfer.inflateBufferBytes"],
+                getDefault: () => INFLATE_BUFFER_BYTES_DEFAULT,
+                fromStored: parseInflateBufferBytes,
+                toStored: (value) => String(value),
+                normalize: normalizeInflateBufferBytes,
             },
             "transfer.startupResumeMode": {
                 definition: APP_SETTINGS["transfer.startupResumeMode"],
@@ -487,6 +520,9 @@ export class Setting {
         getStreamWriteBatchBytes: async () => await this.get("transfer.streamWriteBatchBytes"),
         setStreamWriteBatchBytes: async (value: number) =>
             await this.set("transfer.streamWriteBatchBytes", value),
+        getInflateBufferBytes: async () => await this.get("transfer.inflateBufferBytes"),
+        setInflateBufferBytes: async (value: number) =>
+            await this.set("transfer.inflateBufferBytes", value),
         getStartupResumeMode: async () => await this.get("transfer.startupResumeMode"),
         setStartupResumeMode: async (value: StartupResumeMode) =>
             await this.set("transfer.startupResumeMode", value),

@@ -30,6 +30,8 @@ import {
   type StartupResumeMode,
   STREAM_WRITE_BATCH_BYTES_DEFAULT,
   STREAM_WRITE_BATCH_BYTES_OPTIONS,
+  INFLATE_BUFFER_BYTES_DEFAULT,
+  INFLATE_BUFFER_BYTES_OPTIONS,
   UPLOAD_CHUNK_RETRY_DEFAULT,
   UPLOAD_CHUNK_RETRY_MAX,
   UPLOAD_CHUNK_RETRY_MIN,
@@ -61,6 +63,7 @@ const SETTING_KEYS = [
   "transfer.maxChunkRetries",
   "transfer.uploadMaxChunkRetries",
   "transfer.streamWriteBatchBytes",
+  "transfer.inflateBufferBytes",
   "transfer.startupResumeMode",
   "transfer.uploadStartupResumeMode",
   "transfer.downloadBandwidthLimitMibps",
@@ -83,6 +86,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.maxChunkRetries": CHUNK_RETRY_DEFAULT,
   "transfer.uploadMaxChunkRetries": UPLOAD_CHUNK_RETRY_DEFAULT,
   "transfer.streamWriteBatchBytes": STREAM_WRITE_BATCH_BYTES_DEFAULT,
+  "transfer.inflateBufferBytes": INFLATE_BUFFER_BYTES_DEFAULT,
   "transfer.startupResumeMode": "auto",
   "transfer.uploadStartupResumeMode": "auto",
   "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
@@ -106,6 +110,11 @@ const uploadChunkRetryOptions = Array.from(
 }));
 
 const streamWriteBatchOptions = STREAM_WRITE_BATCH_BYTES_OPTIONS.map((value) => ({
+  value: String(value),
+  label: formatSize(value),
+}));
+
+const inflateBufferOptions = INFLATE_BUFFER_BYTES_OPTIONS.map((value) => ({
   value: String(value),
   label: formatSize(value),
 }));
@@ -326,6 +335,33 @@ export function SettingsView() {
                 <SelectContent finalFocus={false}>
                   <SelectGroup>
                     {streamWriteBatchOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            }
+          />
+          <SettingRow
+            title="압축 해제 배치"
+            description="Deflate ZIP 항목을 압축 해제할 때 사용하는 버퍼 크기입니다."
+            control={
+              <Select
+                items={inflateBufferOptions}
+                value={String(settings["transfer.inflateBufferBytes"])}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  void setSetting("transfer.inflateBufferBytes", Number.parseInt(value, 10));
+                }}
+              >
+                <SelectTrigger className="w-34">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent finalFocus={false}>
+                  <SelectGroup>
+                    {inflateBufferOptions.map((option) => (
                       <SelectItem key={option.value} value={option.value}>
                         {option.label}
                       </SelectItem>

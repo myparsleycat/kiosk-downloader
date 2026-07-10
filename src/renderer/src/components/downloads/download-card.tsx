@@ -115,6 +115,7 @@ export function DownloadCard({
 function StatusBadge({ status }: { status: DownloadItem["status"] }) {
   const map: Record<DownloadItem["status"], { label: string; cls: string }> = {
     downloading: { label: "다운로드", cls: "bg-primary/10 text-primary" },
+    inflating: { label: "해제 중", cls: "bg-primary/10 text-primary" },
     paused: { label: "일시정지", cls: "bg-muted text-muted-foreground" },
     completed: { label: "완료", cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
     queued: { label: "대기", cls: "bg-muted text-muted-foreground" },

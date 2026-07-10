@@ -10,6 +10,8 @@ import type {
     DownloadCollectionRow,
     DownloadFileRow,
     SegmentDescriptor,
+    SegmentDownloadMode,
+    ZipEntrySegmentRange,
 } from "./types";
 
 export type FileDownloadOutcome = "completed" | "paused" | "failed";
@@ -26,6 +28,10 @@ export type FileDownloadRegistration = {
     chunks: DownloadChunkRow[];
     startedAt: number;
     collectionStartedAt: number;
+    mode?: SegmentDownloadMode;
+    ranges?: Map<number, ZipEntrySegmentRange>;
+    /** Scale completed chunk bytes (e.g. compressed → uncompressed) for UI progress. */
+    progressScale?: { sourceTotal: number; displayTotal: number };
 };
 
 type SegmentWorkItem = {
@@ -541,8 +547,17 @@ export class GlobalSegmentPool {
     }
 
     private async processChunk(session: FileDownloadSession, chunk: DownloadChunkRow) {
-        const { file, segments, partWriter, controller, maxChunkRetries, streamWriteBatchBytes } =
-            session.registration;
+        const {
+            file,
+            segments,
+            partWriter,
+            controller,
+            maxChunkRetries,
+            streamWriteBatchBytes,
+            mode = "full-segment",
+            ranges,
+            progressScale,
+        } = session.registration;
         const maxAttempts = maxChunkRetries + 1;
 
         const releaseInFlight = () => {
@@ -557,9 +572,21 @@ export class GlobalSegmentPool {
             return;
         }
 
-        const segment = segments[chunk.chunkIndex];
+        const range = mode === "byte-range" ? ranges?.get(chunk.chunkIndex) : undefined;
+        if (mode === "byte-range" && !range) {
+            this.failSession(
+                session,
+                `Missing byte-range mapping for chunk ${chunk.chunkIndex}.`,
+                controller,
+            );
+            releaseInFlight();
+            return;
+        }
+
+        const segmentIndex = mode === "byte-range" ? range!.segmentIndex : chunk.chunkIndex;
+        const segment = segments[segmentIndex];
         if (!segment) {
-            this.failSession(session, `Missing segment ${chunk.chunkIndex}.`, controller);
+            this.failSession(session, `Missing segment ${segmentIndex}.`, controller);
             releaseInFlight();
             return;
         }
@@ -601,10 +628,31 @@ export class GlobalSegmentPool {
                     controller.signal.addEventListener("abort", onSessionAbort);
                 }
 
+                const source =
+                    mode === "byte-range" && range
+                        ? this.deps.api.streamSegmentRange(
+                              segment,
+                              {
+                                  localStart: range.localStart,
+                                  localEnd: range.localEnd,
+                              },
+                              attemptController.signal,
+                          )
+                        : this.deps.api.streamSegment(segment, chunk, attemptController.signal);
+
+                const scaleProgress = (bytes: number) => {
+                    if (!progressScale || progressScale.sourceTotal <= 0) {
+                        return bytes;
+                    }
+                    return Math.floor(
+                        (bytes / progressScale.sourceTotal) * progressScale.displayTotal,
+                    );
+                };
+
                 const bytes = await partWriter.writeChunkFromStream(
                     chunk.offset,
                     chunk.chunkIndex,
-                    this.deps.api.streamSegment(segment, chunk, attemptController.signal),
+                    source,
                     chunk.size,
                     streamWriteBatchBytes,
                     {
@@ -613,20 +661,28 @@ export class GlobalSegmentPool {
                             this.deps.metrics.setChunkTransferProgress(
                                 file.id,
                                 chunk.chunkIndex,
-                                transferredBytes,
+                                scaleProgress(transferredBytes),
                             );
                         },
                         onWriteProgress: (writtenBytes) => {
                             this.deps.metrics.setChunkWriteProgress(
                                 file.id,
                                 chunk.chunkIndex,
-                                writtenBytes,
+                                scaleProgress(writtenBytes),
                             );
                         },
                     },
                 );
                 this.deps.repository.markChunkCompleted(chunk, bytes);
-                this.deps.repository.addFileDownloadedBytes(file.id, bytes);
+                if (progressScale) {
+                    this.deps.repository.syncScaledDownloadedBytes(
+                        file.id,
+                        progressScale.sourceTotal,
+                        progressScale.displayTotal,
+                    );
+                } else {
+                    this.deps.repository.addFileDownloadedBytes(file.id, bytes);
+                }
                 const updatedFile = this.deps.repository.getFile(file.id);
                 if (updatedFile) {
                     this.deps.metrics.clearChunk(

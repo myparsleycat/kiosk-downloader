@@ -37,11 +37,21 @@ export interface PathMetadata {
     birthtime: Date;
 }
 
+export interface ZipEntryMeta {
+    path: string;
+    offset: number;
+    compressedSize: number;
+    uncompressedSize: number;
+    compressionMethod: number;
+    encrypted: boolean;
+}
+
 export interface FileNode {
     type: "file";
     id: string;
     name: string;
     size: number;
+    zipEntry?: ZipEntryMeta;
 }
 
 export interface DirNode {
@@ -51,9 +61,17 @@ export interface DirNode {
     entries: TreeEntry[];
 }
 
+export interface ZipNode {
+    type: "zip";
+    id: string;
+    name: string;
+    size: number;
+    entries: TreeEntry[] | null;
+}
+
 export interface TreeEntry {
-    kind: "dir" | "file";
-    node: DirNode | FileNode;
+    kind: "dir" | "file" | "zip";
+    node: DirNode | FileNode | ZipNode;
 }
 
 export type CollectionTree = DirNode;
@@ -70,12 +88,19 @@ export interface Collection {
 export type DownloadStatus =
     | "queued"
     | "downloading"
+    | "inflating"
     | "paused"
     | "completed"
     | "error"
     | "expired";
 
-export type FileDownloadStatus = "pending" | "downloading" | "paused" | "completed" | "error";
+export type FileDownloadStatus =
+    | "pending"
+    | "downloading"
+    | "inflating"
+    | "paused"
+    | "completed"
+    | "error";
 
 export type ChunkDownloadStatus = "pending" | "downloading" | "completed" | "error";
 
@@ -207,6 +232,18 @@ export interface CreateDownloadPayload {
     password?: string;
     savePath: string;
     selectedPaths: string[];
+    zipPasswords?: Record<string, string>;
+}
+
+export interface ListZipEntriesPayload {
+    url: string;
+    password?: string;
+    fileId: string;
+    zipPassword?: string;
+}
+
+export interface ListZipEntriesResult {
+    entries: TreeEntry[];
 }
 
 export interface ResumePayload {

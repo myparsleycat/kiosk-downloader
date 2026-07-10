@@ -27,9 +27,12 @@ import {
   getIpcErrorCause,
   isCollectionInvalidPasswordError,
   isCollectionPasswordRequiredError,
+  isZipInvalidPasswordError,
+  isZipPasswordRequiredError,
 } from "@shared/download-errors";
 import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
 import { formatSize } from "@shared/utils";
+import { setZipEntries } from "@shared/zip-tree";
 import {
   ArrowDownIcon,
   ArrowUpDownIcon,
@@ -49,6 +52,14 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
 import { Input } from "../ui/input";
 
 export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string) => void }) {
@@ -73,11 +84,21 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const clearProbeState = useNewDownloadDraft((state) => state.clearProbeState);
   const resetDraft = useNewDownloadDraft((state) => state.resetDraft);
   const hydrateSettings = useNewDownloadDraft((state) => state.hydrateSettings);
+  const zipPasswords = useNewDownloadDraft((state) => state.zipPasswords);
+  const zipLoadingPaths = useNewDownloadDraft((state) => state.zipLoadingPaths);
+  const setZipPassword = useNewDownloadDraft((state) => state.setZipPassword);
+  const setZipLoading = useNewDownloadDraft((state) => state.setZipLoading);
 
   const [loading, setLoading] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
   const [sortField, setSortField] = React.useState<SortField>("name");
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
+  const [zipPasswordPrompt, setZipPasswordPrompt] = React.useState<{
+    path: string;
+    fileId: string;
+    invalid: boolean;
+  } | null>(null);
+  const [zipPasswordInput, setZipPasswordInput] = React.useState("");
 
   const loadSeqRef = React.useRef(0);
   const urlInputRef = React.useRef<HTMLInputElement>(null);
@@ -190,6 +211,51 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     updateSelected((prev) => toggleTreeSelection(prev, key, collection.tree));
   };
 
+  const expandZip = React.useCallback(
+    async (zipPath: string, fileId: string, zipPassword?: string) => {
+      if (!collection) {
+        return;
+      }
+      setZipLoading(zipPath, true);
+      try {
+        const result = await window.api.invoke("download:listZipEntries", {
+          url: url.trim(),
+          password: password || undefined,
+          fileId,
+          zipPassword,
+        });
+        if (zipPassword) {
+          setZipPassword(fileId, zipPassword);
+        }
+        setCollection({
+          ...collection,
+          tree: setZipEntries(collection.tree, fileId, result.entries),
+        });
+        setZipPasswordPrompt(null);
+        setZipPasswordInput("");
+      } catch (error) {
+        if (isZipPasswordRequiredError(error) || isZipInvalidPasswordError(error)) {
+          setZipPasswordPrompt({
+            path: zipPath,
+            fileId,
+            invalid: isZipInvalidPasswordError(error),
+          });
+          return;
+        }
+        toast.error("ZIP 목록을 불러오지 못했습니다", {
+          description: getIpcErrorCause(error),
+        });
+      } finally {
+        setZipLoading(zipPath, false);
+      }
+    },
+    [collection, password, setCollection, setZipLoading, setZipPassword, url],
+  );
+
+  const handleExpandZip = (zipPath: string, fileId: string) => {
+    void expandZip(zipPath, fileId, zipPasswords[fileId]);
+  };
+
   const summary = collection
     ? summarizeSelection(selected, collection.tree)
     : { count: 0, bytes: 0 };
@@ -242,6 +308,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         password: password || undefined,
         savePath: savePath.trim(),
         selectedPaths: [...selected],
+        zipPasswords: Object.keys(zipPasswords).length > 0 ? zipPasswords : undefined,
       });
       if (!created) {
         throw new Error("다운로드 항목을 만들지 못했습니다.");
@@ -438,6 +505,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   root={sortedTree ?? collection.tree}
                   selected={selected}
                   onToggle={handleToggle}
+                  onExpandZip={handleExpandZip}
+                  zipLoadingPaths={zipLoadingPaths}
                 />
               </div>
             </ScrollArea>
@@ -446,6 +515,66 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           <EmptyState loading={loading} />
         )}
       </div>
+
+      <Dialog
+        open={zipPasswordPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setZipPasswordPrompt(null);
+            setZipPasswordInput("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>ZIP 비밀번호</DialogTitle>
+            <DialogDescription>
+              {zipPasswordPrompt?.path ?? "선택한 ZIP"} 파일을 열려면 비밀번호가 필요합니다.
+            </DialogDescription>
+          </DialogHeader>
+          <Field {...(zipPasswordPrompt?.invalid ? { "data-invalid": true } : {})}>
+            <FieldLabel htmlFor="zip-password-input">비밀번호</FieldLabel>
+            <Input
+              id="zip-password-input"
+              type="password"
+              value={zipPasswordInput}
+              aria-invalid={zipPasswordPrompt?.invalid || undefined}
+              onChange={(event) => setZipPasswordInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || !zipPasswordPrompt) {
+                  return;
+                }
+                event.preventDefault();
+                void expandZip(zipPasswordPrompt.path, zipPasswordPrompt.fileId, zipPasswordInput);
+              }}
+            />
+            {zipPasswordPrompt?.invalid ? (
+              <FieldDescription>비밀번호가 올바르지 않습니다.</FieldDescription>
+            ) : null}
+          </Field>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setZipPasswordPrompt(null);
+                setZipPasswordInput("");
+              }}
+            >
+              취소
+            </Button>
+            <Button
+              onClick={() => {
+                if (!zipPasswordPrompt) {
+                  return;
+                }
+                void expandZip(zipPasswordPrompt.path, zipPasswordPrompt.fileId, zipPasswordInput);
+              }}
+            >
+              확인
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

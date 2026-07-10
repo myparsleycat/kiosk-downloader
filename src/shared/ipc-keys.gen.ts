@@ -5,6 +5,7 @@ export const IPC_HANDLER_CHANNELS = [
     "download:includeFile",
     "download:includeFolder",
     "download:list",
+    "download:listZipEntries",
     "download:loadCollection",
     "download:openFolder",
     "download:pauseCollection",
