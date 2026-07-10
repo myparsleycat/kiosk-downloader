@@ -303,7 +303,7 @@ export class DownloadScheduler {
         const settings = await this.getSettings();
         const segmentPoolSize = settings.segmentPoolSize;
         this.segmentPool.resize(segmentPoolSize);
-        this.transferPool.resize(segmentPoolSize);
+        this.transferPool.start();
         const collections = this.repository.listRunnableCollections();
 
         for (const collection of collections) {
