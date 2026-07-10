@@ -1,3 +1,20 @@
+# [1.4.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.3.0...v1.4.0) (2026-07-10)
+
+
+### Bug Fixes
+
+* **download:** reconcile transfer chunk layout ([ea8b07b](https://github.com/myparsleycat/kiosk-downloader/commit/ea8b07b611b27104fbb257f057db61b749a99499))
+
+
+### Features
+
+* **download:** adapt transfer concurrency on rate limits ([87ebb64](https://github.com/myparsleycat/kiosk-downloader/commit/87ebb6444b9d09ac0f5f46cd66377cdd237f8030))
+* **settings:** add 16MB inflate buffer and default to 8MB ([1602db8](https://github.com/myparsleycat/kiosk-downloader/commit/1602db8fa00850113b5f1b6bd9d261a9c901a932))
+* **settings:** add 8MB stream write batch and default to 2MB ([1071ad2](https://github.com/myparsleycat/kiosk-downloader/commit/1071ad2f1adb36a99736f17ce27848ee40524009))
+* **settings:** confirm before enabling shutdown after transfer ([3820869](https://github.com/myparsleycat/kiosk-downloader/commit/38208696dfaba162ac545c14a12d8ccb2bf39bff))
+* shut down system after transfers complete ([dabd24a](https://github.com/myparsleycat/kiosk-downloader/commit/dabd24a56d4d3f371d2ddeb421467ae162ee7dbd))
+* **transfer:** smooth UI speed with time-based EMA ([bf86cd8](https://github.com/myparsleycat/kiosk-downloader/commit/bf86cd8da8ed8c93f132af843aca390c6fc1f5be))
+
 # [1.3.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.2.0...v1.3.0) (2026-07-10)
 
 
