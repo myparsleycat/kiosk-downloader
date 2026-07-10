@@ -92,6 +92,13 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "updated_at", type: "TEXT", notNull: true },
             { name: "elapsed_ms", type: "INTEGER", notNull: true, defaultSql: "0" },
             { name: "error", type: "TEXT" },
+            {
+                name: "ascii_filenames",
+                type: "INTEGER",
+                notNull: true,
+                defaultSql: "0",
+                boolean: true,
+            },
         ],
         indexes: [
             { name: "idx_download_collection_status", columns: ["status"] },
@@ -120,6 +127,13 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "created_at", type: "TEXT", notNull: true },
             { name: "updated_at", type: "TEXT", notNull: true },
             { name: "error", type: "TEXT" },
+            {
+                name: "source_kind",
+                type: "TEXT",
+                notNull: true,
+                defaultSql: "'file'",
+            },
+            { name: "zip_entry_json", type: "TEXT" },
         ],
         indexes: [
             { name: "idx_download_file_collection_id", columns: ["collection_id"] },

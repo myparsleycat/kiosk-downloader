@@ -11,7 +11,7 @@ import {
     STREAM_WRITE_BATCH_BYTES_DEFAULT,
     STREAM_WRITE_BATCH_BYTES_OPTIONS,
 } from "@shared/settings";
-import { normalizePath, toErrorMessage } from "@shared/utils";
+import { toErrorMessage } from "@shared/utils";
 import fse from "fs-extra";
 
 import type { KioskDownloader } from "../..";
@@ -657,14 +657,11 @@ export class DownloadScheduler {
     }
 
     private getFinalPath(collection: DownloadCollectionRow, file: DownloadFileRow) {
-        return path.join(collection.savePath, this.getSafeRelativePath(file.path));
-    }
-
-    private getSafeRelativePath(input: string) {
-        return normalizePath(input)
-            .split("/")
-            .filter(Boolean)
-            .map((part) => this.kd.lib.fs.sanitizeWindowsFilename(part, "_"))
-            .join(path.sep);
+        return path.join(
+            collection.savePath,
+            this.kd.lib.fs.getSafeRelativePath(file.path, {
+                asciiFilenames: collection.asciiFilenames === 1,
+            }),
+        );
     }
 }

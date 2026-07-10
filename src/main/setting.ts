@@ -211,6 +211,12 @@ export class Setting {
                 fromStored: (value) => parseBooleanSetting(value, true),
                 toStored: (value) => String(value),
             },
+            "general.asciiFilenames": {
+                definition: APP_SETTINGS["general.asciiFilenames"],
+                getDefault: () => true,
+                fromStored: (value) => parseBooleanSetting(value, true),
+                toStored: (value) => String(value),
+            },
             "general.logLevel": {
                 definition: APP_SETTINGS["general.logLevel"],
                 getDefault: () => "error" as const,

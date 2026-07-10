@@ -193,8 +193,8 @@ export class DownloadRepository {
                 `INSERT INTO "download_collection"
                  ("id", "share_id", "source_url", "password_plain", "name", "root_id",
                   "segment_size", "expires", "tree_json", "save_path", "status",
-                  "created_at", "updated_at", "elapsed_ms", "error")
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL)`,
+                  "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL, ?)`,
                 [
                     collectionId,
                     record.loaded.collection.shareId,
@@ -208,6 +208,7 @@ export class DownloadRepository {
                     record.savePath,
                     timestamp,
                     timestamp,
+                    record.asciiFilenames ? 1 : 0,
                 ],
             );
 
@@ -252,7 +253,8 @@ export class DownloadRepository {
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
                     "elapsed_ms" AS "elapsedMs",
-                    "error"
+                    "error",
+                    "ascii_filenames" AS "asciiFilenames"
              FROM "download_collection"
              ORDER BY "created_at" DESC`,
         );
@@ -280,7 +282,8 @@ export class DownloadRepository {
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
                     "elapsed_ms" AS "elapsedMs",
-                    "error"
+                    "error",
+                    "ascii_filenames" AS "asciiFilenames"
              FROM "download_collection"
              WHERE "id" = ?
              LIMIT 1`,
@@ -304,7 +307,8 @@ export class DownloadRepository {
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
                     "elapsed_ms" AS "elapsedMs",
-                    "error"
+                    "error",
+                    "ascii_filenames" AS "asciiFilenames"
              FROM "download_collection"
              WHERE "status" IN ('queued', 'downloading')
              ORDER BY "created_at" ASC`,
@@ -346,7 +350,9 @@ export class DownloadRepository {
                     "paused_by_user" AS "pausedByUser",
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
-                    "error"
+                    "error",
+                    COALESCE("source_kind", 'file') AS "sourceKind",
+                    "zip_entry_json" AS "zipEntryJson"
              FROM "download_file"
              WHERE "collection_id" = ?
              ORDER BY "path" ASC`,
@@ -368,7 +374,9 @@ export class DownloadRepository {
                     "paused_by_user" AS "pausedByUser",
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
-                    "error"
+                    "error",
+                    COALESCE("source_kind", 'file') AS "sourceKind",
+                    "zip_entry_json" AS "zipEntryJson"
              FROM "download_file"
              WHERE "collection_id" = ?
                AND "selected" = 1
@@ -413,7 +421,9 @@ export class DownloadRepository {
                     "paused_by_user" AS "pausedByUser",
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
-                    "error"
+                    "error",
+                    COALESCE("source_kind", 'file') AS "sourceKind",
+                    "zip_entry_json" AS "zipEntryJson"
              FROM "download_file"
              WHERE "collection_id" = ?
                AND "selected" = 1
@@ -450,7 +460,9 @@ export class DownloadRepository {
                         "paused_by_user" AS "pausedByUser",
                         "created_at" AS "createdAt",
                         "updated_at" AS "updatedAt",
-                        "error"
+                        "error",
+                        COALESCE("source_kind", 'file') AS "sourceKind",
+                        "zip_entry_json" AS "zipEntryJson"
                  FROM "download_file"
                  WHERE "collection_id" = ?
                    AND "id" IN (${batch.map(() => "?").join(", ")})`,
@@ -496,7 +508,9 @@ export class DownloadRepository {
                     "paused_by_user" AS "pausedByUser",
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
-                    "error"
+                    "error",
+                    COALESCE("source_kind", 'file') AS "sourceKind",
+                    "zip_entry_json" AS "zipEntryJson"
              FROM "download_file"
              WHERE "id" = ?
              LIMIT 1`,

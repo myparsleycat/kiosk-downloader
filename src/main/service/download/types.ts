@@ -40,6 +40,7 @@ export type DownloadCollectionRow = {
     updatedAt: string;
     elapsedMs: number;
     error: string | null;
+    asciiFilenames: number;
 };
 
 export type DownloadFileRow = {
@@ -77,6 +78,7 @@ export type CreateDownloadRecord = {
     password?: string;
     savePath: string;
     selectedPaths: string[];
+    asciiFilenames: boolean;
 };
 
 export type SchedulerSettings = {

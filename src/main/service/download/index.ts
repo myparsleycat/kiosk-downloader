@@ -10,7 +10,7 @@ import type {
     ProbeCollectionPayload,
     ResumePayload,
 } from "@shared/types";
-import { normalizePath, toErrorMessage } from "@shared/utils";
+import { toErrorMessage } from "@shared/utils";
 import { shell } from "electron";
 import fg from "fast-glob";
 import fse from "fs-extra";
@@ -122,15 +122,22 @@ export class DownloadService {
     public async create(payload: CreateDownloadPayload) {
         const loaded = await this.api.loadCollection(payload);
         const basePath = payload.savePath.trim();
-        const createCollectionSubfolder = await this.kd.setting.get(
-            "general.createCollectionSubfolder",
-        );
+        const [createCollectionSubfolder, asciiFilenames] = await Promise.all([
+            this.kd.setting.get("general.createCollectionSubfolder"),
+            this.kd.setting.get("general.asciiFilenames"),
+        ]);
         const savePath = shouldCreateCollectionSubfolder(
             loaded.collection.tree,
             loaded.collection.name,
             createCollectionSubfolder,
         )
-            ? path.join(basePath, this.kd.lib.fs.sanitizeWindowsFilename(loaded.collection.name))
+            ? path.join(
+                  basePath,
+                  this.kd.lib.fs.sanitizeDownloadPathSegment(loaded.collection.name, {
+                      asciiFilenames,
+                      sanitizeString: " ",
+                  }),
+              )
             : basePath;
         const collectionId = this.repository.insertDownload({
             loaded,
@@ -138,6 +145,7 @@ export class DownloadService {
             password: loaded.passwordProtected ? payload.password : undefined,
             savePath,
             selectedPaths: payload.selectedPaths,
+            asciiFilenames,
         });
         await this.emitUpdate(collectionId);
         void this.scheduler.schedule();
@@ -313,7 +321,9 @@ export class DownloadService {
                     "status",
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
-                    "error"
+                    "elapsed_ms" AS "elapsedMs",
+                    "error",
+                    "ascii_filenames" AS "asciiFilenames"
              FROM "download_collection"`,
         );
 
@@ -351,15 +361,12 @@ export class DownloadService {
     }
 
     private getFinalPath(collection: DownloadCollectionRow, file: DownloadFileRow) {
-        return path.join(collection.savePath, this.getSafeRelativePath(file.path));
-    }
-
-    private getSafeRelativePath(input: string) {
-        return normalizePath(input)
-            .split("/")
-            .filter(Boolean)
-            .map((part) => this.kd.lib.fs.sanitizeWindowsFilename(part, "_"))
-            .join(path.sep);
+        return path.join(
+            collection.savePath,
+            this.kd.lib.fs.getSafeRelativePath(file.path, {
+                asciiFilenames: collection.asciiFilenames === 1,
+            }),
+        );
     }
 
     private enrichItem(item: DownloadItem, options: { sampleSpeeds?: boolean } = {}): DownloadItem {

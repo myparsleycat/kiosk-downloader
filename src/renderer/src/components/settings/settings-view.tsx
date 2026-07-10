@@ -53,6 +53,7 @@ const SETTING_KEYS = [
   "general.runOnStartup",
   "general.runInBackground",
   "general.createCollectionSubfolder",
+  "general.asciiFilenames",
   "general.powerSaveBlockInTransfer",
   "general.logLevel",
   "general.theme",
@@ -74,6 +75,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.runOnStartup": false,
   "general.runInBackground": true,
   "general.createCollectionSubfolder": true,
+  "general.asciiFilenames": true,
   "general.powerSaveBlockInTransfer": true,
   "general.logLevel": "error",
   "general.theme": "system",
@@ -234,6 +236,16 @@ export function SettingsView() {
                 onCheckedChange={(value) =>
                   void setSetting("general.createCollectionSubfolder", value)
                 }
+              />
+            }
+          />
+          <SettingRow
+            title="ASCII 파일명으로 저장"
+            description="다운로드 파일·폴더 이름에서 비ASCII 문자를 유사 ASCII 또는 _로 바꿉니다. 새로 시작하는 다운로드에만 적용됩니다."
+            control={
+              <Switch
+                checked={settings["general.asciiFilenames"]}
+                onCheckedChange={(value) => void setSetting("general.asciiFilenames", value)}
               />
             }
           />
