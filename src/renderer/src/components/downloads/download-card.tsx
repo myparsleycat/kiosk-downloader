@@ -12,13 +12,12 @@ export function DownloadCard({
   active: boolean;
   onClick: () => void;
 }) {
-  const { collection, progress, status } = item;
-  const selectedProgress = Object.values(progress).filter((p) => p.selected);
-  const totalBytes = selectedProgress.reduce((a, p) => a + p.size, 0);
-  const downloadedBytes = selectedProgress.reduce((a, p) => a + p.downloaded, 0);
+  const { collection, status, summary } = item;
+  const totalBytes = summary.totalBytes;
+  const downloadedBytes = summary.transferredBytes;
   const pct = totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0;
-  const fileCount = selectedProgress.length;
-  const completedCount = selectedProgress.filter((p) => p.status === "completed").length;
+  const fileCount = summary.totalFiles;
+  const completedCount = summary.completedFiles;
   const speedLabel = status === "downloading" ? formatSpeed(item.speedBps) : null;
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0

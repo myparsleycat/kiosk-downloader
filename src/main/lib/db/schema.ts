@@ -123,6 +123,10 @@ export const TABLE_SPECS: TableSpec[] = [
         ],
         indexes: [
             { name: "idx_download_file_collection_id", columns: ["collection_id"] },
+            {
+                name: "idx_download_file_collection_selected_status",
+                columns: ["collection_id", "selected", "status"],
+            },
             { name: "idx_download_file_status", columns: ["status"] },
             { name: "idx_download_file_remote_id", columns: ["remote_id"] },
         ],
@@ -223,6 +227,10 @@ export const TABLE_SPECS: TableSpec[] = [
         ],
         indexes: [
             { name: "idx_upload_file_collection_id", columns: ["collection_id"] },
+            {
+                name: "idx_upload_file_collection_status",
+                columns: ["collection_id", "status"],
+            },
             { name: "idx_upload_file_status", columns: ["status"] },
             { name: "idx_upload_file_remote_id", columns: ["remote_id"] },
         ],

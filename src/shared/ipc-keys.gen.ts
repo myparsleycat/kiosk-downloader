@@ -49,11 +49,13 @@ export const IPC_SEND_CHANNELS = [
 
 export const IPC_EVENT_CHANNELS = [
     "download:item-update",
+    "download:progress-update",
     "download:update",
     "fn:toast",
     "renderer:reload",
     "setting:update",
     "upload:item-update",
+    "upload:progress-update",
     "upload:update",
     "window:blur",
     "window:focus"

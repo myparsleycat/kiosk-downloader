@@ -93,6 +93,7 @@ export class UploadTransferMetrics {
 
     public getCollectionSnapshot(collectionId: string) {
         return {
+            activeTransferredBytes: this.activeTransferredByCollection.get(collectionId) ?? 0,
             speedBps: this.speedByCollection.get(collectionId) ?? 0,
         };
     }

@@ -17,7 +17,7 @@ import {
 } from "@renderer/components/ui/dialog";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { cn } from "@renderer/lib/utils";
-import type { DownloadStatus, FileProgress, UploadItem } from "@shared/types";
+import type { DownloadStatus, FileProgress, UploadFileProgress, UploadItem } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import {
   ClockIcon,
@@ -272,13 +272,12 @@ function UploadDetail({
     );
   }
 
-  const { progress, status } = item;
-  const allProgress = Object.values(progress);
-  const totalBytes = allProgress.reduce((a, p) => a + p.size, 0);
-  const uploadedBytes = allProgress.reduce((a, p) => a + p.uploaded, 0);
+  const { progress, status, summary } = item;
+  const totalBytes = summary.totalBytes;
+  const uploadedBytes = summary.transferredBytes;
   const pct = totalBytes > 0 ? Math.min(100, (uploadedBytes / totalBytes) * 100) : 0;
-  const fileCount = allProgress.length;
-  const completedCount = allProgress.filter((p) => p.status === "completed").length;
+  const fileCount = summary.totalFiles;
+  const completedCount = summary.completedFiles;
   const speedLabel = status === "uploading" ? formatSpeed(item.speedBps) : null;
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0
@@ -555,21 +554,29 @@ function UploadErrorDialog({
 
 function toTreeProgress(progress: UploadItem["progress"]): Record<string, FileProgress> {
   return Object.fromEntries(
-    Object.entries(progress).map(([path, file]) => [
-      path,
-      {
-        fileId: file.fileId,
-        path: file.path,
-        status: file.status === "uploading" ? "downloading" : file.status,
-        downloaded: file.uploaded,
-        size: file.size,
-        selected: true,
-        speedBps: file.speedBps,
-        error: file.error,
-      },
-    ]),
+    Object.entries(progress).map(([path, file]) => [path, toTreeFileProgress(file)]),
   );
 }
+
+function toTreeFileProgress(file: UploadFileProgress): FileProgress {
+  const cached = treeProgressCache.get(file);
+  if (cached) return cached;
+
+  const converted: FileProgress = {
+    fileId: file.fileId,
+    path: file.path,
+    status: file.status === "uploading" ? "downloading" : file.status,
+    downloaded: file.uploaded,
+    size: file.size,
+    selected: true,
+    speedBps: file.speedBps,
+    error: file.error,
+  };
+  treeProgressCache.set(file, converted);
+  return converted;
+}
+
+const treeProgressCache = new WeakMap<UploadFileProgress, FileProgress>();
 
 function toDownloadStatus(status: UploadItem["status"]): DownloadStatus {
   return status === "uploading" ? "downloading" : status;

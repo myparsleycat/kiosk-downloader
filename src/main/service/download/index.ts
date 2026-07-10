@@ -4,6 +4,7 @@ import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import type {
     CreateDownloadPayload,
     DownloadItem,
+    DownloadProgressPatch,
     FileProgress,
     LoadCollectionPayload,
     ProbeCollectionPayload,
@@ -40,8 +41,8 @@ export class DownloadService {
             async (id) => {
                 await this.emitUpdate(id);
             },
-            async (id) => {
-                await this.emitUpdate(id, { sampleSpeeds: true });
+            async (id, fileIds) => {
+                await this.emitProgressUpdate(id, fileIds);
             },
         );
     }
@@ -380,6 +381,14 @@ export class DownloadService {
         return {
             ...item,
             progress,
+            summary: {
+                ...item.summary,
+                transferredBytes: Math.min(
+                    item.summary.totalBytes,
+                    item.summary.transferredBytes +
+                        this.metrics.getCollectionSnapshot(item.id).activeTransferredBytes,
+                ),
+            },
             speedBps:
                 item.status === "downloading" && collectionSpeedBps > 0
                     ? collectionSpeedBps
@@ -388,16 +397,66 @@ export class DownloadService {
         };
     }
 
+    private async emitProgressUpdate(collectionId: string, fileIds: Set<string>) {
+        const collection = this.repository.getCollection(collectionId);
+        if (!collection) {
+            return;
+        }
+
+        const progress: Record<string, FileProgress> = {};
+        for (const file of this.repository.getFilesByIds(collectionId, fileIds)) {
+            const snapshot = this.metrics.sampleFile(file.id, file.downloadedBytes);
+            progress[file.path] = {
+                fileId: file.id,
+                path: file.path,
+                status: file.status,
+                downloaded: Math.min(file.size, snapshot.liveDownloaded),
+                size: file.size,
+                selected: file.selected === 1,
+                speedBps:
+                    file.status === "downloading" && snapshot.speedBps > 0
+                        ? snapshot.speedBps
+                        : undefined,
+                error: file.error ?? undefined,
+            };
+        }
+
+        const collectionSnapshot = this.metrics.getCollectionSnapshot(collectionId);
+        const summary = this.repository.getSummary(collectionId);
+        const patch: DownloadProgressPatch = {
+            id: collectionId,
+            progress,
+            summary: {
+                ...summary,
+                transferredBytes: Math.min(
+                    summary.totalBytes,
+                    summary.transferredBytes + collectionSnapshot.activeTransferredBytes,
+                ),
+            },
+            status: collection.status,
+            speedBps:
+                collection.status === "downloading"
+                    ? this.metrics.sampleCollection(collectionId) || null
+                    : null,
+            elapsedMs: this.scheduler.getCollectionElapsedMs(collectionId),
+            updatedAt: Date.parse(collection.updatedAt),
+        };
+        this.kd.ipc.sendToMainWindow("download:progress-update", patch);
+    }
+
     private async emitUpdate(collectionId?: string, options: { sampleSpeeds?: boolean } = {}) {
         if (collectionId) {
             const item = this.repository.getItem(collectionId);
             if (item) {
-                this.kd.ipc.broadcast("download:item-update", this.enrichItem(item, options));
+                this.kd.ipc.sendToMainWindow(
+                    "download:item-update",
+                    this.enrichItem(item, options),
+                );
             }
             return;
         }
 
-        this.kd.ipc.broadcast(
+        this.kd.ipc.sendToMainWindow(
             "download:update",
             this.repository.listItems().map((item) => this.enrichItem(item, options)),
         );

@@ -38,15 +38,11 @@ export function DownloadDetail({
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
   const [sortField, setSortField] = React.useState<SortField>("name");
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
+  const tree = item?.collection.tree;
 
   const sortedTree = React.useMemo(
-    () =>
-      item
-        ? sortDir !== "none"
-          ? sortTree(item.collection.tree, sortField, sortDir)
-          : item.collection.tree
-        : undefined,
-    [item, sortField, sortDir],
+    () => (tree && sortDir !== "none" ? sortTree(tree, sortField, sortDir) : tree),
+    [tree, sortField, sortDir],
   );
 
   const handleSortClick = (field: SortField) => {
@@ -66,13 +62,12 @@ export function DownloadDetail({
     );
   }
 
-  const { collection, progress, status } = item;
-  const selectedProgress = Object.values(progress).filter((p) => p.selected);
-  const totalBytes = selectedProgress.reduce((a, p) => a + p.size, 0);
-  const downloadedBytes = selectedProgress.reduce((a, p) => a + p.downloaded, 0);
+  const { collection, progress, status, summary } = item;
+  const totalBytes = summary.totalBytes;
+  const downloadedBytes = summary.transferredBytes;
   const pct = totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0;
-  const fileCount = selectedProgress.length;
-  const completedCount = selectedProgress.filter((p) => p.status === "completed").length;
+  const fileCount = summary.totalFiles;
+  const completedCount = summary.completedFiles;
   const speedLabel = status === "downloading" ? formatSpeed(item.speedBps) : null;
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0

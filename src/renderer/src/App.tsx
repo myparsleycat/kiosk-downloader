@@ -1,6 +1,6 @@
 import { cn } from "@renderer/lib/utils";
 import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
-import type { UploadItem } from "@shared/types";
+import type { DownloadItem, UploadItem } from "@shared/types";
 import {
   DownloadIcon,
   LoaderCircleIcon,
@@ -11,8 +11,6 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
-
-import type { DownloadItem } from "./lib/types";
 
 import { DownloadView } from "./components/downloads/download-view";
 import { NewDownloadView } from "./components/new-download/new-download-view";
@@ -25,6 +23,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./comp
 import { UploadList } from "./components/uploads/upload-list";
 import { UploadView } from "./components/uploads/upload-view";
 import { useTitleBarOverlay } from "./hooks/use-title-bar-overlay";
+import {
+  applyPendingItems,
+  mergeProgressPatchIntoItems,
+  upsertItem,
+} from "./lib/merge-progress-patch";
 import { useDownloadTreeExpanded } from "./stores/download-tree-expanded";
 import { useNewDownloadDraft } from "./stores/new-download-draft";
 
@@ -95,11 +98,32 @@ function MainComponent() {
 
   React.useEffect(() => {
     let mounted = true;
+    let initialized = false;
+    const pendingItems = new Map<string, DownloadItem>();
+
+    const applyFullItems = (items: DownloadItem[]) => {
+      if (initialized) {
+        setDownloads(items);
+        return;
+      }
+      for (const item of items) pendingItems.set(item.id, item);
+    };
+
+    const applyFullItem = (item: DownloadItem) => {
+      if (initialized) {
+        setDownloads((prev) => upsertItem(prev, item));
+        return;
+      }
+      pendingItems.set(item.id, item);
+    };
 
     window.api
       .invoke("download:list")
       .then((items) => {
-        if (mounted) setDownloads(items);
+        if (!mounted) return;
+        initialized = true;
+        setDownloads(applyPendingItems(items, pendingItems));
+        pendingItems.clear();
       })
       .catch((error) => {
         toast.error("다운로드 목록을 불러오지 못했습니다", {
@@ -108,15 +132,15 @@ function MainComponent() {
       });
 
     const offUpdate = window.api.on("download:update", (items) => {
-      setDownloads(items);
+      applyFullItems(items);
     });
     const offItem = window.api.on("download:item-update", (item) => {
-      setDownloads((prev) => {
-        const index = prev.findIndex((entry) => entry.id === item.id);
-        if (index === -1) return [item, ...prev];
-        const next = [...prev];
-        next[index] = item;
-        return next;
+      applyFullItem(item);
+    });
+    const offProgress = window.api.on("download:progress-update", (patch) => {
+      if (!initialized) return;
+      React.startTransition(() => {
+        setDownloads((prev) => mergeProgressPatchIntoItems(prev, patch));
       });
     });
     const offToast = window.api.on("fn:toast", (message, data) => {
@@ -127,33 +151,52 @@ function MainComponent() {
       mounted = false;
       offUpdate();
       offItem();
+      offProgress();
       offToast();
     };
   }, []);
 
   React.useEffect(() => {
     let mounted = true;
-    let receivedUploadUpdate = false;
+    let initialized = false;
+    const pendingItems = new Map<string, UploadItem>();
+
+    const applyFullItems = (items: UploadItem[]) => {
+      if (initialized) {
+        setUploads(items);
+        return;
+      }
+      for (const item of items) pendingItems.set(item.id, item);
+    };
+
+    const applyFullItem = (item: UploadItem) => {
+      if (initialized) {
+        setUploads((prev) => upsertItem(prev, item));
+        return;
+      }
+      pendingItems.set(item.id, item);
+    };
 
     const offUpdate = window.api.on("upload:update", (items) => {
-      receivedUploadUpdate = true;
-      setUploads(items);
+      applyFullItems(items);
     });
     const offItem = window.api.on("upload:item-update", (item) => {
-      receivedUploadUpdate = true;
-      setUploads((prev) => {
-        const index = prev.findIndex((entry) => entry.id === item.id);
-        if (index === -1) return [item, ...prev];
-        const next = [...prev];
-        next[index] = item;
-        return next;
+      applyFullItem(item);
+    });
+    const offProgress = window.api.on("upload:progress-update", (patch) => {
+      if (!initialized) return;
+      React.startTransition(() => {
+        setUploads((prev) => mergeProgressPatchIntoItems(prev, patch));
       });
     });
 
     window.api
       .invoke("upload:list")
       .then((items) => {
-        if (mounted && !receivedUploadUpdate) setUploads(items);
+        if (!mounted) return;
+        initialized = true;
+        setUploads(applyPendingItems(items, pendingItems));
+        pendingItems.clear();
       })
       .catch((error) => {
         toast.error("업로드 목록을 불러오지 못했습니다", {
@@ -165,6 +208,7 @@ function MainComponent() {
       mounted = false;
       offUpdate();
       offItem();
+      offProgress();
     };
   }, []);
 

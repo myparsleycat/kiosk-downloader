@@ -344,7 +344,7 @@ export class Setting {
         await this.upsertStoredSetting(spec.definition.storageKey, storedValue);
         await spec.afterSet?.(normalized);
 
-        this.kd.ipc.broadcast("setting:update", { key, value: normalized });
+        this.kd.ipc.sendToMainWindow("setting:update", { key, value: normalized });
         return normalized;
     }
 

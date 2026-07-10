@@ -25,6 +25,7 @@ import type {
     SchedulerSettings,
 } from "./types";
 
+import { TransferProgressBatcher } from "../transfer-progress-batcher";
 import { PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
 
@@ -60,8 +61,6 @@ function ensurePositiveInteger(value: number, fallback: number) {
     return Math.max(1, Math.floor(value));
 }
 
-const PROGRESS_EMIT_INTERVAL_MS = 500;
-
 export class DownloadScheduler {
     private readonly activeCollections = new Set<string>();
     private readonly activeFilesByCollection = new Map<string, Set<string>>();
@@ -69,7 +68,7 @@ export class DownloadScheduler {
     private readonly manualCollections = new Set<string>();
     private readonly manualFiles = new Set<string>();
     private readonly sessionCache = new Map<string, { cat: string; fetchedAt: number }>();
-    private progressPollTimer: ReturnType<typeof setInterval> | null = null;
+    private readonly progressBatcher: TransferProgressBatcher;
     private readonly segmentPool: GlobalSegmentPool;
     private readonly fileStartOrder: string[] = [];
     private readonly collectionStartOrder: string[] = [];
@@ -85,8 +84,25 @@ export class DownloadScheduler {
         private readonly repository: DownloadRepository,
         private readonly metrics: DownloadTransferMetrics,
         private readonly emitUpdate: (collectionId?: string) => Promise<void>,
-        private readonly emitProgressUpdate: (collectionId: string) => Promise<void>,
+        private readonly emitProgressUpdate: (
+            collectionId: string,
+            fileIds: Set<string>,
+        ) => Promise<void>,
     ) {
+        this.progressBatcher = new TransferProgressBatcher(
+            async (collectionId, fileIds) => {
+                await this.emitProgressUpdate(collectionId, fileIds);
+                const activeFileIds = this.activeFilesByCollection.get(collectionId);
+                if (!activeFileIds || activeFileIds.size === 0) {
+                    this.progressBatcher.deactivate(collectionId);
+                    return;
+                }
+                for (const fileId of activeFileIds) {
+                    this.progressBatcher.mark(collectionId, fileId);
+                }
+            },
+            (error) => this.kd.logger.error(error, "DownloadScheduler:emitProgressUpdate"),
+        );
         this.segmentPool = new GlobalSegmentPool({
             kd: this.kd,
             api: this.api,
@@ -140,6 +156,7 @@ export class DownloadScheduler {
         this.sessionCache.delete(collectionId);
         this.clearCollectionStartTracking(collectionId);
         this.stopCollectionTimer(collectionId);
+        this.progressBatcher.deactivate(collectionId);
     }
 
     public resumeCollection(collectionId: string) {
@@ -171,10 +188,11 @@ export class DownloadScheduler {
         this.sessionCache.delete(collectionId);
         this.clearCollectionStartTracking(collectionId);
         this.stopCollectionTimer(collectionId);
+        this.progressBatcher.deactivate(collectionId);
     }
 
     public destroy() {
-        this.stopProgressPollTimer();
+        this.progressBatcher.destroy();
         for (const collectionId of [...this.collectionTimerStartedAt.keys()]) {
             this.stopCollectionTimer(collectionId);
         }
@@ -200,9 +218,10 @@ export class DownloadScheduler {
         const collections = this.repository.listRunnableCollections();
 
         for (const collection of collections) {
-            const hasPending = this.repository
-                .listPendingFiles(collection.id)
-                .some((file) => !this.fileControllers.has(file.id));
+            const hasPending = this.repository.hasPendingFile(
+                collection.id,
+                this.fileControllers.keys(),
+            );
             const isNewCollection = hasPending && !this.activeCollections.has(collection.id);
 
             if (isNewCollection) {
@@ -240,7 +259,6 @@ export class DownloadScheduler {
 
             if (startedAny && collection.status !== "downloading") {
                 this.repository.markCollectionStatus(collection.id, "downloading");
-                await this.emitUpdate(collection.id);
             }
         }
 
@@ -260,10 +278,11 @@ export class DownloadScheduler {
     }
 
     private pickNextFile(collectionId: string) {
-        const pending = this.repository
-            .listPendingFiles(collectionId)
-            .filter((file) => !this.fileControllers.has(file.id));
-        return pending.find((file) => this.manualFiles.has(file.id)) ?? pending[0] ?? null;
+        return this.repository.getNextPendingFile(
+            collectionId,
+            this.manualFiles,
+            this.fileControllers.keys(),
+        );
     }
 
     private getFilePriority(collectionId: string, fileId: string) {
@@ -388,7 +407,7 @@ export class DownloadScheduler {
         const controller = new AbortController();
         this.fileControllers.set(file.id, controller);
         this.activeCollections.add(collection.id);
-        this.ensureProgressPollTimer();
+        this.progressBatcher.activate(collection.id);
 
         const activeFiles = this.activeFilesByCollection.get(collection.id) ?? new Set<string>();
         activeFiles.add(file.id);
@@ -405,7 +424,6 @@ export class DownloadScheduler {
                 this.metrics.clearCollection(collection.id);
                 this.clearCollectionStartTracking(collection.id);
                 this.stopCollectionTimer(collection.id);
-                this.stopProgressPollTimerIfIdle();
             }
             void this.afterFileSettled(collection.id, file.id);
         });
@@ -436,6 +454,11 @@ export class DownloadScheduler {
 
         this.repository.recomputeCollectionStatus(collectionId);
         const updatedCollection = this.repository.getCollection(collectionId);
+        const wasTerminal =
+            collection?.status === "completed" ||
+            collection?.status === "error" ||
+            collection?.status === "expired" ||
+            collection?.status === "paused";
         if (
             updatedCollection &&
             (updatedCollection.status === "completed" ||
@@ -444,8 +467,13 @@ export class DownloadScheduler {
                 updatedCollection.status === "paused")
         ) {
             this.stopCollectionTimer(collectionId);
+            this.progressBatcher.deactivate(collectionId);
+            if (!wasTerminal) {
+                await this.emitUpdate(collectionId);
+            }
+        } else {
+            this.progressBatcher.mark(collectionId, fileId);
         }
-        await this.emitUpdate(collectionId);
         await this.kd.service.transfer.refreshPowerSaveBlock();
         void this.schedule();
     }
@@ -464,6 +492,7 @@ export class DownloadScheduler {
         }
 
         if (this.repository.ensureCollectionNotExpired(collectionId)) {
+            this.progressBatcher.deactivate(collectionId);
             await this.emitUpdate(collectionId);
             return;
         }
@@ -474,7 +503,7 @@ export class DownloadScheduler {
             this.repository.resetRunningChunksForFile(fileId);
             this.repository.markFileStatus(fileId, "downloading");
             this.repository.markCollectionStatus(collectionId, "downloading");
-            await this.emitUpdate(collectionId);
+            this.progressBatcher.mark(collectionId, fileId);
 
             const chunks = this.repository.listChunks(file.id);
             await this.validateCompletedChunks(collection, file, chunks);
@@ -519,6 +548,7 @@ export class DownloadScheduler {
                     const currentFile = this.repository.getFile(fileId);
                     if (currentFile?.status === "downloading") {
                         this.repository.markFileStatus(fileId, "pending");
+                        this.progressBatcher.mark(collectionId, fileId);
                     }
                 }
                 return;
@@ -547,6 +577,7 @@ export class DownloadScheduler {
             const message = toErrorMessage(error);
             if (currentFile) {
                 this.repository.markFileStatus(fileId, "error", message);
+                this.progressBatcher.mark(collectionId, fileId);
             }
             this.kd.logger.error(error, "DownloadService:runFile");
         } finally {
@@ -559,50 +590,6 @@ export class DownloadScheduler {
         this.activeCollections.delete(collectionId);
         this.activeFilesByCollection.delete(collectionId);
         this.metrics.clearCollection(collectionId);
-        this.stopProgressPollTimerIfIdle();
-    }
-
-    private stopProgressPollTimerIfIdle() {
-        if (this.activeCollections.size === 0) {
-            this.stopProgressPollTimer();
-        }
-    }
-
-    private ensureProgressPollTimer() {
-        if (this.progressPollTimer) {
-            return;
-        }
-
-        this.progressPollTimer = setInterval(
-            () => this.pollProgressUpdates(),
-            PROGRESS_EMIT_INTERVAL_MS,
-        );
-    }
-
-    private stopProgressPollTimer() {
-        if (!this.progressPollTimer) {
-            return;
-        }
-
-        clearInterval(this.progressPollTimer);
-        this.progressPollTimer = null;
-    }
-
-    private pollProgressUpdates() {
-        try {
-            if (this.activeCollections.size === 0) {
-                this.stopProgressPollTimer();
-                return;
-            }
-
-            for (const collectionId of this.activeCollections) {
-                void this.emitProgressUpdate(collectionId).catch((error) => {
-                    this.kd.logger.error(error, "DownloadScheduler:pollProgressUpdates");
-                });
-            }
-        } catch (error) {
-            this.kd.logger.error(error, "DownloadScheduler:pollProgressUpdates");
-        }
     }
 
     private async getCollectionToken(collection: DownloadCollectionRow) {
@@ -662,7 +649,7 @@ export class DownloadScheduler {
 
         await PartFileWriter.removeSidecar(partPath);
         this.repository.completeFile(file.id);
-        await this.emitUpdate(collection.id);
+        this.progressBatcher.mark(collection.id, file.id);
     }
 
     private getPartPath(collection: DownloadCollectionRow, file: DownloadFileRow) {

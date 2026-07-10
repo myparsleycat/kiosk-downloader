@@ -90,11 +90,29 @@ export interface FileProgress {
     error?: string;
 }
 
+export interface TransferProgressSummary {
+    transferredBytes: number;
+    totalBytes: number;
+    completedFiles: number;
+    totalFiles: number;
+}
+
+export interface TransferProgressPatch<TProgress, TStatus> {
+    id: string;
+    progress: Record<string, TProgress>;
+    summary: TransferProgressSummary;
+    status: TStatus;
+    speedBps: number | null;
+    elapsedMs: number;
+    updatedAt: number;
+}
+
 export interface DownloadItem {
     id: string;
     collection: Collection;
     savePath: string;
     progress: Record<string, FileProgress>;
+    summary: TransferProgressSummary;
     status: DownloadStatus;
     speedBps?: number;
     elapsedMs?: number;
@@ -102,6 +120,8 @@ export interface DownloadItem {
     updatedAt: number;
     error?: string;
 }
+
+export type DownloadProgressPatch = TransferProgressPatch<FileProgress, DownloadStatus>;
 
 export type DownloadFilter = "all" | "active" | "completed";
 
@@ -152,6 +172,7 @@ export interface UploadItem {
     shareLink: string | null;
     tree: CollectionTree;
     progress: Record<string, UploadFileProgress>;
+    summary: TransferProgressSummary;
     status: UploadStatus;
     speedBps?: number;
     elapsedMs?: number;
@@ -159,6 +180,8 @@ export interface UploadItem {
     updatedAt: number;
     error?: string;
 }
+
+export type UploadProgressPatch = TransferProgressPatch<UploadFileProgress, UploadStatus>;
 
 export interface CreateUploadPayload {
     tree: UploadTreeFile[];
@@ -202,7 +225,9 @@ export type IpcEvents = {
     "renderer:reload": () => void;
     "download:update": (items: DownloadItem[]) => void;
     "download:item-update": (item: DownloadItem) => void;
+    "download:progress-update": (patch: DownloadProgressPatch) => void;
     "upload:update": (items: UploadItem[]) => void;
     "upload:item-update": (item: UploadItem) => void;
+    "upload:progress-update": (patch: UploadProgressPatch) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;
 };

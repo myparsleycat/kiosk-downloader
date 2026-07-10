@@ -68,6 +68,12 @@ export function FileTreeLeadColumn({ withCheckbox = false }: { withCheckbox?: bo
 }
 
 export function FileTree(props: FileTreeProps) {
+  const progress = props.mode === "progress" ? props.progress : null;
+  const dirSummaries = React.useMemo(
+    () => (progress ? buildDirProgressSummaries(props.root, progress) : null),
+    [props.root, progress],
+  );
+
   return (
     <div className="select-none text-sm">
       <TreeNode
@@ -76,6 +82,7 @@ export function FileTree(props: FileTreeProps) {
         pathStack={[]}
         rootKey=""
         props={props}
+        dirSummaries={dirSummaries}
       />
     </div>
   );
@@ -87,9 +94,10 @@ interface TreeNodeProps {
   pathStack: string[];
   rootKey: string;
   props: FileTreeProps;
+  dirSummaries: Map<string, DirProgressSummary> | null;
 }
 
-function TreeNode({ entry, depth, pathStack, rootKey, props }: TreeNodeProps) {
+function TreeNode({ entry, depth, pathStack, rootKey, props, dirSummaries }: TreeNodeProps) {
   const indent = depth * 16 + 8;
   const rightCols = FILE_TREE_RIGHT_COLS[props.mode];
 
@@ -114,6 +122,7 @@ function TreeNode({ entry, depth, pathStack, rootKey, props }: TreeNodeProps) {
       rootKey={rootKey}
       props={props}
       rightCols={rightCols}
+      dirSummaries={dirSummaries}
     />
   );
 }
@@ -168,7 +177,47 @@ function FileRow({
     );
   }
 
-  const prog = props.progress[selectionKey];
+  return (
+    <ProgressFileRow
+      node={node}
+      indent={indent}
+      selectionKey={selectionKey}
+      progress={props.progress[selectionKey]}
+      collectionStatus={props.collectionStatus}
+      onPauseFile={props.onPauseFile}
+      onResumeFile={props.onResumeFile}
+      onIncludeFile={props.onIncludeFile}
+      onError={props.onError}
+      rightCols={rightCols}
+    />
+  );
+}
+
+interface ProgressFileRowProps {
+  node: FileNode;
+  indent: number;
+  selectionKey: string;
+  progress?: FileProgress;
+  collectionStatus?: DownloadStatus;
+  onPauseFile?: (fileId: string) => void;
+  onResumeFile?: (fileId: string, force: boolean) => void;
+  onIncludeFile?: (fileId: string) => void;
+  onError?: (errors: FileTreeError[]) => void;
+  rightCols: string[];
+}
+
+const ProgressFileRow = React.memo(function ProgressFileRow({
+  node,
+  indent,
+  selectionKey,
+  progress: prog,
+  collectionStatus,
+  onPauseFile,
+  onResumeFile,
+  onIncludeFile,
+  onError,
+  rightCols,
+}: ProgressFileRowProps) {
   const status = prog?.status ?? "pending";
   const downloaded = prog?.downloaded ?? 0;
   const pct = node.size > 0 ? Math.min(100, (downloaded / node.size) * 100) : 0;
@@ -207,15 +256,15 @@ function FileRow({
           <StatusPill
             status={selected ? status : "skipped"}
             pct={pct}
-            onClick={errors.length > 0 ? () => props.onError?.(errors) : undefined}
+            onClick={errors.length > 0 ? () => onError?.(errors) : undefined}
           />
         </div>,
         <div key="action" className="flex items-center justify-end">
-          {selected && prog && status === "downloading" && props.onPauseFile && (
+          {selected && prog && status === "downloading" && onPauseFile && (
             <button
               type="button"
               className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-              onClick={() => props.onPauseFile?.(prog.fileId)}
+              onClick={() => onPauseFile(prog.fileId)}
               title="일시정지"
             >
               <PauseIcon className="size-3" />
@@ -224,22 +273,22 @@ function FileRow({
           {selected &&
             prog &&
             (status === "paused" || status === "pending" || status === "error") &&
-            props.collectionStatus !== "expired" &&
-            props.onResumeFile && (
+            collectionStatus !== "expired" &&
+            onResumeFile && (
               <button
                 type="button"
                 className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                onClick={() => props.onResumeFile?.(prog.fileId, status === "error")}
+                onClick={() => onResumeFile(prog.fileId, status === "error")}
                 title="시작"
               >
                 <PlayIcon className="size-3" />
               </button>
             )}
-          {!selected && prog && props.collectionStatus !== "expired" && props.onIncludeFile && (
+          {!selected && prog && collectionStatus !== "expired" && onIncludeFile && (
             <button
               type="button"
               className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-              onClick={() => props.onIncludeFile?.(prog.fileId)}
+              onClick={() => onIncludeFile(prog.fileId)}
               title="다운로드에 추가"
             >
               <PlayIcon className="size-3" />
@@ -248,6 +297,21 @@ function FileRow({
         </div>,
       ]}
     />
+  );
+}, areProgressFileRowPropsEqual);
+
+function areProgressFileRowPropsEqual(previous: ProgressFileRowProps, next: ProgressFileRowProps) {
+  return (
+    previous.node === next.node &&
+    previous.indent === next.indent &&
+    previous.selectionKey === next.selectionKey &&
+    previous.progress === next.progress &&
+    previous.collectionStatus === next.collectionStatus &&
+    previous.rightCols === next.rightCols &&
+    Boolean(previous.onPauseFile) === Boolean(next.onPauseFile) &&
+    Boolean(previous.onResumeFile) === Boolean(next.onResumeFile) &&
+    Boolean(previous.onIncludeFile) === Boolean(next.onIncludeFile) &&
+    Boolean(previous.onError) === Boolean(next.onError)
   );
 }
 
@@ -259,6 +323,7 @@ function DirRow({
   rootKey,
   props,
   rightCols,
+  dirSummaries,
 }: {
   node: DirNode;
   depth: number;
@@ -267,6 +332,7 @@ function DirRow({
   rootKey: string;
   props: FileTreeProps;
   rightCols: string[];
+  dirSummaries: Map<string, DirProgressSummary> | null;
 }) {
   const isRoot = node.name === "";
   const childPathStack = isRoot ? pathStack : [...pathStack, node.name];
@@ -289,8 +355,7 @@ function DirRow({
       : undefined;
 
   const total = props.mode === "selection" ? dirSize(node) : 0;
-  const dirSummary =
-    props.mode === "progress" ? summarizeDirProgress(node, childPathStack, props.progress) : null;
+  const dirSummary = props.mode === "progress" ? (dirSummaries?.get(dirKey) ?? null) : null;
   const showDirExcluded = dirSummary?.allExcluded ?? false;
   const showDirProgress =
     dirSummary !== null &&
@@ -428,6 +493,7 @@ function DirRow({
             pathStack={childPathStack}
             rootKey={childRootKey}
             props={props}
+            dirSummaries={dirSummaries}
           />
         ))}
     </>
@@ -448,29 +514,44 @@ function dirSize(dir: DirNode): number {
 
 const dirSizeCache = new WeakMap<DirNode, number>();
 
-function summarizeDirProgress(
-  dir: DirNode,
-  pathStack: string[],
-  progress: Record<string, FileProgress>,
-) {
-  let totalSize = 0;
-  let downloaded = 0;
-  let speedBps = 0;
-  let fileCount = 0;
-  let excludedCount = 0;
-  let selectedCount = 0;
-  let folderTotalSize = 0;
-  let completedCount = 0;
-  let hasDownloading = false;
-  let hasPaused = false;
-  let hasError = false;
-  const errors: FileTreeError[] = [];
+interface DirProgressSummary {
+  totalSize: number;
+  folderTotalSize: number;
+  downloaded: number;
+  speedBps: number;
+  fileCount: number;
+  excludedCount: number;
+  selectedCount: number;
+  completedCount: number;
+  allExcluded: boolean;
+  hasDownloading: boolean;
+  hasPaused: boolean;
+  hasError: boolean;
+  errors: FileTreeError[];
+  status: "skipped" | "completed" | "downloading" | "error" | "paused" | "pending";
+}
 
-  function walk(node: DirNode, stack: string[]) {
-    for (const e of node.entries) {
+function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileProgress>) {
+  const summaries = new Map<string, DirProgressSummary>();
+
+  function walk(dir: DirNode, pathStack: string[]): DirProgressSummary {
+    let totalSize = 0;
+    let downloaded = 0;
+    let speedBps = 0;
+    let fileCount = 0;
+    let excludedCount = 0;
+    let selectedCount = 0;
+    let folderTotalSize = 0;
+    let completedCount = 0;
+    let hasDownloading = false;
+    let hasPaused = false;
+    let hasError = false;
+    const errors: FileTreeError[] = [];
+
+    for (const e of dir.entries) {
       if (e.kind === "file") {
         const file = e.node as FileNode;
-        const key = [...stack, file.name].join("/");
+        const key = [...pathStack, file.name].join("/");
         const prog = progress[key];
         const selected = prog?.selected ?? true;
 
@@ -502,40 +583,57 @@ function summarizeDirProgress(
       }
 
       const child = e.node as DirNode;
-      walk(child, child.name === "" ? stack : [...stack, child.name]);
+      const childStack = child.name === "" ? pathStack : [...pathStack, child.name];
+      const childSummary = walk(child, childStack);
+      totalSize += childSummary.totalSize;
+      downloaded += childSummary.downloaded;
+      speedBps += childSummary.speedBps;
+      fileCount += childSummary.fileCount;
+      excludedCount += childSummary.excludedCount;
+      selectedCount += childSummary.selectedCount;
+      folderTotalSize += childSummary.folderTotalSize;
+      completedCount += childSummary.completedCount;
+      hasDownloading ||= childSummary.hasDownloading;
+      hasPaused ||= childSummary.hasPaused;
+      hasError ||= childSummary.hasError;
+      errors.push(...childSummary.errors);
     }
+
+    const allExcluded = fileCount > 0 && excludedCount === fileCount;
+    const status = allExcluded
+      ? "skipped"
+      : selectedCount > 0 && completedCount === selectedCount
+        ? "completed"
+        : hasDownloading
+          ? "downloading"
+          : hasError
+            ? "error"
+            : hasPaused
+              ? "paused"
+              : "pending";
+
+    const summary: DirProgressSummary = {
+      totalSize,
+      folderTotalSize,
+      downloaded,
+      speedBps,
+      fileCount,
+      excludedCount,
+      selectedCount,
+      completedCount,
+      allExcluded,
+      hasDownloading,
+      hasPaused,
+      hasError,
+      errors,
+      status,
+    };
+    summaries.set(pathStack.join("/"), summary);
+    return summary;
   }
 
-  walk(dir, pathStack);
-
-  const allExcluded = fileCount > 0 && excludedCount === fileCount;
-  const status = allExcluded
-    ? "skipped"
-    : selectedCount > 0 && completedCount === selectedCount
-      ? "completed"
-      : hasDownloading
-        ? "downloading"
-        : hasError
-          ? "error"
-          : hasPaused
-            ? "paused"
-            : "pending";
-
-  return {
-    totalSize,
-    folderTotalSize,
-    downloaded,
-    speedBps,
-    fileCount,
-    excludedCount,
-    selectedCount,
-    allExcluded,
-    hasDownloading,
-    hasPaused,
-    hasError,
-    errors,
-    status,
-  };
+  walk(root, []);
+  return summaries;
 }
 
 interface TreeRowProps {

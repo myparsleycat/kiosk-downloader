@@ -15,13 +15,12 @@ export function UploadCard({
   onClick: () => void;
   onShowError?: () => void;
 }) {
-  const { progress, status } = item;
-  const allProgress = Object.values(progress);
-  const totalBytes = allProgress.reduce((a, p) => a + p.size, 0);
-  const uploadedBytes = allProgress.reduce((a, p) => a + p.uploaded, 0);
+  const { status, summary } = item;
+  const totalBytes = summary.totalBytes;
+  const uploadedBytes = summary.transferredBytes;
   const pct = totalBytes > 0 ? Math.min(100, (uploadedBytes / totalBytes) * 100) : 0;
-  const fileCount = allProgress.length;
-  const completedCount = allProgress.filter((p) => p.status === "completed").length;
+  const fileCount = summary.totalFiles;
+  const completedCount = summary.completedFiles;
   const speedLabel = status === "uploading" ? formatSpeed(item.speedBps) : null;
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0

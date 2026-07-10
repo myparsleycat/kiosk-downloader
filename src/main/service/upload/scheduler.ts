@@ -21,6 +21,7 @@ import type {
     UploadFileRow,
 } from "./types";
 
+import { TransferProgressBatcher } from "../transfer-progress-batcher";
 import {
     KioUploadClient,
     UploadSessionExpiredError,
@@ -28,7 +29,6 @@ import {
 } from "./kio-upload-client";
 
 const MAX_UPLOAD_IN_FLIGHT_SEGMENTS = 8;
-const PROGRESS_EMIT_INTERVAL_MS = 500;
 const STALL_TIMEOUT_MS = 15_000;
 const MAX_SLOW_RECONNECTS = 2;
 
@@ -49,11 +49,15 @@ type FileWorkState = {
     generation: number;
     paused: boolean;
     failed: boolean;
+    completionPersisted: boolean;
     controller: AbortController;
 };
 
 type CollectionWorkState = {
     fileIds: Set<string>;
+    unfinishedFileIds: Set<string>;
+    activeFileIds: Set<string>;
+    inFlight: number;
     failed: boolean;
     completing: boolean;
 };
@@ -114,10 +118,9 @@ export class UploadScheduler {
     private readonly waiters: Array<() => void> = [];
     private readonly activeCollections = new Set<string>();
     private readonly collectionTimerStartedAt = new Map<string, number>();
-    private readonly progressUpdatesInFlight = new Set<string>();
+    private readonly progressBatcher: TransferProgressBatcher;
     private targetWorkers = 0;
     private runningWorkers = 0;
-    private progressPollTimer: ReturnType<typeof setInterval> | null = null;
 
     public constructor(
         private readonly kd: KioskDownloader,
@@ -125,8 +128,34 @@ export class UploadScheduler {
         private readonly repository: UploadRepository,
         private readonly metrics: UploadTransferMetrics,
         private readonly emitUpdate: (collectionId?: string) => Promise<void>,
-        private readonly emitProgressUpdate: (collectionId: string) => Promise<void>,
-    ) {}
+        emitProgressUpdate: (collectionId: string, fileIds: Set<string>) => Promise<void>,
+    ) {
+        this.progressBatcher = new TransferProgressBatcher(
+            async (collectionId, fileIds) => {
+                await emitProgressUpdate(collectionId, fileIds);
+                const activeFileIds = this.collections.get(collectionId)?.activeFileIds;
+                if (!activeFileIds || activeFileIds.size === 0) {
+                    this.progressBatcher.deactivate(collectionId);
+                    return;
+                }
+                let hasRunnable = false;
+                for (const fileId of activeFileIds) {
+                    const file = this.files.get(fileId);
+                    if (!file || file.paused) {
+                        continue;
+                    }
+                    hasRunnable = true;
+                    this.progressBatcher.mark(collectionId, fileId);
+                }
+                if (!hasRunnable) {
+                    this.progressBatcher.deactivate(collectionId);
+                }
+            },
+            (error) => {
+                this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");
+            },
+        );
+    }
 
     public hasActiveTransfers() {
         return this.activeCollections.size > 0;
@@ -178,12 +207,10 @@ export class UploadScheduler {
             if (!state || state.failed || state.completing) {
                 continue;
             }
-            if (
-                [...state.fileIds].every((fileId) => {
-                    const file = this.files.get(fileId);
-                    return file && file.completed.size === file.chunks.length;
-                })
-            ) {
+            for (const fileId of state.unfinishedFileIds) {
+                this.completeFinishedFile(state, fileId);
+            }
+            if (state.unfinishedFileIds.size === 0) {
                 await this.finalizeCollection(collection.id);
                 continue;
             }
@@ -202,8 +229,11 @@ export class UploadScheduler {
         for (const fileId of state.fileIds) {
             this.pauseFileState(fileId);
         }
+        this.progressBatcher.deactivate(collectionId);
         await this.waitForCollectionIdle(collectionId);
-        this.completeFinishedFiles(collectionId);
+        for (const fileId of state.fileIds) {
+            this.completeFinishedFile(state, fileId);
+        }
         this.stopCollectionTimer(collectionId);
         this.deactivateCollection(collectionId);
     }
@@ -221,13 +251,10 @@ export class UploadScheduler {
         for (const fileId of state.fileIds) {
             this.resumeFileState(fileId);
         }
-        this.completeFinishedFiles(collectionId);
-        if (
-            [...state.fileIds].every((fileId) => {
-                const file = this.files.get(fileId);
-                return file && file.completed.size === file.chunks.length;
-            })
-        ) {
+        for (const fileId of state.fileIds) {
+            this.completeFinishedFile(state, fileId);
+        }
+        if (state.unfinishedFileIds.size === 0) {
             await this.finalizeCollection(collectionId);
             return;
         }
@@ -240,8 +267,14 @@ export class UploadScheduler {
             return;
         }
         this.pauseFileState(fileId);
+        if (!this.hasRunnableFile(state.collectionId)) {
+            this.progressBatcher.deactivate(state.collectionId);
+        }
         await this.waitForFileIdle(state);
-        this.completeFinishedFiles(state.collectionId);
+        const collection = this.collections.get(state.collectionId);
+        if (collection) {
+            this.completeFinishedFile(collection, fileId);
+        }
         if (!this.hasRunnableFile(state.collectionId)) {
             this.stopCollectionTimer(state.collectionId);
             this.deactivateCollection(state.collectionId);
@@ -275,7 +308,7 @@ export class UploadScheduler {
     }
 
     public destroy() {
-        this.stopProgressPollTimer();
+        this.progressBatcher.destroy();
         for (const file of this.files.values()) {
             file.controller.abort();
         }
@@ -371,10 +404,18 @@ export class UploadScheduler {
                 generation: 0,
                 paused: false,
                 failed: false,
+                completionPersisted: false,
                 controller: new AbortController(),
             });
         }
-        this.collections.set(collectionId, { fileIds, failed: false, completing: false });
+        this.collections.set(collectionId, {
+            fileIds,
+            unfinishedFileIds: new Set(fileIds),
+            activeFileIds: new Set(),
+            inFlight: 0,
+            failed: false,
+            completing: false,
+        });
     }
 
     private enqueueFile(fileId: string) {
@@ -409,7 +450,7 @@ export class UploadScheduler {
         if (state.queued.size > 0 || state.inFlight > 0) {
             this.activeCollections.add(state.collectionId);
             this.startCollectionTracking(state.collectionId);
-            this.ensureProgressPollTimer();
+            this.progressBatcher.activate(state.collectionId);
         }
     }
 
@@ -450,6 +491,8 @@ export class UploadScheduler {
             return;
         }
         file.inFlight += 1;
+        collection.activeFileIds.add(chunk.localFileId);
+        collection.inFlight += 1;
         file.inFlightSequences.add(chunk.sequence);
         try {
             const settings = await this.getSettings();
@@ -481,6 +524,7 @@ export class UploadScheduler {
                 if (persistedCollection?.status === "queued") {
                     this.repository.markCollectionStatus(chunk.collectionId, "uploading");
                 }
+                this.markProgress(chunk.collectionId, chunk.localFileId);
                 this.repository.markChunkUploading(row);
                 const attemptController = new AbortController();
                 const onAbort = () => attemptController.abort();
@@ -508,6 +552,7 @@ export class UploadScheduler {
                                 chunk.sequence,
                                 transferred,
                             );
+                            this.markProgress(chunk.collectionId, chunk.localFileId);
                             resetStallTimer();
                         },
                     );
@@ -520,6 +565,7 @@ export class UploadScheduler {
                     this.repository.addFileUploadedBytes(chunk.localFileId, bytes);
                     file.completed.add(chunk.sequence);
                     this.metrics.completeChunk(chunk.localFileId, chunk.sequence);
+                    this.markProgress(chunk.collectionId, chunk.localFileId);
                     return;
                 } catch (error) {
                     clearTimeout(stallTimer);
@@ -595,61 +641,49 @@ export class UploadScheduler {
         } finally {
             file.inFlightSequences.delete(chunk.sequence);
             file.inFlight -= 1;
-            await this.afterChunkSettled(chunk.collectionId);
+            if (file.inFlight === 0) {
+                collection.activeFileIds.delete(chunk.localFileId);
+            }
+            collection.inFlight -= 1;
+            await this.afterChunkSettled(chunk.collectionId, chunk.localFileId);
         }
     }
 
-    private async afterChunkSettled(collectionId: string) {
+    private async afterChunkSettled(collectionId: string, fileId: string) {
         const collection = this.collections.get(collectionId);
         if (!collection) {
             return;
         }
         if (collection.failed) {
-            if (
-                [...collection.fileIds].every(
-                    (fileId) => (this.files.get(fileId)?.inFlight ?? 0) === 0,
-                )
-            ) {
+            if (collection.inFlight === 0) {
                 this.deactivateCollection(collectionId);
             }
             return;
         }
-        if (this.completeFinishedFiles(collectionId)) {
-            await this.emitUpdate(collectionId);
-        }
-        if (
-            [...collection.fileIds].some((fileId) => {
-                const file = this.files.get(fileId);
-                return file && file.completed.size !== file.chunks.length;
-            })
-        ) {
+        if (!this.completeFinishedFile(collection, fileId)) {
             return;
         }
-        if ([...collection.fileIds].some((fileId) => (this.files.get(fileId)?.inFlight ?? 0) > 0)) {
+        if (collection.unfinishedFileIds.size > 0 || collection.inFlight > 0) {
             return;
         }
         await this.finalizeCollection(collectionId);
     }
 
-    private completeFinishedFiles(collectionId: string) {
-        const collection = this.collections.get(collectionId);
-        if (!collection) {
+    private completeFinishedFile(collection: CollectionWorkState, fileId: string) {
+        const file = this.files.get(fileId);
+        if (
+            !file ||
+            file.completionPersisted ||
+            file.inFlight > 0 ||
+            file.completed.size !== file.chunks.length
+        ) {
             return false;
         }
-        let completedAny = false;
-        for (const fileId of collection.fileIds) {
-            const file = this.files.get(fileId);
-            if (!file || file.inFlight > 0 || file.completed.size !== file.chunks.length) {
-                continue;
-            }
-            const persisted = this.repository.getFile(fileId);
-            if (!persisted || persisted.status === "completed") {
-                continue;
-            }
-            this.repository.completeFile(fileId);
-            completedAny = true;
-        }
-        return completedAny;
+        this.repository.completeFile(fileId);
+        file.completionPersisted = true;
+        collection.unfinishedFileIds.delete(fileId);
+        this.markProgress(file.collectionId, fileId);
+        return true;
     }
 
     private async finalizeCollection(collectionId: string) {
@@ -689,6 +723,7 @@ export class UploadScheduler {
             return;
         }
         collection.failed = true;
+        this.progressBatcher.deactivate(collectionId);
         this.removeQueuedCollection(collectionId);
         for (const fileId of collection.fileIds) {
             const file = this.files.get(fileId);
@@ -720,6 +755,15 @@ export class UploadScheduler {
             file.generation === chunk.generation &&
             !file.controller.signal.aborted
         );
+    }
+
+    private markProgress(collectionId: string, fileId: string) {
+        const collection = this.collections.get(collectionId);
+        const file = this.files.get(fileId);
+        if (!collection || collection.failed || collection.completing || !file || file.paused) {
+            return;
+        }
+        this.progressBatcher.mark(collectionId, fileId);
     }
 
     private pauseFileState(fileId: string) {
@@ -818,51 +862,7 @@ export class UploadScheduler {
     private deactivateCollection(collectionId: string) {
         this.activeCollections.delete(collectionId);
         this.metrics.clearCollection(collectionId);
-        this.stopProgressPollTimerIfIdle();
-    }
-
-    private ensureProgressPollTimer() {
-        if (this.progressPollTimer) {
-            return;
-        }
-        this.progressPollTimer = setInterval(
-            () => this.pollProgressUpdates(),
-            PROGRESS_EMIT_INTERVAL_MS,
-        );
-        this.progressPollTimer.unref?.();
-    }
-
-    private stopProgressPollTimer() {
-        if (this.progressPollTimer) {
-            clearInterval(this.progressPollTimer);
-            this.progressPollTimer = null;
-        }
-    }
-
-    private stopProgressPollTimerIfIdle() {
-        if (this.activeCollections.size === 0) {
-            this.stopProgressPollTimer();
-        }
-    }
-
-    private pollProgressUpdates() {
-        for (const collectionId of this.activeCollections) {
-            void this.emitProgressUpdateOnce(collectionId).catch((error) => {
-                this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");
-            });
-        }
-    }
-
-    private async emitProgressUpdateOnce(collectionId: string) {
-        if (this.progressUpdatesInFlight.has(collectionId)) {
-            return;
-        }
-        this.progressUpdatesInFlight.add(collectionId);
-        try {
-            await this.emitProgressUpdate(collectionId);
-        } finally {
-            this.progressUpdatesInFlight.delete(collectionId);
-        }
+        this.progressBatcher.deactivate(collectionId);
     }
 
     private wakeWaiters() {

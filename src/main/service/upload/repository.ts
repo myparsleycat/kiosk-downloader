@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { DirNode, UploadItem, UploadStatus, FileUploadStatus } from "@shared/types";
+import type {
+    DirNode,
+    TransferProgressSummary,
+    UploadItem,
+    UploadStatus,
+    FileUploadStatus,
+} from "@shared/types";
 
 import type { KioskDownloader } from "../..";
 import type {
@@ -151,6 +157,35 @@ export class UploadRepository {
         return this.kd.lib.db.get<UploadFileRow>(fileSelectSql() + ` WHERE "id" = ? LIMIT 1`, [
             fileId,
         ]);
+    }
+
+    public listFilesByIds(collectionId: string, fileIds: Set<string>): UploadFileRow[] {
+        if (fileIds.size === 0) {
+            return [];
+        }
+        return this.kd.lib.db.all<UploadFileRow>(
+            fileSelectSql() +
+                ` WHERE "collection_id" = ? AND "id" IN (${[...fileIds].map(() => "?").join(", ")})`,
+            [collectionId, ...fileIds],
+        );
+    }
+
+    public getProgressSummary(collectionId: string): TransferProgressSummary {
+        const row = this.kd.lib.db.get<{
+            transferredBytes: number;
+            totalBytes: number;
+            completedFiles: number;
+            totalFiles: number;
+        }>(
+            `SELECT COALESCE(SUM("uploaded_bytes"), 0) AS "transferredBytes",
+                    COALESCE(SUM("size"), 0) AS "totalBytes",
+                    COALESCE(SUM(CASE WHEN "status" = 'completed' THEN 1 ELSE 0 END), 0) AS "completedFiles",
+                    COUNT(*) AS "totalFiles"
+             FROM "upload_file"
+             WHERE "collection_id" = ?`,
+            [collectionId],
+        );
+        return row ?? { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
     }
 
     public markCollectionStatus(collectionId: string, status: UploadStatus, error?: string | null) {
@@ -420,17 +455,13 @@ export class UploadRepository {
     }
 
     public completeFile(fileId: string) {
-        const file = this.getFile(fileId);
-        if (!file || file.status === "completed") {
-            return;
-        }
         this.kd.lib.db.run(
             `UPDATE "upload_file"
              SET "status" = 'completed',
                  "uploaded_bytes" = "size",
                  "updated_at" = ?,
                  "error" = NULL
-             WHERE "id" = ?`,
+             WHERE "id" = ? AND "status" != 'completed'`,
             [nowIso(), fileId],
         );
     }
@@ -493,6 +524,7 @@ export class UploadRepository {
 
     private buildItem(collection: UploadCollectionRow): UploadItem {
         const progress: UploadItem["progress"] = {};
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
         for (const file of this.listFiles(collection.id)) {
             progress[file.path] = {
                 fileId: file.id,
@@ -502,6 +534,12 @@ export class UploadRepository {
                 size: file.size,
                 error: file.error ?? undefined,
             };
+            summary.transferredBytes += file.uploadedBytes;
+            summary.totalBytes += file.size;
+            summary.totalFiles += 1;
+            if (file.status === "completed") {
+                summary.completedFiles += 1;
+            }
         }
 
         return {
@@ -513,6 +551,7 @@ export class UploadRepository {
             shareLink: collection.shareLink,
             tree: parseTree(collection.treeJson),
             progress,
+            summary,
             status: collection.status,
             createdAt: Date.parse(collection.createdAt),
             updatedAt: Date.parse(collection.updatedAt),

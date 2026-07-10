@@ -26,16 +26,45 @@ export class IPC {
     }
 
     public postMessageToWindow<K extends keyof IpcEvents>(
-        window: BrowserWindow,
+        window: BrowserWindow | null,
         channel: K,
         ...args: Parameters<IpcEvents[K]>
     ) {
-        window.webContents.send(channel, ...args);
+        if (
+            !window ||
+            window.isDestroyed() ||
+            window.webContents.isDestroyed() ||
+            window.webContents.isLoadingMainFrame()
+        ) {
+            return;
+        }
+        try {
+            window.webContents.send(channel, ...args);
+        } catch (error) {
+            if (
+                window.isDestroyed() ||
+                window.webContents.isDestroyed() ||
+                (error instanceof Error &&
+                    error.message.includes(
+                        "Render frame was disposed before WebFrameMain could be accessed",
+                    ))
+            ) {
+                return;
+            }
+            this.kd.logger.error({ channel, error }, "IPC:postMessageToWindow");
+        }
+    }
+
+    public sendToMainWindow<K extends keyof IpcEvents>(
+        channel: K,
+        ...args: Parameters<IpcEvents[K]>
+    ) {
+        this.postMessageToWindow(this.kd.window.main.window, channel, ...args);
     }
 
     public broadcast<K extends keyof IpcEvents>(channel: K, ...args: Parameters<IpcEvents[K]>) {
         BrowserWindow.getAllWindows().forEach((win) => {
-            win.webContents.send(channel, ...args);
+            this.postMessageToWindow(win, channel, ...args);
         });
     }
 }

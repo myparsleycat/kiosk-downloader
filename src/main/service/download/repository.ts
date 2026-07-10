@@ -357,6 +357,110 @@ export class DownloadRepository {
         );
     }
 
+    public hasPendingFile(collectionId: string, excludedFileIds: Iterable<string> = []) {
+        const excluded = [...excludedFileIds];
+        const row = this.kd.lib.db.get<{ found: number }>(
+            `SELECT 1 AS "found"
+             FROM "download_file"
+             WHERE "collection_id" = ?
+               AND "selected" = 1
+               AND "status" = 'pending'
+               ${excluded.length > 0 ? `AND "id" NOT IN (${excluded.map(() => "?").join(", ")})` : ""}
+             LIMIT 1`,
+            [collectionId, ...excluded],
+        );
+        return row?.found === 1;
+    }
+
+    public getNextPendingFile(
+        collectionId: string,
+        prioritizedFileIds: Iterable<string> = [],
+        excludedFileIds: Iterable<string> = [],
+    ) {
+        const prioritized = [...prioritizedFileIds].slice(0, 400);
+        const excluded = [...excludedFileIds];
+        return this.kd.lib.db.get<DownloadFileRow>(
+            `SELECT "id",
+                    "collection_id" AS "collectionId",
+                    "remote_id" AS "remoteId",
+                    "path",
+                    "name",
+                    "size",
+                    "selected",
+                    "status",
+                    "downloaded_bytes" AS "downloadedBytes",
+                    "paused_by_user" AS "pausedByUser",
+                    "created_at" AS "createdAt",
+                    "updated_at" AS "updatedAt",
+                    "error"
+             FROM "download_file"
+             WHERE "collection_id" = ?
+               AND "selected" = 1
+               AND "status" = 'pending'
+               ${excluded.length > 0 ? `AND "id" NOT IN (${excluded.map(() => "?").join(", ")})` : ""}
+             ORDER BY ${prioritized.length > 0 ? `CASE WHEN "id" IN (${prioritized.map(() => "?").join(", ")}) THEN 0 ELSE 1 END,` : ""}
+                      "created_at" ASC, "path" ASC
+             LIMIT 1`,
+            [collectionId, ...excluded, ...prioritized],
+        );
+    }
+
+    public getFilesByIds(collectionId: string, fileIds: Iterable<string>) {
+        const ids = [...new Set(fileIds)];
+        if (ids.length === 0) {
+            return [];
+        }
+
+        return ids.flatMap((_, offset) => {
+            if (offset % 400 !== 0) {
+                return [];
+            }
+            const batch = ids.slice(offset, offset + 400);
+            return this.kd.lib.db.all<DownloadFileRow>(
+                `SELECT "id",
+                        "collection_id" AS "collectionId",
+                        "remote_id" AS "remoteId",
+                        "path",
+                        "name",
+                        "size",
+                        "selected",
+                        "status",
+                        "downloaded_bytes" AS "downloadedBytes",
+                        "paused_by_user" AS "pausedByUser",
+                        "created_at" AS "createdAt",
+                        "updated_at" AS "updatedAt",
+                        "error"
+                 FROM "download_file"
+                 WHERE "collection_id" = ?
+                   AND "id" IN (${batch.map(() => "?").join(", ")})`,
+                [collectionId, ...batch],
+            );
+        });
+    }
+
+    public getSummary(collectionId: string) {
+        const row = this.kd.lib.db.get<{
+            transferredBytes: number | null;
+            totalBytes: number | null;
+            completedFiles: number;
+            totalFiles: number;
+        }>(
+            `SELECT COALESCE(SUM("downloaded_bytes"), 0) AS "transferredBytes",
+                    COALESCE(SUM("size"), 0) AS "totalBytes",
+                    SUM(CASE WHEN "status" = 'completed' THEN 1 ELSE 0 END) AS "completedFiles",
+                    COUNT(*) AS "totalFiles"
+             FROM "download_file"
+             WHERE "collection_id" = ? AND "selected" = 1`,
+            [collectionId],
+        );
+        return {
+            transferredBytes: Number(row?.transferredBytes ?? 0),
+            totalBytes: Number(row?.totalBytes ?? 0),
+            completedFiles: Number(row?.completedFiles ?? 0),
+            totalFiles: Number(row?.totalFiles ?? 0),
+        };
+    }
+
     public getFile(fileId: string) {
         return this.kd.lib.db.get<DownloadFileRow>(
             `SELECT "id",
@@ -753,17 +857,13 @@ export class DownloadRepository {
     }
 
     public completeFile(fileId: string) {
-        const file = this.getFile(fileId);
-        if (!file) {
-            return;
-        }
         this.kd.lib.db.run(
             `UPDATE "download_file"
              SET "status" = 'completed',
                  "downloaded_bytes" = "size",
                  "updated_at" = ?,
                  "error" = NULL
-             WHERE "id" = ?`,
+             WHERE "id" = ? AND "status" != 'completed'`,
             [nowIso(), fileId],
         );
     }
@@ -778,28 +878,58 @@ export class DownloadRepository {
             return;
         }
 
-        const files = this.listFiles(collectionId).filter((file) => file.selected === 1);
-        if (files.length === 0) {
+        const state = this.kd.lib.db.get<{
+            pending: number;
+            downloading: number;
+            paused: number;
+            completed: number;
+            error: number;
+        }>(
+            `SELECT EXISTS(
+                        SELECT 1 FROM "download_file"
+                        WHERE "collection_id" = ? AND "selected" = 1 AND "status" = 'pending'
+                    ) AS "pending",
+                    EXISTS(
+                        SELECT 1 FROM "download_file"
+                        WHERE "collection_id" = ? AND "selected" = 1 AND "status" = 'downloading'
+                    ) AS "downloading",
+                    EXISTS(
+                        SELECT 1 FROM "download_file"
+                        WHERE "collection_id" = ? AND "selected" = 1 AND "status" = 'paused'
+                    ) AS "paused",
+                    EXISTS(
+                        SELECT 1 FROM "download_file"
+                        WHERE "collection_id" = ? AND "selected" = 1 AND "status" = 'completed'
+                    ) AS "completed",
+                    EXISTS(
+                        SELECT 1 FROM "download_file"
+                        WHERE "collection_id" = ? AND "selected" = 1 AND "status" = 'error'
+                    ) AS "error"`,
+            [collectionId, collectionId, collectionId, collectionId, collectionId],
+        );
+        const pending = state?.pending === 1;
+        const downloading = state?.downloading === 1;
+        const paused = state?.paused === 1;
+        const completed = state?.completed === 1;
+        const error = state?.error === 1;
+        if (!pending && !downloading && !paused && !completed && !error) {
             this.markCollectionStatus(collectionId, "completed");
             return;
         }
-        if (files.every((file) => file.status === "completed")) {
+        if (completed && !pending && !downloading && !paused && !error) {
             this.markCollectionStatus(collectionId, "completed");
             return;
         }
-        if (files.some((file) => file.status === "downloading")) {
+        if (downloading) {
             this.markCollectionStatus(collectionId, "downloading");
             return;
         }
-        if (files.every((file) => file.status === "paused" || file.status === "completed")) {
+        if (paused && !pending && !error) {
             this.markCollectionStatus(collectionId, "paused");
             return;
         }
-        if (files.every((file) => file.status === "completed" || file.status === "error")) {
-            this.markCollectionStatus(
-                collectionId,
-                files.some((file) => file.status === "error") ? "error" : "completed",
-            );
+        if (error && !pending && !paused) {
+            this.markCollectionStatus(collectionId, "error");
             return;
         }
 
@@ -860,6 +990,7 @@ export class DownloadRepository {
 
     private buildItem(collection: DownloadCollectionRow): DownloadItem {
         const progress: Record<string, FileProgress> = {};
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
         for (const file of this.listFiles(collection.id)) {
             progress[file.path] = {
                 fileId: file.id,
@@ -870,6 +1001,14 @@ export class DownloadRepository {
                 selected: file.selected === 1,
                 error: file.error ?? undefined,
             };
+            if (file.selected === 1) {
+                summary.transferredBytes += file.downloadedBytes;
+                summary.totalBytes += file.size;
+                summary.totalFiles += 1;
+                if (file.status === "completed") {
+                    summary.completedFiles += 1;
+                }
+            }
         }
 
         return {
@@ -877,6 +1016,7 @@ export class DownloadRepository {
             collection: rowToCollection(collection),
             savePath: collection.savePath,
             progress,
+            summary,
             status: collection.status,
             createdAt: Date.parse(collection.createdAt),
             updatedAt: Date.parse(collection.updatedAt),
