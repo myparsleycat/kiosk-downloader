@@ -12,6 +12,8 @@ type NewDownloadDraftState = {
     selected: Set<string>;
     probedShareId: string | null;
     settingsHydrated: boolean;
+    zipPasswords: Record<string, string>;
+    zipLoadingPaths: Set<string>;
 };
 
 type NewDownloadDraftActions = {
@@ -25,6 +27,8 @@ type NewDownloadDraftActions = {
     setSelected: (selected: Set<string>) => void;
     updateSelected: (updater: (selected: Set<string>) => Set<string>) => void;
     setProbedShareId: (probedShareId: string | null) => void;
+    setZipPassword: (fileId: string, password: string) => void;
+    setZipLoading: (path: string, loading: boolean) => void;
     clearProbeState: () => void;
     resetDraft: () => void;
     hydrateSettings: () => Promise<void>;
@@ -43,6 +47,8 @@ const draftDefaults = {
     selected: new Set<string>(),
     probedShareId: null,
     settingsHydrated: false,
+    zipPasswords: {},
+    zipLoadingPaths: new Set<string>(),
 } satisfies NewDownloadDraftState;
 
 export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => ({
@@ -68,6 +74,19 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
 
     setProbedShareId: (probedShareId) => set({ probedShareId }),
 
+    setZipPassword: (fileId, password) =>
+        set({ zipPasswords: { ...get().zipPasswords, [fileId]: password } }),
+
+    setZipLoading: (path, loading) => {
+        const next = new Set(get().zipLoadingPaths);
+        if (loading) {
+            next.add(path);
+        } else {
+            next.delete(path);
+        }
+        set({ zipLoadingPaths: next });
+    },
+
     clearProbeState: () =>
         set({
             password: "",
@@ -76,6 +95,8 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
             collection: null,
             selected: new Set(),
             probedShareId: null,
+            zipPasswords: {},
+            zipLoadingPaths: new Set(),
         }),
 
     resetDraft: () =>
@@ -87,6 +108,8 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
             collection: null,
             selected: new Set(),
             probedShareId: null,
+            zipPasswords: {},
+            zipLoadingPaths: new Set(),
         }),
 
     hydrateSettings: async () => {

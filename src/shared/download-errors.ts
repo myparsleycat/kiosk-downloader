@@ -1,5 +1,14 @@
 export const COLLECTION_INVALID_PASSWORD_ERROR = "Invalid password.";
 export const COLLECTION_PASSWORD_REQUIRED_ERROR = "Collection is password-protected.";
+export const ZIP_PASSWORD_REQUIRED_ERROR = "ZIP is password-protected.";
+export const ZIP_INVALID_PASSWORD_ERROR = "Invalid ZIP password.";
+
+/** Unix seconds far enough that transfer.it collections are never treated as expired. */
+export const COLLECTION_EXPIRES_NEVER = 4_102_444_800; // 2100-01-01 UTC
+
+export function isCollectionExpiresNever(expires: number) {
+    return expires >= COLLECTION_EXPIRES_NEVER;
+}
 
 export function getIpcErrorCause(error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -26,4 +35,14 @@ export function isCollectionPasswordRequiredError(error: unknown) {
         cause === COLLECTION_PASSWORD_REQUIRED_ERROR ||
         cause.endsWith("Collection is password-protected.")
     );
+}
+
+export function isZipPasswordRequiredError(error: unknown) {
+    const cause = getIpcErrorCause(error);
+    return cause === ZIP_PASSWORD_REQUIRED_ERROR || cause.endsWith("ZIP is password-protected.");
+}
+
+export function isZipInvalidPasswordError(error: unknown) {
+    const cause = getIpcErrorCause(error);
+    return cause === ZIP_INVALID_PASSWORD_ERROR || cause.endsWith("Invalid ZIP password.");
 }

@@ -53,6 +53,7 @@ export function DownloadView({
       return items.filter(
         (i) =>
           i.status === "downloading" ||
+          i.status === "inflating" ||
           i.status === "paused" ||
           i.status === "queued" ||
           i.status === "error",
@@ -135,7 +136,7 @@ export function DownloadView({
                     />
                   </ContextMenuTrigger>
                   <ContextMenuContent>
-                    {item.status === "downloading" ? (
+                    {item.status === "downloading" || item.status === "inflating" ? (
                       <ContextMenuItem
                         onClick={() =>
                           runAction(() => window.api.invoke("download:pauseCollection", item.id))

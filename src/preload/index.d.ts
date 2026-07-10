@@ -1,15 +1,12 @@
 import { ElectronAPI } from "@electron-toolkit/preload";
 
-import type { IpcEvents, IpcHandlers } from "../shared/types";
+import type { ExpandPathsResult, IpcEvents, IpcHandlers } from "../shared/types";
 
 import { IpcSendChannel } from "../shared/ipc-keys.gen";
 
 declare global {
     interface Window {
         electron: ElectronAPI;
-        webUtils: {
-            getPathForFile: (file: File) => string;
-        };
         api: {
             invoke<T extends keyof IpcHandlers>(
                 channel: T,
@@ -21,6 +18,7 @@ declare global {
                 channel: T,
                 listener: (...args: Parameters<IpcEvents[T]>) => void,
             ): () => void;
+            expandDroppedFiles(files: File[], maxFiles?: number): Promise<ExpandPathsResult>;
         };
     }
 }

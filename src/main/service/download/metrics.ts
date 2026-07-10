@@ -6,6 +6,7 @@ export class DownloadTransferMetrics {
     // Progress is based on written bytes; speed is based on cumulative transferred bytes.
     private readonly writtenByChunk = new Map<string, number>();
     private readonly writtenByFile = new Map<string, number>();
+    private readonly writtenByCollection = new Map<string, number>();
     private readonly transferredByChunk = new Map<string, number>();
     private readonly transferredByFile = new Map<string, number>();
     private readonly transferredByCollection = new Map<string, number>();
@@ -67,6 +68,7 @@ export class DownloadTransferMetrics {
     }
 
     public clearFile(fileId: string) {
+        this.setWrittenSum(fileId, 0);
         for (const key of this.writtenByChunk.keys()) {
             if (key.startsWith(`${fileId}:`)) {
                 this.writtenByChunk.delete(key);
@@ -80,7 +82,6 @@ export class DownloadTransferMetrics {
         this.samplesByFile.delete(fileId);
         this.speedByFile.delete(fileId);
         this.persistedByFile.delete(fileId);
-        this.writtenByFile.delete(fileId);
         this.transferredByFile.delete(fileId);
         this.collectionByFile.delete(fileId);
     }
@@ -109,6 +110,7 @@ export class DownloadTransferMetrics {
 
     public getCollectionSnapshot(collectionId: string) {
         return {
+            activeTransferredBytes: this.writtenByCollection.get(collectionId) ?? 0,
             speedBps: this.speedByCollection.get(collectionId) ?? 0,
         };
     }
@@ -125,6 +127,7 @@ export class DownloadTransferMetrics {
     public clearCollection(collectionId: string) {
         this.samplesByCollection.delete(collectionId);
         this.speedByCollection.delete(collectionId);
+        this.writtenByCollection.delete(collectionId);
         this.transferredByCollection.delete(collectionId);
     }
 
@@ -139,12 +142,24 @@ export class DownloadTransferMetrics {
     }
 
     private setWrittenSum(fileId: string, bytes: number) {
+        const previous = this.writtenByFile.get(fileId) ?? 0;
         if (bytes > 0) {
             this.writtenByFile.set(fileId, bytes);
-            return;
+        } else {
+            this.writtenByFile.delete(fileId);
         }
 
-        this.writtenByFile.delete(fileId);
+        const collectionId = this.collectionByFile.get(fileId);
+        if (!collectionId) {
+            return;
+        }
+        const collectionBytes =
+            (this.writtenByCollection.get(collectionId) ?? 0) + bytes - previous;
+        if (collectionBytes > 0) {
+            this.writtenByCollection.set(collectionId, collectionBytes);
+        } else {
+            this.writtenByCollection.delete(collectionId);
+        }
     }
 
     private addTransferredBytes(fileId: string, bytes: number) {

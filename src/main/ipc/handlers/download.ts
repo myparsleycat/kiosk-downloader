@@ -1,5 +1,6 @@
 import type {
     CreateDownloadPayload,
+    ListZipEntriesPayload,
     LoadCollectionPayload,
     ProbeCollectionPayload,
     ResumePayload,
@@ -12,6 +13,9 @@ import { rh } from "../helper";
 export function registerDownloadHandlers(kd: KioskDownloader) {
     rh("download:loadCollection", (payload: LoadCollectionPayload) =>
         kd.service.download.loadCollection(payload),
+    );
+    rh("download:listZipEntries", (payload: ListZipEntriesPayload) =>
+        kd.service.download.listZipEntries(payload),
     );
     rh("download:probeCollection", (payload: ProbeCollectionPayload) =>
         kd.service.download.probeCollection(payload),

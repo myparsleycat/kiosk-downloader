@@ -13,6 +13,10 @@ import { Separator } from "@renderer/components/ui/separator";
 import { Switch } from "@renderer/components/ui/switch";
 import {
   type AppSettings,
+  BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+  BANDWIDTH_LIMIT_MIBPS_MAX,
+  BANDWIDTH_LIMIT_MIBPS_MIN,
+  CHUNK_RETRY_DEFAULT,
   CHUNK_RETRY_MAX,
   CHUNK_RETRY_MIN,
   SEGMENT_POOL_SIZE_DEFAULT,
@@ -26,6 +30,11 @@ import {
   type StartupResumeMode,
   STREAM_WRITE_BATCH_BYTES_DEFAULT,
   STREAM_WRITE_BATCH_BYTES_OPTIONS,
+  INFLATE_BUFFER_BYTES_DEFAULT,
+  INFLATE_BUFFER_BYTES_OPTIONS,
+  UPLOAD_CHUNK_RETRY_DEFAULT,
+  UPLOAD_CHUNK_RETRY_MAX,
+  UPLOAD_CHUNK_RETRY_MIN,
 } from "@shared/settings";
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
@@ -36,6 +45,7 @@ import {
   MoonIcon,
   PowerIcon,
   SettingsIcon,
+  UploadIcon,
   ZapIcon,
 } from "lucide-react";
 import * as React from "react";
@@ -45,13 +55,19 @@ const SETTING_KEYS = [
   "general.runOnStartup",
   "general.runInBackground",
   "general.createCollectionSubfolder",
+  "general.asciiFilenames",
   "general.powerSaveBlockInTransfer",
   "general.logLevel",
   "general.theme",
   "transfer.segmentPoolSize",
   "transfer.maxChunkRetries",
+  "transfer.uploadMaxChunkRetries",
   "transfer.streamWriteBatchBytes",
+  "transfer.inflateBufferBytes",
   "transfer.startupResumeMode",
+  "transfer.uploadStartupResumeMode",
+  "transfer.downloadBandwidthLimitMibps",
+  "transfer.uploadBandwidthLimitMibps",
 ] as const;
 
 type SettingsState = {
@@ -62,13 +78,19 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.runOnStartup": false,
   "general.runInBackground": true,
   "general.createCollectionSubfolder": true,
+  "general.asciiFilenames": false,
   "general.powerSaveBlockInTransfer": true,
   "general.logLevel": "error",
   "general.theme": "system",
   "transfer.segmentPoolSize": SEGMENT_POOL_SIZE_DEFAULT,
-  "transfer.maxChunkRetries": 5,
+  "transfer.maxChunkRetries": CHUNK_RETRY_DEFAULT,
+  "transfer.uploadMaxChunkRetries": UPLOAD_CHUNK_RETRY_DEFAULT,
   "transfer.streamWriteBatchBytes": STREAM_WRITE_BATCH_BYTES_DEFAULT,
+  "transfer.inflateBufferBytes": INFLATE_BUFFER_BYTES_DEFAULT,
   "transfer.startupResumeMode": "auto",
+  "transfer.uploadStartupResumeMode": "auto",
+  "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+  "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
 };
 
 const chunkRetryOptions = Array.from(
@@ -79,7 +101,20 @@ const chunkRetryOptions = Array.from(
   label: String(value),
 }));
 
+const uploadChunkRetryOptions = Array.from(
+  { length: UPLOAD_CHUNK_RETRY_MAX - UPLOAD_CHUNK_RETRY_MIN + 1 },
+  (_, index) => UPLOAD_CHUNK_RETRY_MIN + index,
+).map((value) => ({
+  value: String(value),
+  label: String(value),
+}));
+
 const streamWriteBatchOptions = STREAM_WRITE_BATCH_BYTES_OPTIONS.map((value) => ({
+  value: String(value),
+  label: formatSize(value),
+}));
+
+const inflateBufferOptions = INFLATE_BUFFER_BYTES_OPTIONS.map((value) => ({
   value: String(value),
   label: formatSize(value),
 }));
@@ -213,9 +248,36 @@ export function SettingsView() {
               />
             }
           />
+          <SettingRow
+            title="ASCII 파일명으로 저장"
+            description="다운로드 파일·폴더 이름에서 비ASCII 문자를 유사 ASCII 또는 _로 바꿉니다. 새로 시작하는 다운로드에만 적용됩니다."
+            control={
+              <Switch
+                checked={settings["general.asciiFilenames"]}
+                onCheckedChange={(value) => void setSetting("general.asciiFilenames", value)}
+              />
+            }
+          />
         </Section>
 
         <Section icon={<DownloadIcon className="size-3.5" />} title="다운로드 큐">
+          <SettingRow
+            title="대역폭 제한"
+            description="다운로드 합산 속도 상한입니다. 0이면 무제한입니다."
+            control={
+              <div className="flex items-center gap-2">
+                <NumberSetting
+                  value={settings["transfer.downloadBandwidthLimitMibps"]}
+                  min={BANDWIDTH_LIMIT_MIBPS_MIN}
+                  max={BANDWIDTH_LIMIT_MIBPS_MAX}
+                  onChange={(value) =>
+                    void setSetting("transfer.downloadBandwidthLimitMibps", value)
+                  }
+                />
+                <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+              </div>
+            }
+          />
           <SettingRow
             title="세그먼트 풀 크기"
             description="앱 전체에서 공유하는 세그먼트 풀의 최대 크기입니다. 여러 파일·컬렉션에 고르게 나뉩니다."
@@ -283,6 +345,33 @@ export function SettingsView() {
             }
           />
           <SettingRow
+            title="압축 해제 배치"
+            description="Deflate ZIP 항목을 압축 해제할 때 사용하는 버퍼 크기입니다."
+            control={
+              <Select
+                items={inflateBufferOptions}
+                value={String(settings["transfer.inflateBufferBytes"])}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  void setSetting("transfer.inflateBufferBytes", Number.parseInt(value, 10));
+                }}
+              >
+                <SelectTrigger className="w-34">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent finalFocus={false}>
+                  <SelectGroup>
+                    {inflateBufferOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            }
+          />
+          <SettingRow
             title="시작 시 이어받기"
             description="앱 시작 시 이전 다운로드를 자동으로 다시 시작할지 선택합니다."
             control={
@@ -292,6 +381,78 @@ export function SettingsView() {
                 onValueChange={(value) => {
                   if (value === null) return;
                   void setSetting("transfer.startupResumeMode", value);
+                }}
+              >
+                <SelectTrigger className="w-34">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent finalFocus={false}>
+                  <SelectGroup>
+                    {startupResumeModeOptions.map((mode) => (
+                      <SelectItem key={mode.value} value={mode.value}>
+                        {mode.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            }
+          />
+        </Section>
+
+        <Section icon={<UploadIcon className="size-3.5" />} title="업로드 큐">
+          <SettingRow
+            title="대역폭 제한"
+            description="업로드 합산 속도 상한입니다. 0이면 무제한입니다."
+            control={
+              <div className="flex items-center gap-2">
+                <NumberSetting
+                  value={settings["transfer.uploadBandwidthLimitMibps"]}
+                  min={BANDWIDTH_LIMIT_MIBPS_MIN}
+                  max={BANDWIDTH_LIMIT_MIBPS_MAX}
+                  onChange={(value) => void setSetting("transfer.uploadBandwidthLimitMibps", value)}
+                />
+                <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+              </div>
+            }
+          />
+          <SettingRow
+            title="청크 재시도"
+            description="청크 업로드 실패 시 최대 재시도 횟수입니다."
+            control={
+              <Select
+                items={uploadChunkRetryOptions}
+                value={String(settings["transfer.uploadMaxChunkRetries"])}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  void setSetting("transfer.uploadMaxChunkRetries", Number.parseInt(value, 10));
+                }}
+              >
+                <SelectTrigger className="w-34">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent finalFocus={false}>
+                  <SelectGroup>
+                    {uploadChunkRetryOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            }
+          />
+          <SettingRow
+            title="시작 시 이어받기"
+            description="앱 시작 시 이전 업로드를 자동으로 다시 시작할지 선택합니다."
+            control={
+              <Select
+                items={startupResumeModeOptions}
+                value={settings["transfer.uploadStartupResumeMode"]}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  void setSetting("transfer.uploadStartupResumeMode", value);
                 }}
               >
                 <SelectTrigger className="w-34">

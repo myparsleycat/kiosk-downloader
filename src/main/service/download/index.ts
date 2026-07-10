@@ -1,47 +1,66 @@
 import path from "node:path";
 
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
+import { tryParseDownloadUrl } from "@shared/share-url";
 import type {
     CreateDownloadPayload,
     DownloadItem,
+    DownloadProgressPatch,
     FileProgress,
+    ListZipEntriesPayload,
+    ListZipEntriesResult,
     LoadCollectionPayload,
     ProbeCollectionPayload,
     ResumePayload,
 } from "@shared/types";
-import { normalizePath, toErrorMessage } from "@shared/utils";
+import { toErrorMessage } from "@shared/utils";
+import { findZipNodeById, isZipExtractMode, listZipNodes, setZipEntries } from "@shared/zip-tree";
 import { shell } from "electron";
 import fg from "fast-glob";
 import fse from "fs-extra";
 
 import type { KioskDownloader } from "../..";
-import type { DownloadCollectionRow, DownloadFileRow } from "./types";
+import type {
+    DownloadCollectionRow,
+    DownloadFileRow,
+    LoadedCollection,
+    LoadedKioskCollection,
+} from "./types";
 
+import { toOsProgressTransfer } from "../os-progress-bar";
 import { KioApiClient } from "./kio-api-client";
 import { DownloadTransferMetrics } from "./metrics";
-import { PartFileWriter } from "./part-file";
+import { PartFileWriter, getStagingPartPath } from "./part-file";
 import { DownloadRepository } from "./repository";
 import { DownloadScheduler } from "./scheduler";
+import { TransferItApiClient } from "./transfer-it-api-client";
+import { indexZipFromSegments } from "./zip-index";
+
+const CAT_CACHE_TTL_MS = 10 * 60 * 1000;
 
 export class DownloadService {
     private readonly api: KioApiClient;
+    private readonly transferApi: TransferItApiClient;
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
+    private readonly catCache = new Map<string, { cat: string; expiresAt: number }>();
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
+        this.transferApi = new TransferItApiClient(kd);
         this.repository = new DownloadRepository(kd);
         this.scheduler = new DownloadScheduler(
             kd,
             this.api,
+            this.transferApi,
             this.repository,
             this.metrics,
             async (id) => {
                 await this.emitUpdate(id);
             },
-            async (id) => {
-                await this.emitUpdate(id, { sampleSpeeds: true });
+            async (id, fileIds) => {
+                await this.emitProgressUpdate(id, fileIds);
             },
         );
     }
@@ -67,13 +86,26 @@ export class DownloadService {
         return this.scheduler.hasActiveTransfers();
     }
 
+    public listOsProgressTransfers() {
+        return this.repository.listOsProgressRows().map((row) =>
+            toOsProgressTransfer({
+                status: row.status,
+                transferredBytes:
+                    Number(row.transferredBytes) +
+                    this.metrics.getCollectionSnapshot(row.id).activeTransferredBytes,
+                totalBytes: Number(row.totalBytes),
+            }),
+        );
+    }
+
     public destroy() {
         this.scheduler.destroy();
     }
 
     public async loadCollection(payload: LoadCollectionPayload) {
         try {
-            return (await this.api.loadCollection(payload)).collection;
+            const loaded = await this.loadCollectionUnlocked(payload);
+            return loaded.collection;
         } catch (error) {
             this.kd.logger.error(
                 {
@@ -88,8 +120,47 @@ export class DownloadService {
         }
     }
 
+    public async listZipEntries(payload: ListZipEntriesPayload): Promise<ListZipEntriesResult> {
+        try {
+            const loaded = await this.loadCollectionUnlocked(payload);
+            if (loaded.provider === "transfer") {
+                throw new Error("ZIP entry browsing is not supported for transfer.it.");
+            }
+            const found = findZipNodeById(loaded.collection.tree, payload.fileId);
+            if (!found) {
+                throw new Error(`ZIP file not found: ${payload.fileId}`);
+            }
+            const indexed = await this.indexZipNode(
+                loaded,
+                found.zip.id,
+                found.zip.size,
+                payload.zipPassword,
+            );
+            return { entries: indexed.entries };
+        } catch (error) {
+            this.kd.logger.error(
+                {
+                    channel: "download:listZipEntries",
+                    stage: "index",
+                    url: payload.url,
+                    fileId: payload.fileId,
+                    message: toErrorMessage(error),
+                },
+                "DownloadService:listZipEntries",
+            );
+            throw error;
+        }
+    }
+
     public async probeCollection(payload: ProbeCollectionPayload) {
         try {
+            const parsed = tryParseDownloadUrl(payload.url);
+            if (!parsed) {
+                throw new Error("Invalid share URL.");
+            }
+            if (parsed.provider === "transfer") {
+                return await this.transferApi.probeCollection(payload);
+            }
             return await this.api.probeCollection(payload);
         } catch (error) {
             this.kd.logger.error(
@@ -106,30 +177,109 @@ export class DownloadService {
     }
 
     public async create(payload: CreateDownloadPayload) {
-        const loaded = await this.api.loadCollection(payload);
+        const loaded = await this.loadCollectionUnlocked(payload);
+        const selectedPaths = new Set(payload.selectedPaths);
+        let tree = loaded.collection.tree;
+
+        if (loaded.provider === "kiosk") {
+            for (const { zip, path: zipPath } of listZipNodes(tree)) {
+                if (!isZipExtractMode(zipPath, selectedPaths)) {
+                    continue;
+                }
+                const zipPassword = payload.zipPasswords?.[zip.id];
+                const indexed = await this.indexZipNode(loaded, zip.id, zip.size, zipPassword);
+                tree = setZipEntries(tree, zip.id, indexed.entries);
+            }
+        }
+
+        const enriched: LoadedCollection = {
+            ...loaded,
+            collection: {
+                ...loaded.collection,
+                tree,
+            },
+        };
+
         const basePath = payload.savePath.trim();
-        const createCollectionSubfolder = await this.kd.setting.get(
-            "general.createCollectionSubfolder",
-        );
+        const [createCollectionSubfolder, asciiFilenames] = await Promise.all([
+            this.kd.setting.get("general.createCollectionSubfolder"),
+            this.kd.setting.get("general.asciiFilenames"),
+        ]);
         const savePath = shouldCreateCollectionSubfolder(
-            loaded.collection.tree,
-            loaded.collection.name,
+            enriched.collection.tree,
+            enriched.collection.name,
             createCollectionSubfolder,
         )
-            ? path.join(basePath, this.kd.lib.fs.sanitizeWindowsFilename(loaded.collection.name))
+            ? path.join(
+                  basePath,
+                  this.kd.lib.fs.sanitizeDownloadPathSegment(enriched.collection.name, {
+                      asciiFilenames,
+                      sanitizeString: " ",
+                  }),
+              )
             : basePath;
         const collectionId = this.repository.insertDownload({
-            loaded,
+            loaded: enriched,
             url: payload.url,
-            password: loaded.passwordProtected ? payload.password : undefined,
+            password: enriched.passwordProtected ? payload.password : undefined,
             savePath,
             selectedPaths: payload.selectedPaths,
+            asciiFilenames,
+            zipPasswords: payload.zipPasswords,
         });
         await this.emitUpdate(collectionId);
         void this.scheduler.schedule();
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         const item = this.repository.getItem(collectionId);
         return item ? this.enrichItem(item) : null;
+    }
+
+    private async loadCollectionUnlocked(payload: {
+        url: string;
+        password?: string;
+    }): Promise<LoadedCollection> {
+        const parsed = tryParseDownloadUrl(payload.url);
+        if (!parsed) {
+            throw new Error("Invalid share URL.");
+        }
+        if (parsed.provider === "transfer") {
+            return this.transferApi.loadCollection(payload);
+        }
+        const loaded = await this.api.loadCollection(payload);
+        this.cacheCat(loaded.collection.shareId, loaded.cat);
+        return loaded;
+    }
+
+    private cacheCat(shareId: string, cat: string) {
+        this.catCache.set(shareId, { cat, expiresAt: Date.now() + CAT_CACHE_TTL_MS });
+    }
+
+    private async getCat(loaded: LoadedKioskCollection) {
+        const cached = this.catCache.get(loaded.collection.shareId);
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.cat;
+        }
+        this.cacheCat(loaded.collection.shareId, loaded.cat);
+        return loaded.cat;
+    }
+
+    private async indexZipNode(
+        loaded: LoadedKioskCollection,
+        remoteFileId: string,
+        fileSize: number,
+        zipPassword?: string,
+    ) {
+        const cat = await this.getCat(loaded);
+        const segments = await this.api.getSegments(remoteFileId, cat);
+        return indexZipFromSegments({
+            kd: this.kd,
+            shareId: loaded.collection.shareId,
+            remoteFileId,
+            segments,
+            segmentSize: loaded.collection.segmentSize,
+            fileSize,
+            zipPassword,
+        });
     }
 
     public async list() {
@@ -299,7 +449,9 @@ export class DownloadService {
                     "status",
                     "created_at" AS "createdAt",
                     "updated_at" AS "updatedAt",
-                    "error"
+                    "elapsed_ms" AS "elapsedMs",
+                    "error",
+                    "ascii_filenames" AS "asciiFilenames"
              FROM "download_collection"`,
         );
 
@@ -312,10 +464,13 @@ export class DownloadService {
                 this.repository
                     .listFiles(collection.id)
                     .filter((file) => file.selected === 1 && file.status !== "completed")
-                    .map((file) => this.getPartPath(collection, file)),
+                    .flatMap((file) => {
+                        const partPath = this.getPartPath(collection, file);
+                        return [partPath, getStagingPartPath(partPath)];
+                    }),
             );
 
-            const partFiles = await fg("**/*.part", {
+            const partFiles = await fg(["**/*.part", "**/*.part.z"], {
                 cwd: collection.savePath,
                 absolute: true,
                 onlyFiles: true,
@@ -337,15 +492,12 @@ export class DownloadService {
     }
 
     private getFinalPath(collection: DownloadCollectionRow, file: DownloadFileRow) {
-        return path.join(collection.savePath, this.getSafeRelativePath(file.path));
-    }
-
-    private getSafeRelativePath(input: string) {
-        return normalizePath(input)
-            .split("/")
-            .filter(Boolean)
-            .map((part) => this.kd.lib.fs.sanitizeWindowsFilename(part, "_"))
-            .join(path.sep);
+        return path.join(
+            collection.savePath,
+            this.kd.lib.fs.getSafeRelativePath(file.path, {
+                asciiFilenames: collection.asciiFilenames === 1,
+            }),
+        );
     }
 
     private enrichItem(item: DownloadItem, options: { sampleSpeeds?: boolean } = {}): DownloadItem {
@@ -357,13 +509,19 @@ export class DownloadService {
                     ? this.metrics.sampleFile(fileProgress.fileId, fileProgress.downloaded)
                     : this.metrics.getFileSnapshot(fileProgress.fileId, fileProgress.downloaded);
             const liveDownloaded = Math.min(fileProgress.size, snapshot.liveDownloaded);
+            const downloaded =
+                fileProgress.status === "downloading" && fileProgress.size > 0
+                    ? Math.min(liveDownloaded, Math.floor(fileProgress.size * 0.99))
+                    : liveDownloaded;
             const speedBps =
-                fileProgress.status === "downloading" && snapshot.speedBps > 0
+                fileProgress.status === "downloading" &&
+                liveDownloaded < fileProgress.size &&
+                snapshot.speedBps > 0
                     ? snapshot.speedBps
                     : undefined;
             progress[path] = {
                 ...fileProgress,
-                downloaded: liveDownloaded,
+                downloaded,
                 speedBps,
             };
         }
@@ -380,6 +538,14 @@ export class DownloadService {
         return {
             ...item,
             progress,
+            summary: {
+                ...item.summary,
+                transferredBytes: Math.min(
+                    item.summary.totalBytes,
+                    item.summary.transferredBytes +
+                        this.metrics.getCollectionSnapshot(item.id).activeTransferredBytes,
+                ),
+            },
             speedBps:
                 item.status === "downloading" && collectionSpeedBps > 0
                     ? collectionSpeedBps
@@ -388,18 +554,78 @@ export class DownloadService {
         };
     }
 
+    private async emitProgressUpdate(collectionId: string, fileIds: Set<string>) {
+        const collection = this.repository.getCollection(collectionId);
+        if (!collection) {
+            return;
+        }
+
+        const progress: Record<string, FileProgress> = {};
+        for (const file of this.repository.getFilesByIds(collectionId, fileIds)) {
+            const snapshot = this.metrics.sampleFile(file.id, file.downloadedBytes);
+            const liveDownloaded = Math.min(file.size, snapshot.liveDownloaded);
+            const downloaded =
+                file.status === "downloading" && file.size > 0
+                    ? Math.min(liveDownloaded, Math.floor(file.size * 0.99))
+                    : liveDownloaded;
+            progress[file.path] = {
+                fileId: file.id,
+                path: file.path,
+                status: file.status,
+                downloaded,
+                size: file.size,
+                selected: file.selected === 1,
+                speedBps:
+                    file.status === "downloading" &&
+                    liveDownloaded < file.size &&
+                    snapshot.speedBps > 0
+                        ? snapshot.speedBps
+                        : undefined,
+                error: file.error ?? undefined,
+            };
+        }
+
+        const collectionSnapshot = this.metrics.getCollectionSnapshot(collectionId);
+        const summary = this.repository.getSummary(collectionId);
+        const patch: DownloadProgressPatch = {
+            id: collectionId,
+            progress,
+            summary: {
+                ...summary,
+                transferredBytes: Math.min(
+                    summary.totalBytes,
+                    summary.transferredBytes + collectionSnapshot.activeTransferredBytes,
+                ),
+            },
+            status: collection.status,
+            speedBps:
+                collection.status === "downloading"
+                    ? this.metrics.sampleCollection(collectionId) || null
+                    : null,
+            elapsedMs: this.scheduler.getCollectionElapsedMs(collectionId),
+            updatedAt: Date.parse(collection.updatedAt),
+        };
+        this.kd.ipc.sendToMainWindow("download:progress-update", patch);
+        this.kd.service.transfer.syncMainWindowProgressBar();
+    }
+
     private async emitUpdate(collectionId?: string, options: { sampleSpeeds?: boolean } = {}) {
         if (collectionId) {
             const item = this.repository.getItem(collectionId);
             if (item) {
-                this.kd.ipc.broadcast("download:item-update", this.enrichItem(item, options));
+                this.kd.ipc.sendToMainWindow(
+                    "download:item-update",
+                    this.enrichItem(item, options),
+                );
             }
+            this.kd.service.transfer.syncMainWindowProgressBar();
             return;
         }
 
-        this.kd.ipc.broadcast(
+        this.kd.ipc.sendToMainWindow(
             "download:update",
             this.repository.listItems().map((item) => this.enrichItem(item, options)),
         );
+        this.kd.service.transfer.syncMainWindowProgressBar();
     }
 }

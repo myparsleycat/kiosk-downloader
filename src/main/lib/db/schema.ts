@@ -48,7 +48,7 @@ export type TableSpec = {
     foreignKeys?: TableForeignKeySpec[];
 };
 
-export const APP_SCHEMA_VERSION = 2;
+export const APP_SCHEMA_VERSION = 5;
 
 export const TABLE_SPECS: TableSpec[] = [
     {
@@ -92,6 +92,19 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "updated_at", type: "TEXT", notNull: true },
             { name: "elapsed_ms", type: "INTEGER", notNull: true, defaultSql: "0" },
             { name: "error", type: "TEXT" },
+            {
+                name: "ascii_filenames",
+                type: "INTEGER",
+                notNull: true,
+                defaultSql: "0",
+                boolean: true,
+            },
+            {
+                name: "provider",
+                type: "TEXT",
+                notNull: true,
+                defaultSql: "'kiosk'",
+            },
         ],
         indexes: [
             { name: "idx_download_collection_status", columns: ["status"] },
@@ -120,9 +133,21 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "created_at", type: "TEXT", notNull: true },
             { name: "updated_at", type: "TEXT", notNull: true },
             { name: "error", type: "TEXT" },
+            {
+                name: "source_kind",
+                type: "TEXT",
+                notNull: true,
+                defaultSql: "'file'",
+            },
+            { name: "zip_entry_json", type: "TEXT" },
+            { name: "source_meta_json", type: "TEXT" },
         ],
         indexes: [
             { name: "idx_download_file_collection_id", columns: ["collection_id"] },
+            {
+                name: "idx_download_file_collection_selected_status",
+                columns: ["collection_id", "selected", "status"],
+            },
             { name: "idx_download_file_status", columns: ["status"] },
             { name: "idx_download_file_remote_id", columns: ["remote_id"] },
         ],
@@ -166,6 +191,110 @@ export const TABLE_SPECS: TableSpec[] = [
             {
                 columns: ["file_id"],
                 refTable: "download_file",
+                refColumns: ["id"],
+                onDelete: "cascade",
+                onUpdate: "cascade",
+            },
+        ],
+    },
+    {
+        name: "upload_collection",
+        columns: [
+            { name: "id", type: "TEXT", primaryKey: true, notNull: true },
+            { name: "name", type: "TEXT", notNull: true },
+            { name: "description", type: "TEXT", notNull: true, defaultSql: "''" },
+            { name: "password_plain", type: "TEXT" },
+            { name: "share_id", type: "TEXT" },
+            { name: "share_link", type: "TEXT" },
+            { name: "collection_uuid", type: "TEXT", notNull: true },
+            { name: "upload_token", type: "TEXT", notNull: true },
+            { name: "tree_json", type: "TEXT", notNull: true },
+            { name: "segment_size", type: "INTEGER", notNull: true, defaultSql: "16777216" },
+            { name: "expires", type: "INTEGER", notNull: true },
+            { name: "status", type: "TEXT", notNull: true },
+            { name: "created_at", type: "TEXT", notNull: true },
+            { name: "updated_at", type: "TEXT", notNull: true },
+            { name: "elapsed_ms", type: "INTEGER", notNull: true, defaultSql: "0" },
+            { name: "error", type: "TEXT" },
+        ],
+        indexes: [
+            { name: "idx_upload_collection_status", columns: ["status"] },
+            { name: "idx_upload_collection_created_at", columns: ["created_at"] },
+        ],
+    },
+    {
+        name: "upload_file",
+        columns: [
+            { name: "id", type: "TEXT", primaryKey: true, notNull: true },
+            { name: "collection_id", type: "TEXT", notNull: true },
+            { name: "remote_id", type: "TEXT", notNull: true },
+            { name: "path", type: "TEXT", notNull: true },
+            { name: "name", type: "TEXT", notNull: true },
+            { name: "size", type: "INTEGER", notNull: true },
+            { name: "fs_path", type: "TEXT", notNull: true },
+            { name: "source_mtime_ms", type: "INTEGER", notNull: true },
+            { name: "status", type: "TEXT", notNull: true },
+            { name: "uploaded_bytes", type: "INTEGER", notNull: true, defaultSql: "0" },
+            {
+                name: "paused_by_user",
+                type: "INTEGER",
+                notNull: true,
+                defaultSql: "0",
+                boolean: true,
+            },
+            { name: "created_at", type: "TEXT", notNull: true },
+            { name: "updated_at", type: "TEXT", notNull: true },
+            { name: "error", type: "TEXT" },
+        ],
+        indexes: [
+            { name: "idx_upload_file_collection_id", columns: ["collection_id"] },
+            {
+                name: "idx_upload_file_collection_status",
+                columns: ["collection_id", "status"],
+            },
+            { name: "idx_upload_file_status", columns: ["status"] },
+            { name: "idx_upload_file_remote_id", columns: ["remote_id"] },
+        ],
+        foreignKeys: [
+            {
+                columns: ["collection_id"],
+                refTable: "upload_collection",
+                refColumns: ["id"],
+                onDelete: "cascade",
+                onUpdate: "cascade",
+            },
+        ],
+    },
+    {
+        name: "upload_chunk",
+        columns: [
+            { name: "collection_id", type: "TEXT", notNull: true },
+            { name: "file_id", type: "TEXT", notNull: true },
+            { name: "chunk_index", type: "INTEGER", notNull: true },
+            { name: "offset", type: "INTEGER", notNull: true },
+            { name: "size", type: "INTEGER", notNull: true },
+            { name: "status", type: "TEXT", notNull: true },
+            { name: "uploaded_bytes", type: "INTEGER", notNull: true, defaultSql: "0" },
+            { name: "attempts", type: "INTEGER", notNull: true, defaultSql: "0" },
+            { name: "updated_at", type: "TEXT", notNull: true },
+            { name: "error", type: "TEXT" },
+        ],
+        compositePrimaryKey: ["file_id", "chunk_index"],
+        indexes: [
+            { name: "idx_upload_chunk_collection_id", columns: ["collection_id"] },
+            { name: "idx_upload_chunk_status", columns: ["status"] },
+        ],
+        foreignKeys: [
+            {
+                columns: ["collection_id"],
+                refTable: "upload_collection",
+                refColumns: ["id"],
+                onDelete: "cascade",
+                onUpdate: "cascade",
+            },
+            {
+                columns: ["file_id"],
+                refTable: "upload_file",
                 refColumns: ["id"],
                 onDelete: "cascade",
                 onUpdate: "cascade",

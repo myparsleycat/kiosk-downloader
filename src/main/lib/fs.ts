@@ -1,6 +1,8 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 
+import { normalizePath } from "@shared/utils";
+import anyAscii from "any-ascii";
 import fg from "fast-glob";
 import fse from "fs-extra";
 
@@ -30,6 +32,8 @@ const WINDOWS_INVALID_CHARS_REGEX_GLOBAL = /[<>:"/\\|?*\u0000-\u001F]/g;
 const WINDOWS_RESERVED_NAMES_REGEX = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$/i;
 const ONLY_DOTS_REGEX = /^\.+$/;
 const TRAILING_DOTS_REGEX = /[.]+$/;
+// oxlint-disable-next-line no-control-regex
+const NON_PRINTABLE_ASCII_REGEX = /[^\x20-\x7E]/g;
 
 export class FS {
     private readonly kd: KioskDownloader;
@@ -126,6 +130,26 @@ export class FS {
         }
 
         return sanitized;
+    }
+
+    public toAsciiFilename(input: string) {
+        return anyAscii(input).replace(NON_PRINTABLE_ASCII_REGEX, "_");
+    }
+
+    public sanitizeDownloadPathSegment(
+        input: string,
+        options: { asciiFilenames: boolean; sanitizeString?: string } = { asciiFilenames: false },
+    ) {
+        const source = options.asciiFilenames ? this.toAsciiFilename(input) : input;
+        return this.sanitizeWindowsFilename(source, options.sanitizeString ?? "_");
+    }
+
+    public getSafeRelativePath(input: string, options: { asciiFilenames: boolean }) {
+        return normalizePath(input)
+            .split("/")
+            .filter(Boolean)
+            .map((part) => this.sanitizeDownloadPathSegment(part, options))
+            .join(path.sep);
     }
 
     public sanitizePath(input: string) {

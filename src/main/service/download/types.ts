@@ -1,16 +1,29 @@
 import type {
     ChunkDownloadStatus,
     Collection,
+    DownloadProvider,
     DownloadStatus,
     FileDownloadStatus,
 } from "@shared/types";
 
-export type LoadedCollection = {
+export type LoadedKioskCollection = {
+    provider: "kiosk";
     collection: Collection;
     cat: string;
     rootId: string;
     passwordProtected: boolean;
 };
+
+export type LoadedTransferCollection = {
+    provider: "transfer";
+    collection: Collection;
+    rootId: string;
+    passwordProtected: boolean;
+    authPw?: string;
+    nodeKeys: Map<string, string>;
+};
+
+export type LoadedCollection = LoadedKioskCollection | LoadedTransferCollection;
 
 export type SegmentDescriptor = {
     type: "cdn" | "edge";
@@ -22,6 +35,10 @@ export type FlatTreeFile = {
     path: string;
     name: string;
     size: number;
+    sourceKind: "file" | "zip_entry";
+    zipEntryJson: string | null;
+    sourceMetaJson?: string | null;
+    selected?: boolean;
 };
 
 export type DownloadCollectionRow = {
@@ -40,6 +57,8 @@ export type DownloadCollectionRow = {
     updatedAt: string;
     elapsedMs: number;
     error: string | null;
+    asciiFilenames: number;
+    provider: DownloadProvider;
 };
 
 export type DownloadFileRow = {
@@ -56,6 +75,9 @@ export type DownloadFileRow = {
     createdAt: string;
     updatedAt: string;
     error: string | null;
+    sourceKind: "file" | "zip_entry";
+    zipEntryJson: string | null;
+    sourceMetaJson: string | null;
 };
 
 export type DownloadChunkRow = {
@@ -77,10 +99,38 @@ export type CreateDownloadRecord = {
     password?: string;
     savePath: string;
     selectedPaths: string[];
+    asciiFilenames: boolean;
+    zipPasswords?: Record<string, string>;
 };
+
+export type TransferFileSourceMeta = {
+    nodeKey: string;
+};
+
+export type ZipEntryStoredMeta = {
+    path: string;
+    offset: number;
+    compressedSize: number;
+    uncompressedSize: number;
+    compressionMethod: number;
+    encrypted: boolean;
+    archiveSize: number;
+    password?: string;
+    /** Absolute offset of compressed payload; from local header only (not CD). */
+    dataOffset?: number;
+};
+
+export type ZipEntrySegmentRange = {
+    segmentIndex: number;
+    localStart: number;
+    localEnd: number;
+};
+
+export type SegmentDownloadMode = "full-segment" | "byte-range";
 
 export type SchedulerSettings = {
     segmentPoolSize: number;
     maxChunkRetries: number;
     streamWriteBatchBytes: number;
+    inflateBufferBytes: number;
 };

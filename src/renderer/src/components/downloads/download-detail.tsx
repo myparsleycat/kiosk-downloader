@@ -11,6 +11,7 @@ import { Separator } from "@renderer/components/ui/separator";
 import type { DownloadItem, SortDir, SortField } from "@renderer/lib/types";
 import { sortTree } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
+import { isCollectionExpiresNever } from "@shared/download-errors";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import {
   ArrowDownIcon,
@@ -38,15 +39,11 @@ export function DownloadDetail({
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
   const [sortField, setSortField] = React.useState<SortField>("name");
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
+  const tree = item?.collection.tree;
 
   const sortedTree = React.useMemo(
-    () =>
-      item
-        ? sortDir !== "none"
-          ? sortTree(item.collection.tree, sortField, sortDir)
-          : item.collection.tree
-        : undefined,
-    [item, sortField, sortDir],
+    () => (tree && sortDir !== "none" ? sortTree(tree, sortField, sortDir) : tree),
+    [tree, sortField, sortDir],
   );
 
   const handleSortClick = (field: SortField) => {
@@ -66,13 +63,12 @@ export function DownloadDetail({
     );
   }
 
-  const { collection, progress, status } = item;
-  const selectedProgress = Object.values(progress).filter((p) => p.selected);
-  const totalBytes = selectedProgress.reduce((a, p) => a + p.size, 0);
-  const downloadedBytes = selectedProgress.reduce((a, p) => a + p.downloaded, 0);
+  const { collection, progress, status, summary } = item;
+  const totalBytes = summary.totalBytes;
+  const downloadedBytes = summary.transferredBytes;
   const pct = totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0;
-  const fileCount = selectedProgress.length;
-  const completedCount = selectedProgress.filter((p) => p.status === "completed").length;
+  const fileCount = summary.totalFiles;
+  const completedCount = summary.completedFiles;
   const speedLabel = status === "downloading" ? formatSpeed(item.speedBps) : null;
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0
@@ -93,13 +89,15 @@ export function DownloadDetail({
     }
   };
 
-  const expiresLabel = new Date(collection.expires * 1000).toLocaleString("ko-KR", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const expiresLabel = isCollectionExpiresNever(collection.expires)
+    ? "없음"
+    : new Date(collection.expires * 1000).toLocaleString("ko-KR", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
   return (
     <div className="flex h-full flex-col">
@@ -127,7 +125,7 @@ export function DownloadDetail({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {status === "downloading" ? (
+            {status === "downloading" || status === "inflating" ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -260,6 +258,8 @@ function statusLabel(status: DownloadItem["status"]): string {
   switch (status) {
     case "downloading":
       return "다운로드 중";
+    case "inflating":
+      return "해제 중";
     case "paused":
       return "일시정지";
     case "completed":

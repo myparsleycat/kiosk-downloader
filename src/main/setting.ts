@@ -1,9 +1,15 @@
 import {
     APP_SETTINGS,
     type AppSettings,
+    BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+    BANDWIDTH_LIMIT_MIBPS_MAX,
+    BANDWIDTH_LIMIT_MIBPS_MIN,
     CHUNK_RETRY_DEFAULT,
     CHUNK_RETRY_MAX,
     CHUNK_RETRY_MIN,
+    UPLOAD_CHUNK_RETRY_DEFAULT,
+    UPLOAD_CHUNK_RETRY_MAX,
+    UPLOAD_CHUNK_RETRY_MIN,
     SETTING_LOG_LEVELS,
     SEGMENT_POOL_SIZE_DEFAULT,
     SEGMENT_POOL_SIZE_MAX,
@@ -17,6 +23,8 @@ import {
     type StartupResumeMode,
     STREAM_WRITE_BATCH_BYTES_DEFAULT,
     STREAM_WRITE_BATCH_BYTES_OPTIONS,
+    INFLATE_BUFFER_BYTES_DEFAULT,
+    INFLATE_BUFFER_BYTES_OPTIONS,
 } from "@shared/settings";
 import AutoLaunch from "auto-launch";
 import { app, nativeTheme } from "electron";
@@ -72,11 +80,28 @@ function normalizeChunkRetries(value: number) {
     return Math.min(CHUNK_RETRY_MAX, Math.max(CHUNK_RETRY_MIN, Math.floor(value)));
 }
 
+function normalizeUploadChunkRetries(value: number) {
+    if (!Number.isFinite(value)) {
+        return UPLOAD_CHUNK_RETRY_DEFAULT;
+    }
+    return Math.min(UPLOAD_CHUNK_RETRY_MAX, Math.max(UPLOAD_CHUNK_RETRY_MIN, Math.floor(value)));
+}
+
 function normalizeSegmentPoolSize(value: number) {
     if (!Number.isFinite(value)) {
         return SEGMENT_POOL_SIZE_DEFAULT;
     }
     return Math.min(SEGMENT_POOL_SIZE_MAX, Math.max(SEGMENT_POOL_SIZE_MIN, Math.floor(value)));
+}
+
+function normalizeBandwidthLimitMibps(value: number) {
+    if (!Number.isFinite(value)) {
+        return BANDWIDTH_LIMIT_MIBPS_DEFAULT;
+    }
+    return Math.min(
+        BANDWIDTH_LIMIT_MIBPS_MAX,
+        Math.max(BANDWIDTH_LIMIT_MIBPS_MIN, Math.floor(value)),
+    );
 }
 
 function parseStreamWriteBatchBytes(value: string | null | undefined) {
@@ -101,6 +126,30 @@ function normalizeStreamWriteBatchBytes(value: number) {
         return value;
     }
     return STREAM_WRITE_BATCH_BYTES_DEFAULT;
+}
+
+function parseInflateBufferBytes(value: string | null | undefined) {
+    const parsed = Number.parseInt(value ?? "", 10);
+    if (
+        !Number.isFinite(parsed) ||
+        !INFLATE_BUFFER_BYTES_OPTIONS.includes(
+            parsed as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
+        )
+    ) {
+        return INFLATE_BUFFER_BYTES_DEFAULT;
+    }
+    return parsed;
+}
+
+function normalizeInflateBufferBytes(value: number) {
+    if (
+        INFLATE_BUFFER_BYTES_OPTIONS.includes(
+            value as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
+        )
+    ) {
+        return value;
+    }
+    return INFLATE_BUFFER_BYTES_DEFAULT;
 }
 
 function parseStartupResumeMode(value: string | null | undefined): StartupResumeMode {
@@ -188,6 +237,12 @@ export class Setting {
                 fromStored: (value) => parseBooleanSetting(value, true),
                 toStored: (value) => String(value),
             },
+            "general.asciiFilenames": {
+                definition: APP_SETTINGS["general.asciiFilenames"],
+                getDefault: () => false,
+                fromStored: (value) => parseBooleanSetting(value, false),
+                toStored: (value) => String(value),
+            },
             "general.logLevel": {
                 definition: APP_SETTINGS["general.logLevel"],
                 getDefault: () => "error" as const,
@@ -243,6 +298,19 @@ export class Setting {
                 toStored: (value) => String(value),
                 normalize: normalizeChunkRetries,
             },
+            "transfer.uploadMaxChunkRetries": {
+                definition: APP_SETTINGS["transfer.uploadMaxChunkRetries"],
+                getDefault: () => UPLOAD_CHUNK_RETRY_DEFAULT,
+                fromStored: (value) =>
+                    parseBoundedIntegerSetting(
+                        value,
+                        UPLOAD_CHUNK_RETRY_DEFAULT,
+                        UPLOAD_CHUNK_RETRY_MIN,
+                        UPLOAD_CHUNK_RETRY_MAX,
+                    ),
+                toStored: (value) => String(value),
+                normalize: normalizeUploadChunkRetries,
+            },
             "transfer.streamWriteBatchBytes": {
                 definition: APP_SETTINGS["transfer.streamWriteBatchBytes"],
                 getDefault: () => STREAM_WRITE_BATCH_BYTES_DEFAULT,
@@ -250,12 +318,58 @@ export class Setting {
                 toStored: (value) => String(value),
                 normalize: normalizeStreamWriteBatchBytes,
             },
+            "transfer.inflateBufferBytes": {
+                definition: APP_SETTINGS["transfer.inflateBufferBytes"],
+                getDefault: () => INFLATE_BUFFER_BYTES_DEFAULT,
+                fromStored: parseInflateBufferBytes,
+                toStored: (value) => String(value),
+                normalize: normalizeInflateBufferBytes,
+            },
             "transfer.startupResumeMode": {
                 definition: APP_SETTINGS["transfer.startupResumeMode"],
                 getDefault: () => "auto" as const,
                 fromStored: parseStartupResumeMode,
                 toStored: (value) => value,
                 normalize: normalizeStartupResumeMode,
+            },
+            "transfer.uploadStartupResumeMode": {
+                definition: APP_SETTINGS["transfer.uploadStartupResumeMode"],
+                getDefault: () => "auto" as const,
+                fromStored: parseStartupResumeMode,
+                toStored: (value) => value,
+                normalize: normalizeStartupResumeMode,
+            },
+            "transfer.downloadBandwidthLimitMibps": {
+                definition: APP_SETTINGS["transfer.downloadBandwidthLimitMibps"],
+                getDefault: () => BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                fromStored: (value) =>
+                    parseBoundedIntegerSetting(
+                        value,
+                        BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                        BANDWIDTH_LIMIT_MIBPS_MIN,
+                        BANDWIDTH_LIMIT_MIBPS_MAX,
+                    ),
+                toStored: (value) => String(value),
+                normalize: normalizeBandwidthLimitMibps,
+                afterSet: (value) => {
+                    this.kd.service.transfer.setDownloadBandwidthLimitMibps(value);
+                },
+            },
+            "transfer.uploadBandwidthLimitMibps": {
+                definition: APP_SETTINGS["transfer.uploadBandwidthLimitMibps"],
+                getDefault: () => BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                fromStored: (value) =>
+                    parseBoundedIntegerSetting(
+                        value,
+                        BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                        BANDWIDTH_LIMIT_MIBPS_MIN,
+                        BANDWIDTH_LIMIT_MIBPS_MAX,
+                    ),
+                toStored: (value) => String(value),
+                normalize: normalizeBandwidthLimitMibps,
+                afterSet: (value) => {
+                    this.kd.service.transfer.setUploadBandwidthLimitMibps(value);
+                },
             },
         };
 
@@ -344,7 +458,7 @@ export class Setting {
         await this.upsertStoredSetting(spec.definition.storageKey, storedValue);
         await spec.afterSet?.(normalized);
 
-        this.kd.ipc.broadcast("setting:update", { key, value: normalized });
+        this.kd.ipc.sendToMainWindow("setting:update", { key, value: normalized });
         return normalized;
     }
 
@@ -400,12 +514,29 @@ export class Setting {
         getMaxChunkRetries: async () => await this.get("transfer.maxChunkRetries"),
         setMaxChunkRetries: async (value: number) =>
             await this.set("transfer.maxChunkRetries", value),
+        getUploadMaxChunkRetries: async () => await this.get("transfer.uploadMaxChunkRetries"),
+        setUploadMaxChunkRetries: async (value: number) =>
+            await this.set("transfer.uploadMaxChunkRetries", value),
         getStreamWriteBatchBytes: async () => await this.get("transfer.streamWriteBatchBytes"),
         setStreamWriteBatchBytes: async (value: number) =>
             await this.set("transfer.streamWriteBatchBytes", value),
+        getInflateBufferBytes: async () => await this.get("transfer.inflateBufferBytes"),
+        setInflateBufferBytes: async (value: number) =>
+            await this.set("transfer.inflateBufferBytes", value),
         getStartupResumeMode: async () => await this.get("transfer.startupResumeMode"),
         setStartupResumeMode: async (value: StartupResumeMode) =>
             await this.set("transfer.startupResumeMode", value),
+        getUploadStartupResumeMode: async () => await this.get("transfer.uploadStartupResumeMode"),
+        setUploadStartupResumeMode: async (value: StartupResumeMode) =>
+            await this.set("transfer.uploadStartupResumeMode", value),
+        getDownloadBandwidthLimitMibps: async () =>
+            await this.get("transfer.downloadBandwidthLimitMibps"),
+        setDownloadBandwidthLimitMibps: async (value: number) =>
+            await this.set("transfer.downloadBandwidthLimitMibps", value),
+        getUploadBandwidthLimitMibps: async () =>
+            await this.get("transfer.uploadBandwidthLimitMibps"),
+        setUploadBandwidthLimitMibps: async (value: number) =>
+            await this.set("transfer.uploadBandwidthLimitMibps", value),
     };
 }
 

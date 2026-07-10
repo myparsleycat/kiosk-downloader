@@ -5,25 +5,33 @@ import type {
   FileNode,
   FileProgress,
   TreeEntry,
+  ZipNode,
 } from "@renderer/lib/types";
+import { getSelectionCheckState } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { useDownloadTreeExpanded } from "@renderer/stores/download-tree-expanded";
 import { formatSize, formatSpeed } from "@shared/utils";
 import {
+  ArchiveIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FileIcon,
   FolderIcon,
+  Loader2Icon,
   PauseIcon,
   PlayIcon,
+  Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
 
 export interface FileTreeSelectionProps {
   mode: "selection";
   root: DirNode;
-  selected: Set<string>;
-  onToggle: (key: string) => void;
+  selected?: Set<string>;
+  onToggle?: (key: string) => void;
+  onDelete?: (key: string) => void;
+  onExpandZip?: (key: string, zipId: string) => void | Promise<void>;
+  zipLoadingPaths?: Set<string>;
 }
 
 export interface FileTreeProgressProps {
@@ -36,14 +44,18 @@ export interface FileTreeProgressProps {
   onResumeFile?: (fileId: string, force: boolean) => void;
   onIncludeFile?: (fileId: string) => void;
   onIncludeFolder?: (folderPath: string) => void;
+  onError?: (errors: FileTreeError[]) => void;
+}
+
+export interface FileTreeError {
+  path: string;
+  message: string;
 }
 
 export type FileTreeProps = FileTreeSelectionProps | FileTreeProgressProps;
 
 export const FILE_TREE_RIGHT_COLS: Record<FileTreeProps["mode"], string[]> = {
-  // [크기]
-  selection: ["4rem"],
-  // [속도, 진행률, 상태, 액션]
+  selection: ["4rem", "1.5rem"],
   progress: ["5.5rem", "10rem", "5rem", "2.5rem"],
 };
 
@@ -62,6 +74,12 @@ export function FileTreeLeadColumn({ withCheckbox = false }: { withCheckbox?: bo
 }
 
 export function FileTree(props: FileTreeProps) {
+  const progress = props.mode === "progress" ? props.progress : null;
+  const dirSummaries = React.useMemo(
+    () => (progress ? buildDirProgressSummaries(props.root, progress) : null),
+    [props.root, progress],
+  );
+
   return (
     <div className="select-none text-sm">
       <TreeNode
@@ -70,6 +88,7 @@ export function FileTree(props: FileTreeProps) {
         pathStack={[]}
         rootKey=""
         props={props}
+        dirSummaries={dirSummaries}
       />
     </div>
   );
@@ -81,9 +100,10 @@ interface TreeNodeProps {
   pathStack: string[];
   rootKey: string;
   props: FileTreeProps;
+  dirSummaries: Map<string, DirProgressSummary> | null;
 }
 
-function TreeNode({ entry, depth, pathStack, rootKey, props }: TreeNodeProps) {
+function TreeNode({ entry, depth, pathStack, rootKey, props, dirSummaries }: TreeNodeProps) {
   const indent = depth * 16 + 8;
   const rightCols = FILE_TREE_RIGHT_COLS[props.mode];
 
@@ -99,6 +119,22 @@ function TreeNode({ entry, depth, pathStack, rootKey, props }: TreeNodeProps) {
       />
     );
   }
+
+  if (entry.kind === "zip") {
+    return (
+      <ZipRow
+        node={entry.node as ZipNode}
+        depth={depth}
+        indent={indent}
+        pathStack={pathStack}
+        rootKey={rootKey}
+        props={props}
+        rightCols={rightCols}
+        dirSummaries={dirSummaries}
+      />
+    );
+  }
+
   return (
     <DirRow
       node={entry.node as DirNode}
@@ -108,6 +144,7 @@ function TreeNode({ entry, depth, pathStack, rootKey, props }: TreeNodeProps) {
       rootKey={rootKey}
       props={props}
       rightCols={rightCols}
+      dirSummaries={dirSummaries}
     />
   );
 }
@@ -133,8 +170,8 @@ function FileRow({
     return (
       <TreeRow
         indent={indent}
-        checked={props.selected.has(selectionKey)}
-        onToggle={() => props.onToggle(selectionKey)}
+        checked={props.selected?.has(selectionKey)}
+        onToggle={props.onToggle ? () => props.onToggle?.(selectionKey) : undefined}
         icon={<FileIcon className="size-4 text-muted-foreground" />}
         label={node.name}
         rightCols={rightCols}
@@ -142,17 +179,76 @@ function FileRow({
           <span key="size" className="text-right text-xs text-muted-foreground">
             {formatSize(node.size)}
           </span>,
+          props.onDelete ? (
+            <div key="delete" className="flex items-center justify-end">
+              <button
+                type="button"
+                className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onDelete?.(selectionKey);
+                }}
+                title="삭제"
+              >
+                <Trash2Icon className="size-3" />
+              </button>
+            </div>
+          ) : null,
         ]}
       />
     );
   }
 
-  const prog = props.progress[selectionKey];
+  return (
+    <ProgressFileRow
+      node={node}
+      indent={indent}
+      selectionKey={selectionKey}
+      progress={props.progress[selectionKey]}
+      collectionStatus={props.collectionStatus}
+      onPauseFile={props.onPauseFile}
+      onResumeFile={props.onResumeFile}
+      onIncludeFile={props.onIncludeFile}
+      onError={props.onError}
+      rightCols={rightCols}
+    />
+  );
+}
+
+interface ProgressFileRowProps {
+  node: FileNode;
+  indent: number;
+  selectionKey: string;
+  progress?: FileProgress;
+  collectionStatus?: DownloadStatus;
+  onPauseFile?: (fileId: string) => void;
+  onResumeFile?: (fileId: string, force: boolean) => void;
+  onIncludeFile?: (fileId: string) => void;
+  onError?: (errors: FileTreeError[]) => void;
+  rightCols: string[];
+}
+
+const ProgressFileRow = React.memo(function ProgressFileRow({
+  node,
+  indent,
+  selectionKey,
+  progress: prog,
+  collectionStatus,
+  onPauseFile,
+  onResumeFile,
+  onIncludeFile,
+  onError,
+  rightCols,
+}: ProgressFileRowProps) {
   const status = prog?.status ?? "pending";
   const downloaded = prog?.downloaded ?? 0;
   const pct = node.size > 0 ? Math.min(100, (downloaded / node.size) * 100) : 0;
   const selected = prog?.selected ?? true;
   const speedLabel = selected && status === "downloading" ? formatSpeed(prog?.speedBps) : null;
+  const errors =
+    status === "error"
+      ? [{ path: selectionKey, message: prog?.error ?? "오류 정보가 없습니다." }]
+      : [];
 
   return (
     <TreeRow
@@ -179,38 +275,45 @@ function FileRow({
           </span>
         ) : null,
         <div key="status" className="flex justify-end">
-          <StatusPill status={selected ? status : "skipped"} pct={pct} />
+          <StatusPill
+            status={selected ? status : "skipped"}
+            pct={pct}
+            onClick={errors.length > 0 ? () => onError?.(errors) : undefined}
+          />
         </div>,
         <div key="action" className="flex items-center justify-end">
-          {selected && prog && status === "downloading" && props.onPauseFile && (
-            <button
-              type="button"
-              className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-              onClick={() => props.onPauseFile?.(prog.fileId)}
-              title="일시정지"
-            >
-              <PauseIcon className="size-3" />
-            </button>
-          )}
           {selected &&
             prog &&
-            (status === "paused" || status === "pending" || status === "error") &&
-            props.collectionStatus !== "expired" &&
-            props.onResumeFile && (
+            (status === "downloading" || status === "inflating") &&
+            onPauseFile && (
               <button
                 type="button"
                 className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                onClick={() => props.onResumeFile?.(prog.fileId, status === "error")}
+                onClick={() => onPauseFile(prog.fileId)}
+                title="일시정지"
+              >
+                <PauseIcon className="size-3" />
+              </button>
+            )}
+          {selected &&
+            prog &&
+            (status === "paused" || status === "pending" || status === "error") &&
+            collectionStatus !== "expired" &&
+            onResumeFile && (
+              <button
+                type="button"
+                className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={() => onResumeFile(prog.fileId, status === "error")}
                 title="시작"
               >
                 <PlayIcon className="size-3" />
               </button>
             )}
-          {!selected && prog && props.collectionStatus !== "expired" && props.onIncludeFile && (
+          {!selected && prog && collectionStatus !== "expired" && onIncludeFile && (
             <button
               type="button"
               className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-              onClick={() => props.onIncludeFile?.(prog.fileId)}
+              onClick={() => onIncludeFile(prog.fileId)}
               title="다운로드에 추가"
             >
               <PlayIcon className="size-3" />
@@ -219,6 +322,21 @@ function FileRow({
         </div>,
       ]}
     />
+  );
+}, areProgressFileRowPropsEqual);
+
+function areProgressFileRowPropsEqual(previous: ProgressFileRowProps, next: ProgressFileRowProps) {
+  return (
+    previous.node === next.node &&
+    previous.indent === next.indent &&
+    previous.selectionKey === next.selectionKey &&
+    previous.progress === next.progress &&
+    previous.collectionStatus === next.collectionStatus &&
+    previous.rightCols === next.rightCols &&
+    Boolean(previous.onPauseFile) === Boolean(next.onPauseFile) &&
+    Boolean(previous.onResumeFile) === Boolean(next.onResumeFile) &&
+    Boolean(previous.onIncludeFile) === Boolean(next.onIncludeFile) &&
+    Boolean(previous.onError) === Boolean(next.onError)
   );
 }
 
@@ -230,6 +348,7 @@ function DirRow({
   rootKey,
   props,
   rightCols,
+  dirSummaries,
 }: {
   node: DirNode;
   depth: number;
@@ -238,6 +357,7 @@ function DirRow({
   rootKey: string;
   props: FileTreeProps;
   rightCols: string[];
+  dirSummaries: Map<string, DirProgressSummary> | null;
 }) {
   const isRoot = node.name === "";
   const childPathStack = isRoot ? pathStack : [...pathStack, node.name];
@@ -251,20 +371,23 @@ function DirRow({
       : false,
   );
   const toggleStoredExpanded = useDownloadTreeExpanded((state) => state.toggleExpanded);
-  const [selectionExpanded, setSelectionExpanded] = React.useState(true);
+  const [selectionExpanded, setSelectionExpanded] = React.useState(false);
   const expanded = isRoot ? true : props.mode === "progress" ? storedExpanded : selectionExpanded;
 
-  const checked = props.mode === "selection" && dirKey !== "" ? props.selected.has(dirKey) : false;
+  const checked =
+    props.mode === "selection" && dirKey !== "" && props.selected
+      ? getSelectionCheckState(props.selected, dirKey, node)
+      : undefined;
 
-  const total = dirSize(node);
-  const dirSummary =
-    props.mode === "progress" ? summarizeDirProgress(node, childPathStack, props.progress) : null;
+  const total = props.mode === "selection" ? dirSize(node) : 0;
+  const dirSummary = props.mode === "progress" ? (dirSummaries?.get(dirKey) ?? null) : null;
   const showDirExcluded = dirSummary?.allExcluded ?? false;
   const showDirProgress =
     dirSummary !== null &&
     !showDirExcluded &&
     dirSummary.selectedCount > 0 &&
     (dirSummary.hasDownloading ||
+      dirSummary.hasInflating ||
       dirSummary.hasPaused ||
       dirSummary.hasError ||
       dirSummary.downloaded > 0);
@@ -291,7 +414,9 @@ function DirRow({
           }}
           checked={checked}
           onToggle={
-            props.mode === "selection" && dirKey !== "" ? () => props.onToggle(dirKey) : undefined
+            props.mode === "selection" && dirKey !== "" && props.onToggle
+              ? () => props.onToggle?.(dirKey)
+              : undefined
           }
           icon={
             <FolderIcon
@@ -346,7 +471,15 @@ function DirRow({
                         {formatSize(dirSummary.downloaded)} / {formatSize(dirSummary.totalSize)}
                       </span>,
                       <div key="status" className="flex justify-end">
-                        <StatusPill status={dirSummary.status} pct={dirPct} />
+                        <StatusPill
+                          status={dirSummary.status}
+                          pct={dirPct}
+                          onClick={
+                            dirSummary.errors.length > 0
+                              ? () => props.onError?.(dirSummary.errors)
+                              : undefined
+                          }
+                        />
                       </div>,
                       null,
                     ]
@@ -358,6 +491,21 @@ function DirRow({
                   >
                     {formatSize(total)}
                   </span>,
+                  props.onDelete ? (
+                    <div key="delete" className="flex items-center justify-end">
+                      <button
+                        type="button"
+                        className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onDelete?.(dirKey);
+                        }}
+                        title="삭제"
+                      >
+                        <Trash2Icon className="size-3" />
+                      </button>
+                    </div>
+                  ) : null,
                 ]
           }
         />
@@ -371,42 +519,201 @@ function DirRow({
             pathStack={childPathStack}
             rootKey={childRootKey}
             props={props}
+            dirSummaries={dirSummaries}
           />
         ))}
     </>
   );
 }
 
-function dirSize(dir: DirNode): number {
+function ZipRow({
+  node,
+  depth,
+  indent,
+  pathStack,
+  rootKey,
+  props,
+  rightCols,
+  dirSummaries,
+}: {
+  node: ZipNode;
+  depth: number;
+  indent: number;
+  pathStack: string[];
+  rootKey: string;
+  props: FileTreeProps;
+  rightCols: string[];
+  dirSummaries: Map<string, DirProgressSummary> | null;
+}) {
+  const zipKey = [...pathStack, node.name].join("/");
+  const childPathStack = [...pathStack, node.name];
+  const childRootKey = rootKey ? `${rootKey}/${node.name}` : node.name;
+  const progressDownloadId = props.mode === "progress" ? props.downloadId : null;
+  const storedExpanded = useDownloadTreeExpanded((state) =>
+    progressDownloadId
+      ? (state.expandedByDownload[progressDownloadId]?.has(zipKey) ?? false)
+      : false,
+  );
+  const toggleStoredExpanded = useDownloadTreeExpanded((state) => state.toggleExpanded);
+  const [selectionExpanded, setSelectionExpanded] = React.useState(false);
+  const expanded = props.mode === "progress" ? storedExpanded : selectionExpanded;
+  const loading = props.mode === "selection" ? Boolean(props.zipLoadingPaths?.has(zipKey)) : false;
+  const checked =
+    props.mode === "selection" && props.selected
+      ? getSelectionCheckState(props.selected, zipKey, node)
+      : undefined;
+  const dirSummary = props.mode === "progress" ? (dirSummaries?.get(zipKey) ?? null) : null;
+  const hasEntries = Boolean(node.entries);
+
+  const handleExpand = () => {
+    if (props.mode === "progress" && progressDownloadId) {
+      toggleStoredExpanded(progressDownloadId, zipKey);
+      return;
+    }
+    if (!hasEntries) {
+      if (props.mode === "selection") {
+        void props.onExpandZip?.(zipKey, node.id);
+      }
+      setSelectionExpanded(true);
+      return;
+    }
+    setSelectionExpanded((value) => !value);
+  };
+
+  return (
+    <>
+      <TreeRow
+        indent={indent}
+        expandable
+        expanded={expanded && hasEntries}
+        onExpand={handleExpand}
+        checked={checked}
+        onToggle={
+          props.mode === "selection" && props.onToggle ? () => props.onToggle?.(zipKey) : undefined
+        }
+        icon={
+          loading ? (
+            <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+          ) : (
+            <ArchiveIcon
+              className={cn(
+                "size-4 text-muted-foreground",
+                expanded && hasEntries && "text-primary",
+              )}
+            />
+          )
+        }
+        label={node.name}
+        rightCols={rightCols}
+        right={
+          props.mode === "progress"
+            ? dirSummary
+              ? [
+                  null,
+                  <span
+                    key="progress"
+                    className="whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground"
+                  >
+                    {formatSize(dirSummary.downloaded)} / {formatSize(dirSummary.totalSize)}
+                  </span>,
+                  <div key="status" className="flex justify-end">
+                    <StatusPill status={dirSummary.status} pct={0} />
+                  </div>,
+                  null,
+                ]
+              : [null, null, null, null]
+            : [
+                <span key="size" className="text-right text-xs text-muted-foreground tabular-nums">
+                  {formatSize(node.size)}
+                </span>,
+                null,
+              ]
+        }
+      />
+      {expanded &&
+        node.entries?.map((e, i) => (
+          <TreeNode
+            key={`${e.kind}-${(e.node as { id: string }).id ?? i}`}
+            entry={e}
+            depth={depth + 1}
+            pathStack={childPathStack}
+            rootKey={childRootKey}
+            props={props}
+            dirSummaries={dirSummaries}
+          />
+        ))}
+    </>
+  );
+}
+
+function dirSize(dir: DirNode | ZipNode): number {
+  const entries = dir.type === "zip" ? (dir.entries ?? []) : dir.entries;
+  if (dir.type === "zip" && !dir.entries) {
+    return dir.size;
+  }
+  const cached = dirSizeCache.get(dir as DirNode);
+  if (cached !== undefined) return cached;
+
   let total = 0;
-  for (const e of dir.entries) {
-    total += e.kind === "file" ? (e.node as FileNode).size : dirSize(e.node as DirNode);
+  for (const e of entries) {
+    if (e.kind === "file") {
+      total += (e.node as FileNode).size;
+      continue;
+    }
+    if (e.kind === "zip") {
+      total += dirSize(e.node as ZipNode);
+      continue;
+    }
+    total += dirSize(e.node as DirNode);
+  }
+  if (dir.type === "dir") {
+    dirSizeCache.set(dir, total);
   }
   return total;
 }
 
-function summarizeDirProgress(
-  dir: DirNode,
-  pathStack: string[],
-  progress: Record<string, FileProgress>,
-) {
-  let totalSize = 0;
-  let downloaded = 0;
-  let speedBps = 0;
-  let fileCount = 0;
-  let excludedCount = 0;
-  let selectedCount = 0;
-  let folderTotalSize = 0;
-  let completedCount = 0;
-  let hasDownloading = false;
-  let hasPaused = false;
-  let hasError = false;
+const dirSizeCache = new WeakMap<DirNode, number>();
 
-  function walk(node: DirNode, stack: string[]) {
-    for (const e of node.entries) {
+interface DirProgressSummary {
+  totalSize: number;
+  folderTotalSize: number;
+  downloaded: number;
+  speedBps: number;
+  fileCount: number;
+  excludedCount: number;
+  selectedCount: number;
+  completedCount: number;
+  allExcluded: boolean;
+  hasDownloading: boolean;
+  hasInflating: boolean;
+  hasPaused: boolean;
+  hasError: boolean;
+  errors: FileTreeError[];
+  status: "skipped" | "completed" | "downloading" | "inflating" | "error" | "paused" | "pending";
+}
+
+function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileProgress>) {
+  const summaries = new Map<string, DirProgressSummary>();
+
+  function walk(dir: DirNode, pathStack: string[]): DirProgressSummary {
+    let totalSize = 0;
+    let downloaded = 0;
+    let speedBps = 0;
+    let fileCount = 0;
+    let excludedCount = 0;
+    let selectedCount = 0;
+    let folderTotalSize = 0;
+    let completedCount = 0;
+    let hasDownloading = false;
+    let hasInflating = false;
+    let hasPaused = false;
+    let hasError = false;
+    const errors: FileTreeError[] = [];
+
+    for (const e of dir.entries) {
       if (e.kind === "file") {
         const file = e.node as FileNode;
-        const key = [...stack, file.name].join("/");
+        const key = [...pathStack, file.name].join("/");
         const prog = progress[key];
         const selected = prog?.selected ?? true;
 
@@ -426,50 +733,127 @@ function summarizeDirProgress(
         if (status === "downloading") {
           hasDownloading = true;
           speedBps += prog?.speedBps ?? 0;
+        } else if (status === "inflating") {
+          hasInflating = true;
         } else if (status === "paused") {
           hasPaused = true;
         } else if (status === "error") {
           hasError = true;
+          errors.push({ path: key, message: prog?.error ?? "오류 정보가 없습니다." });
         } else if (status === "completed") {
           completedCount += 1;
         }
         continue;
       }
 
+      if (e.kind === "zip") {
+        const zip = e.node as ZipNode;
+        if (!zip.entries) {
+          const key = [...pathStack, zip.name].join("/");
+          const prog = progress[key];
+          const selected = prog?.selected ?? true;
+          fileCount += 1;
+          folderTotalSize += zip.size;
+          if (!selected) {
+            excludedCount += 1;
+            continue;
+          }
+          selectedCount += 1;
+          totalSize += zip.size;
+          downloaded += prog?.downloaded ?? 0;
+          const status = prog?.status ?? "pending";
+          if (status === "downloading") {
+            hasDownloading = true;
+            speedBps += prog?.speedBps ?? 0;
+          } else if (status === "inflating") {
+            hasInflating = true;
+          } else if (status === "paused") {
+            hasPaused = true;
+          } else if (status === "error") {
+            hasError = true;
+            errors.push({ path: key, message: prog?.error ?? "오류 정보가 없습니다." });
+          } else if (status === "completed") {
+            completedCount += 1;
+          }
+          continue;
+        }
+        const childStack = [...pathStack, zip.name];
+        const childSummary = walk(
+          { type: "dir", id: zip.id, name: zip.name, entries: zip.entries },
+          childStack,
+        );
+        totalSize += childSummary.totalSize;
+        downloaded += childSummary.downloaded;
+        speedBps += childSummary.speedBps;
+        fileCount += childSummary.fileCount;
+        excludedCount += childSummary.excludedCount;
+        selectedCount += childSummary.selectedCount;
+        folderTotalSize += childSummary.folderTotalSize;
+        completedCount += childSummary.completedCount;
+        hasDownloading ||= childSummary.hasDownloading;
+        hasInflating ||= childSummary.hasInflating;
+        hasPaused ||= childSummary.hasPaused;
+        hasError ||= childSummary.hasError;
+        errors.push(...childSummary.errors);
+        continue;
+      }
+
       const child = e.node as DirNode;
-      walk(child, child.name === "" ? stack : [...stack, child.name]);
+      const childStack = child.name === "" ? pathStack : [...pathStack, child.name];
+      const childSummary = walk(child, childStack);
+      totalSize += childSummary.totalSize;
+      downloaded += childSummary.downloaded;
+      speedBps += childSummary.speedBps;
+      fileCount += childSummary.fileCount;
+      excludedCount += childSummary.excludedCount;
+      selectedCount += childSummary.selectedCount;
+      folderTotalSize += childSummary.folderTotalSize;
+      completedCount += childSummary.completedCount;
+      hasDownloading ||= childSummary.hasDownloading;
+      hasInflating ||= childSummary.hasInflating;
+      hasPaused ||= childSummary.hasPaused;
+      hasError ||= childSummary.hasError;
+      errors.push(...childSummary.errors);
     }
+
+    const allExcluded = fileCount > 0 && excludedCount === fileCount;
+    const status = allExcluded
+      ? "skipped"
+      : selectedCount > 0 && completedCount === selectedCount
+        ? "completed"
+        : hasDownloading
+          ? "downloading"
+          : hasInflating
+            ? "inflating"
+            : hasError
+              ? "error"
+              : hasPaused
+                ? "paused"
+                : "pending";
+
+    const summary: DirProgressSummary = {
+      totalSize,
+      folderTotalSize,
+      downloaded,
+      speedBps,
+      fileCount,
+      excludedCount,
+      selectedCount,
+      completedCount,
+      allExcluded,
+      hasDownloading,
+      hasInflating,
+      hasPaused,
+      hasError,
+      errors,
+      status,
+    };
+    summaries.set(pathStack.join("/"), summary);
+    return summary;
   }
 
-  walk(dir, pathStack);
-
-  const allExcluded = fileCount > 0 && excludedCount === fileCount;
-  const status = allExcluded
-    ? "skipped"
-    : selectedCount > 0 && completedCount === selectedCount
-      ? "completed"
-      : hasDownloading
-        ? "downloading"
-        : hasError
-          ? "error"
-          : hasPaused
-            ? "paused"
-            : "pending";
-
-  return {
-    totalSize,
-    folderTotalSize,
-    downloaded,
-    speedBps,
-    fileCount,
-    excludedCount,
-    selectedCount,
-    allExcluded,
-    hasDownloading,
-    hasPaused,
-    hasError,
-    status,
-  };
+  walk(root, []);
+  return summaries;
 }
 
 interface TreeRowProps {
@@ -477,7 +861,7 @@ interface TreeRowProps {
   expandable?: boolean;
   expanded?: boolean;
   onExpand?: () => void;
-  checked?: boolean;
+  checked?: boolean | "indeterminate";
   onToggle?: () => void;
   icon: React.ReactNode;
   label: string;
@@ -497,6 +881,9 @@ function TreeRow({
   right,
   rightCols,
 }: TreeRowProps) {
+  const isIndeterminate = checked === "indeterminate";
+  const isChecked = checked === true;
+
   return (
     <div
       className={cn(
@@ -510,7 +897,6 @@ function TreeRow({
       }}
       onClick={expandable ? onExpand : undefined}
     >
-      {/* 확장 토글 · 체크박스 · 아이콘 */}
       <div className="flex items-center gap-1">
         <span
           className={cn(
@@ -527,17 +913,20 @@ function TreeRow({
 
         {onToggle && (
           <div onClick={(e) => e.stopPropagation()}>
-            <Checkbox checked={checked ?? false} onCheckedChange={onToggle} className="shrink-0" />
+            <Checkbox
+              checked={isChecked}
+              indeterminate={isIndeterminate}
+              onCheckedChange={onToggle}
+              className="shrink-0 after:hidden"
+            />
           </div>
         )}
 
         {icon}
       </div>
 
-      {/* 라벨 */}
       <span className="truncate">{label}</span>
 
-      {/* 우측 영역 — 각 컬럼이 고정 너비를 가져 라벨 영역 밀림 방지 */}
       {right &&
         right.map((cell, i) => (
           <div
@@ -551,31 +940,62 @@ function TreeRow({
   );
 }
 
-function StatusPill({ status, pct }: { status: string; pct: number }) {
+function StatusPill({
+  status,
+  pct,
+  onClick,
+}: {
+  status: string;
+  pct: number;
+  onClick?: () => void;
+}) {
   const label =
     status === "completed"
       ? "완료"
-      : status === "downloading"
-        ? `${pct.toFixed(0)}%`
-        : status === "paused"
-          ? "일시정지"
-          : status === "error"
-            ? "오류"
-            : status === "skipped"
-              ? "제외"
-              : "대기";
+      : status === "inflating"
+        ? "해제 중"
+        : status === "downloading"
+          ? `${pct.toFixed(0)}%`
+          : status === "paused"
+            ? "일시정지"
+            : status === "error"
+              ? "오류"
+              : status === "skipped"
+                ? "제외"
+                : "대기";
   const cls =
     status === "completed"
       ? "text-emerald-600 dark:text-emerald-400"
-      : status === "downloading"
+      : status === "downloading" || status === "inflating"
         ? "text-primary"
         : status === "error"
           ? "text-destructive"
           : "text-muted-foreground";
+  const className = cn(
+    "inline-block w-12 shrink-0 text-right text-xs font-medium tabular-nums",
+    cls,
+    onClick && "cursor-pointer underline decoration-dotted underline-offset-2",
+  );
+  const title = status === "inflating" ? "압축 해제 중" : onClick ? "오류 상세 보기" : undefined;
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={(event) => {
+          event.stopPropagation();
+          onClick();
+        }}
+        title={title}
+      >
+        {label}
+      </button>
+    );
+  }
+
   return (
-    <span
-      className={cn("inline-block w-12 shrink-0 text-right text-xs font-medium tabular-nums", cls)}
-    >
+    <span className={className} title={title}>
       {label}
     </span>
   );

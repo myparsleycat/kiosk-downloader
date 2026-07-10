@@ -17,6 +17,7 @@ import { Logger } from "./logger";
 import { DownloadService } from "./service/download";
 import { StartupCleanupService } from "./service/startup-cleanup";
 import { TransferService } from "./service/transfer";
+import { UploadService } from "./service/upload";
 import { Setting } from "./setting";
 import { MainWindow } from "./window/main";
 
@@ -53,6 +54,7 @@ export class KioskDownloader {
     public service: {
         transfer: TransferService;
         download: DownloadService;
+        upload: UploadService;
         startupCleanup: StartupCleanupService;
     };
 
@@ -75,6 +77,7 @@ export class KioskDownloader {
             transfer: new TransferService(this),
             startupCleanup: new StartupCleanupService(this),
             download: new DownloadService(this),
+            upload: new UploadService(this),
         };
     }
 
@@ -107,6 +110,7 @@ export class KioskDownloader {
 
         // Reconcile before services because some constructors may read persisted app state.
         await this.lib.db.reconcile();
+        await this.service.transfer.applyBandwidthLimitsFromSettings();
 
         this.service.download.registerStartupTasks();
         await this.service.startupCleanup.runAll();
@@ -131,6 +135,7 @@ export class KioskDownloader {
 
         await this.window.main.createMainWindow();
         await this.service.download.restoreStartupState();
+        await this.service.upload.restoreStartupState();
         void this.syncAutoLaunchSetting();
     }
 }
@@ -186,6 +191,7 @@ app.on("window-all-closed", async () => {
 app.on("before-quit", () => {
     try {
         kd.service.download.destroy();
+        kd.service.upload.destroy();
     } catch (error) {
         kd.logger.error(error, "App:before-quit");
     }

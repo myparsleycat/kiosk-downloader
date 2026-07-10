@@ -9,24 +9,70 @@ export type {
     FileNode,
     FileProgress,
     TreeEntry,
+    ZipEntryMeta,
+    ZipNode,
 } from "@shared/types";
 
-import type { DirNode, FileNode, TreeEntry } from "@shared/types";
+import type { DirNode, FileNode, TreeEntry, ZipNode } from "@shared/types";
+import { hasSelectedDescendant, isZipExtractMode } from "@shared/zip-tree";
+
+function asDirEntries(node: DirNode | ZipNode): TreeEntry[] {
+    if (node.type === "zip") {
+        return node.entries ?? [];
+    }
+    return node.entries;
+}
+
+function walkDirLike(
+    node: DirNode | ZipNode,
+    stack: string[],
+    visit: (entry: TreeEntry, key: string, childStack: string[]) => void,
+) {
+    for (const entry of asDirEntries(node)) {
+        const child = entry.node;
+        const key = [...stack, child.name].join("/");
+        const childStack = [...stack, child.name];
+        visit(entry, key, childStack);
+    }
+}
 
 export function countFiles(dir: DirNode): number {
     let count = 0;
-    for (const entry of dir.entries) {
-        if (entry.kind === "file") count += 1;
-        else count += countFiles(entry.node as DirNode);
+    function walk(node: DirNode | ZipNode) {
+        for (const entry of asDirEntries(node)) {
+            if (entry.kind === "file") {
+                count += 1;
+                continue;
+            }
+            if (entry.kind === "zip") {
+                const zip = entry.node as ZipNode;
+                if (zip.entries) {
+                    walk(zip);
+                } else {
+                    count += 1;
+                }
+                continue;
+            }
+            walk(entry.node as DirNode);
+        }
     }
+    walk(dir);
     return count;
 }
 
-export function dirTotalSize(dir: DirNode): number {
+export function dirTotalSize(dir: DirNode | ZipNode): number {
     let total = 0;
-    for (const entry of dir.entries) {
-        if (entry.kind === "file") total += (entry.node as FileNode).size;
-        else total += dirTotalSize(entry.node as DirNode);
+    for (const entry of asDirEntries(dir)) {
+        if (entry.kind === "file") {
+            total += (entry.node as FileNode).size;
+            continue;
+        }
+        if (entry.kind === "zip") {
+            const zip = entry.node as ZipNode;
+            total += zip.entries ? dirTotalSize(zip) : zip.size;
+            continue;
+        }
+        total += dirTotalSize(entry.node as DirNode);
     }
     return total;
 }
@@ -42,10 +88,30 @@ export function flattenTree(dir: DirNode, prefix: string[] = [], out: FlatFile[]
                 size: node.size,
                 dirName: prefix.join("/"),
             });
-        } else {
-            const child = entry.node as DirNode;
-            flattenTree(child, [...prefix, child.name], out);
+            continue;
         }
+        if (entry.kind === "zip") {
+            const zip = entry.node as ZipNode;
+            const zipPath = [...prefix, zip.name];
+            if (!zip.entries) {
+                out.push({
+                    id: zip.id,
+                    path: zipPath.join("/"),
+                    name: zip.name,
+                    size: zip.size,
+                    dirName: prefix.join("/"),
+                });
+                continue;
+            }
+            flattenTree(
+                { type: "dir", id: zip.id, name: zip.name, entries: zip.entries },
+                zipPath,
+                out,
+            );
+            continue;
+        }
+        const child = entry.node as DirNode;
+        flattenTree(child, [...prefix, child.name], out);
     }
     return out;
 }
@@ -61,19 +127,25 @@ export interface FlatFile {
 export function collectAllPaths(root: DirNode): Set<string> {
     const paths = new Set<string>();
 
-    function walk(dir: DirNode, stack: string[]) {
-        for (const entry of dir.entries) {
-            const node = entry.node as DirNode | FileNode;
-            const key = [...stack, node.name].join("/");
+    function walk(node: DirNode | ZipNode, stack: string[]) {
+        walkDirLike(node, stack, (entry, key, childStack) => {
             if (entry.kind === "file") {
                 paths.add(key);
-                continue;
+                return;
             }
-            if (node.name !== "") {
+            if (entry.kind === "zip") {
+                const zip = entry.node as ZipNode;
+                paths.add(key);
+                if (zip.entries) {
+                    walk(zip, childStack);
+                }
+                return;
+            }
+            if (entry.node.name !== "") {
                 paths.add(key);
             }
-            walk(entry.node as DirNode, node.name === "" ? stack : [...stack, node.name]);
-        }
+            walk(entry.node as DirNode, entry.node.name === "" ? stack : childStack);
+        });
     }
 
     walk(root, []);
@@ -104,16 +176,35 @@ export function toggleTreeSelection(
             }
             return next;
         }
-
         for (const path of subtree) {
             next.delete(path);
         }
-        for (const parent of parentPaths(key)) {
-            if (!hasSelectedDescendant(parent, next)) {
-                next.delete(parent);
-            }
-        }
+        pruneEmptyAncestors(key, next);
         return next;
+    }
+
+    if (resolved.kind === "zip") {
+        const zip = resolved.node as ZipNode;
+        if (zip.entries) {
+            const subtree = collectSubtreePaths(
+                { type: "dir", id: zip.id, name: zip.name, entries: zip.entries },
+                key,
+            );
+            if (selecting) {
+                for (const path of subtree) {
+                    next.add(path);
+                }
+                for (const parent of parentPaths(key)) {
+                    next.add(parent);
+                }
+                return next;
+            }
+            for (const path of subtree) {
+                next.delete(path);
+            }
+            pruneEmptyAncestors(key, next);
+            return next;
+        }
     }
 
     if (selecting) {
@@ -125,11 +216,7 @@ export function toggleTreeSelection(
     }
 
     next.delete(key);
-    for (const parent of parentPaths(key)) {
-        if (!hasSelectedDescendant(parent, next)) {
-            next.delete(parent);
-        }
-    }
+    pruneEmptyAncestors(key, next);
     return next;
 }
 
@@ -140,43 +227,83 @@ export function summarizeSelection(
     let count = 0;
     let bytes = 0;
 
-    function walk(dir: DirNode, stack: string[], ancestorSelected: boolean) {
-        for (const entry of dir.entries) {
-            const node = entry.node as DirNode | FileNode;
-            const key = [...stack, node.name].join("/");
-            const selfSelected = selected.has(key);
-            const effectivelySelected = ancestorSelected || selfSelected;
+    function walk(node: DirNode | ZipNode, stack: string[]) {
+        for (const entry of asDirEntries(node)) {
+            const child = entry.node;
+            const key = [...stack, child.name].join("/");
 
             if (entry.kind === "file") {
-                if (effectivelySelected) {
+                // Parent paths are ancestry markers only; folder select adds every descendant path.
+                if (selected.has(key)) {
                     count += 1;
-                    bytes += (node as FileNode).size;
+                    bytes += (child as FileNode).size;
                 }
-            } else {
-                walk(entry.node as DirNode, [...stack, node.name], effectivelySelected);
+                continue;
             }
+
+            if (entry.kind === "zip") {
+                const zip = child as ZipNode;
+                if (zip.entries) {
+                    if (isZipExtractMode(key, selected)) {
+                        walk(zip, [...stack, zip.name]);
+                    } else if (selected.has(key)) {
+                        count += 1;
+                        bytes += zip.size;
+                    }
+                } else if (selected.has(key)) {
+                    count += 1;
+                    bytes += zip.size;
+                }
+                continue;
+            }
+
+            walk(child as DirNode, [...stack, child.name]);
         }
     }
 
-    walk(root, [], false);
+    walk(root, []);
     return { count, bytes };
 }
 
-function resolveTreePath(
+/** Checkbox state for dirs/zips: full subtree vs ancestry-marker-only partial selection. */
+export function getSelectionCheckState(
+    selected: Set<string>,
+    key: string,
+    node: DirNode | ZipNode,
+): boolean | "indeterminate" {
+    if (node.type === "zip" && !node.entries) {
+        return selected.has(key);
+    }
+
+    const dirLike: DirNode | ZipNode =
+        node.type === "zip"
+            ? { type: "dir", id: node.id, name: node.name, entries: node.entries ?? [] }
+            : node;
+    const subtree = collectSubtreePaths(dirLike, key);
+    if (subtree.every((path) => selected.has(path))) {
+        return true;
+    }
+    if (hasSelectedDescendant(key, selected)) {
+        return "indeterminate";
+    }
+    return false;
+}
+
+export function resolveTreePath(
     root: DirNode,
     key: string,
-): { kind: "dir" | "file"; node: DirNode | FileNode } | null {
+): { kind: "dir" | "file" | "zip"; node: DirNode | FileNode | ZipNode } | null {
     if (key === "") {
         return { kind: "dir", node: root };
     }
 
     const parts = key.split("/");
-    let dir = root;
+    let current: DirNode | ZipNode = root;
 
     for (let index = 0; index < parts.length; index += 1) {
         const part = parts[index];
         const isLast = index === parts.length - 1;
-        const matched = dir.entries.find((entry) => entry.node.name === part);
+        const matched = asDirEntries(current).find((entry) => entry.node.name === part);
 
         if (!matched) {
             return null;
@@ -186,33 +313,46 @@ function resolveTreePath(
             return { kind: matched.kind, node: matched.node };
         }
 
-        if (matched.kind !== "dir") {
-            return null;
+        if (matched.kind === "dir") {
+            current = matched.node as DirNode;
+            continue;
         }
 
-        dir = matched.node as DirNode;
+        if (matched.kind === "zip") {
+            const zip = matched.node as ZipNode;
+            if (!zip.entries) {
+                return null;
+            }
+            current = zip;
+            continue;
+        }
+
+        return null;
     }
 
     return null;
 }
 
-function collectSubtreePaths(dir: DirNode, dirKey: string): string[] {
+function collectSubtreePaths(dir: DirNode | ZipNode, dirKey: string): string[] {
     const paths = [dirKey];
     const stack = dirKey.split("/");
 
-    function walk(node: DirNode, prefix: string[]) {
-        for (const entry of node.entries) {
-            const child = entry.node as DirNode | FileNode;
+    function walk(node: DirNode | ZipNode, prefix: string[]) {
+        for (const entry of asDirEntries(node)) {
+            const child = entry.node;
+            const childKey = [...prefix, child.name].join("/");
+            paths.push(childKey);
             if (entry.kind === "file") {
-                paths.push([...prefix, child.name].join("/"));
                 continue;
             }
-            const childDir = entry.node as DirNode;
-            const childPrefix = childDir.name === "" ? prefix : [...prefix, childDir.name];
-            if (childDir.name !== "") {
-                paths.push(childPrefix.join("/"));
+            if (entry.kind === "zip") {
+                const zip = child as ZipNode;
+                if (zip.entries) {
+                    walk(zip, [...prefix, zip.name]);
+                }
+                continue;
             }
-            walk(childDir, childPrefix);
+            walk(child as DirNode, [...prefix, child.name]);
         }
     }
 
@@ -220,7 +360,7 @@ function collectSubtreePaths(dir: DirNode, dirKey: string): string[] {
     return paths;
 }
 
-function parentPaths(key: string): string[] {
+export function parentPaths(key: string): string[] {
     const parts = key.split("/");
     const parents: string[] = [];
     for (let index = 1; index < parts.length; index += 1) {
@@ -229,26 +369,23 @@ function parentPaths(key: string): string[] {
     return parents;
 }
 
-function hasSelectedDescendant(dirKey: string, selected: Set<string>): boolean {
-    const prefix = `${dirKey}/`;
-    for (const path of selected) {
-        if (path.startsWith(prefix)) {
-            return true;
+function pruneEmptyAncestors(key: string, selected: Set<string>) {
+    const parents = parentPaths(key);
+    for (let index = parents.length - 1; index >= 0; index -= 1) {
+        const parent = parents[index];
+        if (!hasSelectedDescendant(parent, selected)) {
+            selected.delete(parent);
         }
     }
-    return false;
 }
 
-export function treeEntries(dir: DirNode): TreeEntry[] {
-    return dir.entries;
+export function treeEntries(dir: DirNode | ZipNode): TreeEntry[] {
+    return asDirEntries(dir);
 }
 
 export type SortField = "name" | "size";
 export type SortDir = "none" | "desc" | "asc";
 
-// 디렉토리는 항상 파일 위에 그룹화하고, 각 그룹 내에서 선택한 필드/방향으로 정렬.
-// dir === "none"이면 원본을 그대로 반환한다. 그 외에는 모든 중첩 디렉토리에 재귀 적용하며,
-// DirNode만 얕게 복제(entries를 새 배열로 교체)하고 FileNode는 원본 참조를 재사용한다.
 export function sortTree(root: DirNode, field: SortField, dir: SortDir): DirNode {
     if (dir === "none") return root;
 
@@ -256,27 +393,55 @@ export function sortTree(root: DirNode, field: SortField, dir: SortDir): DirNode
     const compareName = (a: { name: string }, b: { name: string }) =>
         a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) * sign;
 
-    const entrySize = (entry: TreeEntry): number =>
-        entry.kind === "file" ? (entry.node as FileNode).size : dirTotalSize(entry.node as DirNode);
+    const entrySize = (entry: TreeEntry): number => {
+        if (entry.kind === "file") return (entry.node as FileNode).size;
+        if (entry.kind === "zip") {
+            const zip = entry.node as ZipNode;
+            return zip.entries ? dirTotalSize(zip) : zip.size;
+        }
+        return dirTotalSize(entry.node as DirNode);
+    };
 
     const sortNode = (node: DirNode): DirNode => {
         const dirs: TreeEntry[] = [];
+        const zips: TreeEntry[] = [];
         const files: TreeEntry[] = [];
         for (const entry of node.entries) {
             if (entry.kind === "dir") dirs.push(entry);
+            else if (entry.kind === "zip") zips.push(entry);
             else files.push(entry);
         }
 
         if (field === "name") {
             dirs.sort((a, b) => compareName(a.node, b.node));
+            zips.sort((a, b) => compareName(a.node, b.node));
             files.sort((a, b) => compareName(a.node, b.node));
         } else {
             dirs.sort((a, b) => (entrySize(a) - entrySize(b)) * sign);
+            zips.sort((a, b) => (entrySize(a) - entrySize(b)) * sign);
             files.sort((a, b) => (entrySize(a) - entrySize(b)) * sign);
         }
 
         const entries = [
             ...dirs.map((e) => ({ kind: "dir" as const, node: sortNode(e.node as DirNode) })),
+            ...zips.map((e) => {
+                const zip = e.node as ZipNode;
+                if (!zip.entries) {
+                    return e;
+                }
+                return {
+                    kind: "zip" as const,
+                    node: {
+                        ...zip,
+                        entries: sortNode({
+                            type: "dir",
+                            id: zip.id,
+                            name: zip.name,
+                            entries: zip.entries,
+                        }).entries,
+                    },
+                };
+            }),
             ...files,
         ];
 

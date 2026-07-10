@@ -190,7 +190,10 @@ function requireConfig(input: unknown) {
 - Do not return `Effect` from helpers unless they actually perform effectful work.
 - Synchronous parsing, validation, and option building should stay synchronous.
 - Prefer Effect schema helpers such as `Schema.UnknownFromJsonString` and `Schema.decodeUnknownOption` over manual `JSON.parse` wrapped in `Effect.try` when parsing untrusted JSON strings.
-- Add comments for non-obvious constraints and surprising behavior, not for obvious assignments or control flow.
+- Add comments only for non-obvious constraints, surprising behavior, or context the reader cannot recover from the code. Do not add comments that restate what the code already makes obvious.
+- Do not write inertia-driven comments: section dividers (`// -----`), per-field or per-UI-section labels (`{/* name */}`, `// header`), numbered step narration (`// 1. ... // 2. ...`), or restating a function's purpose above its definition when the name and signature already convey it.
+- A comment is justified when it captures a non-trivial reason: a server-side quirk, an external protocol constraint, a design tradeoff, a subtle ownership or lifecycle rule, or a surprising cause-and-effect that would mislead a reader who skipped the comment.
+- When a comment only describes what the code does, remove it. When it describes why the code does it and the why is not obvious, keep it.
 
 ## Type Checking
 

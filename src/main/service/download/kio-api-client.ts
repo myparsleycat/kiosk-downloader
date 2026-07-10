@@ -5,19 +5,19 @@ import {
 import { shareIdToUuidBytes, tryParseShareUrl } from "@shared/share-url";
 import type {
     DirNode,
-    FileNode,
     LoadCollectionPayload,
     ProbeCollectionPayload,
     ProbeCollectionResult,
     TreeEntry,
 } from "@shared/types";
+import { isZipFileName } from "@shared/zip-tree";
 import { decode, encode } from "cbor-x";
 
 import type { KioskDownloader } from "../..";
 import type {
     DownloadChunkRow,
     DownloadCollectionRow,
-    LoadedCollection,
+    LoadedKioskCollection,
     SegmentDescriptor,
 } from "./types";
 
@@ -86,7 +86,7 @@ function extractShareId(url: string) {
 export class KioApiClient {
     public constructor(private readonly kd: KioskDownloader) {}
 
-    public async loadCollection(payload: LoadCollectionPayload): Promise<LoadedCollection> {
+    public async loadCollection(payload: LoadCollectionPayload): Promise<LoadedKioskCollection> {
         const shareId = extractShareId(payload.url);
         const uuid = shareIdToUuid(shareId);
         const unlocked = await this.unlockCollection(uuid, payload.password);
@@ -99,8 +99,10 @@ export class KioApiClient {
                 expires: unlocked.expires,
                 segmentSize: unlocked.segmentSize,
                 passwordProtected: unlocked.passwordProtected,
+                provider: "kiosk",
                 tree,
             },
+            provider: "kiosk",
             cat: unlocked.cat,
             rootId: unlocked.rootId,
             passwordProtected: unlocked.passwordProtected,
@@ -168,71 +170,37 @@ export class KioApiClient {
         });
     }
 
-    public async *streamSegment(
+    public streamSegment(
         segment: SegmentDescriptor,
         chunk: DownloadChunkRow,
         signal: AbortSignal,
-    ): AsyncGenerator<Uint8Array> {
-        const headers: Record<string, string> = {};
-        let url: string;
-
-        if (segment.type === "edge") {
-            const baseUrl = segment.data.get("url");
-            const token = segment.data.get("token");
-            if (typeof baseUrl !== "string" || typeof token !== "string") {
-                throw new Error("edge segment is missing url/token.");
-            }
-            url = `${baseUrl}/edge/v4/download`;
-            headers["Kiosk-SAT"] = token;
-        } else {
-            const cdnUrl = segment.data.get("url");
-            if (typeof cdnUrl !== "string") {
-                throw new Error("cdn segment is missing url.");
-            }
-            url = cdnUrl;
-        }
-
-        const response = await this.kd.http.request(url, {
-            headers,
-            signal,
-            retry: { limit: 0 },
+        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
+        localStart = 0,
+    ) {
+        return streamSegmentBytes(this.kd, segment, localStart, chunk.size, signal, {
+            label: `Segment ${chunk.chunkIndex}`,
+            mode: localStart > 0 ? "range" : "full",
+            onPhaseChange,
         });
+    }
 
-        if (response.status !== 200 && response.status !== 206) {
-            throw new Error(`Segment ${chunk.chunkIndex} HTTP ${response.status}`);
-        }
-
-        if (!response.body) {
-            throw new Error(`Segment ${chunk.chunkIndex} response has no body.`);
-        }
-
-        const reader = response.body.getReader();
-        let yielded = 0;
-
-        try {
-            while (yielded < chunk.size) {
-                if (signal.aborted) {
-                    await reader.cancel();
-                    throw new DOMException("The operation was aborted.", "AbortError");
-                }
-
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
-                }
-
-                if (!value || value.length === 0) {
-                    continue;
-                }
-
-                const remaining = chunk.size - yielded;
-                const slice = value.length > remaining ? value.subarray(0, remaining) : value;
-                yielded += slice.length;
-                yield slice;
-            }
-        } finally {
-            reader.releaseLock();
-        }
+    /**
+     * Read [localStart, localEnd) from a segment body.
+     * Uses a full segment GET (no Range) so edge/CDN paths match normal file downloads;
+     * unused prefix/suffix within the segment are skipped and the body is cancelled early.
+     */
+    public streamSegmentRange(
+        segment: SegmentDescriptor,
+        range: { localStart: number; localEnd: number },
+        signal: AbortSignal,
+        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
+        useRange = false,
+    ) {
+        return streamSegmentBytes(this.kd, segment, range.localStart, range.localEnd, signal, {
+            label: "Segment range",
+            mode: useRange ? "range" : "slice",
+            onPhaseChange,
+        });
     }
 
     private async unlockCollection(uuid: Buffer, password?: string) {
@@ -301,16 +269,34 @@ export class KioApiClient {
                 throw new Error(`directory/get failed for "${name}": HTTP ${response.status}`);
             }
 
-            const files = (Array.isArray(body.files) ? body.files : []).map((file): FileNode => {
+            const files = (Array.isArray(body.files) ? body.files : []).map((file) => {
                 const record = asRecord(file);
                 if (!record || typeof record.name !== "string") {
                     throw new Error("Invalid file node in directory/get response.");
                 }
+                const name = record.name;
+                const id = uuidToHex(record.id);
+                const size = Number(record.size);
+                if (isZipFileName(name)) {
+                    return {
+                        kind: "zip" as const,
+                        node: {
+                            type: "zip" as const,
+                            id,
+                            name,
+                            size,
+                            entries: null,
+                        },
+                    };
+                }
                 return {
-                    type: "file",
-                    id: uuidToHex(record.id),
-                    name: record.name,
-                    size: Number(record.size),
+                    kind: "file" as const,
+                    node: {
+                        type: "file" as const,
+                        id,
+                        name,
+                        size,
+                    },
                 };
             });
 
@@ -326,7 +312,7 @@ export class KioApiClient {
 
             const entries: TreeEntry[] = [
                 ...childDirs.map((node) => ({ kind: "dir" as const, node })),
-                ...files.map((node) => ({ kind: "file" as const, node })),
+                ...files,
             ];
             return {
                 type: "dir",
@@ -368,5 +354,141 @@ export class KioApiClient {
             raw,
             body: decoded,
         };
+    }
+}
+
+function resolveSegmentRequest(segment: SegmentDescriptor) {
+    const headers: Record<string, string> = {};
+    let url: string;
+
+    if (segment.type === "edge") {
+        const baseUrl = segment.data.get("url");
+        const token = segment.data.get("token");
+        if (typeof baseUrl !== "string" || typeof token !== "string") {
+            throw new Error("edge segment is missing url/token.");
+        }
+        url = `${baseUrl}/edge/v4/download`;
+        headers["Kiosk-SAT"] = token;
+    } else {
+        const cdnUrl = segment.data.get("url");
+        if (typeof cdnUrl !== "string") {
+            throw new Error("cdn segment is missing url.");
+        }
+        url = cdnUrl;
+    }
+
+    return { url, headers };
+}
+
+export async function* streamSegmentBytes(
+    kd: KioskDownloader,
+    segment: SegmentDescriptor,
+    localStart: number,
+    localEnd: number,
+    signal: AbortSignal,
+    options: {
+        label: string;
+        mode: "full" | "range" | "slice";
+        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void;
+    },
+): AsyncGenerator<Uint8Array> {
+    const expected = localEnd - localStart;
+    if (expected <= 0) {
+        return;
+    }
+
+    const { url, headers } = resolveSegmentRequest(segment);
+    if (options.mode === "range") {
+        headers.Range = `bytes=${localStart}-${localEnd - 1}`;
+    }
+
+    const response = await kd.http.request(url, {
+        headers,
+        signal,
+        timeout: false,
+    });
+
+    if (response.status !== 200 && response.status !== 206) {
+        throw new Error(`${options.label} HTTP ${response.status}`);
+    }
+
+    if (!response.body) {
+        throw new Error(`${options.label} response has no body.`);
+    }
+
+    const reader = response.body.getReader();
+    // slice: body is a full segment from local 0. range+200: server ignored Range and sent
+    // the full segment/file from 0 — skip to localStart. Always cancel when done so a 200
+    // full-archive body cannot keep downloading after we have the bytes we need.
+    const skip =
+        options.mode === "slice" || (options.mode === "range" && response.status === 200)
+            ? localStart
+            : 0;
+    let skipped = 0;
+    let yielded = 0;
+    const quantumSize = 64 * 1024;
+
+    try {
+        while (yielded < expected) {
+            if (signal.aborted) {
+                throw new DOMException("The operation was aborted.", "AbortError");
+            }
+
+            options.onPhaseChange?.("network");
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            if (!value || value.length === 0) {
+                continue;
+            }
+
+            let slice = value;
+            if (skipped < skip) {
+                const remainSkip = skip - skipped;
+                if (slice.length <= remainSkip) {
+                    skipped += slice.length;
+                    options.onPhaseChange?.("bandwidth-wait");
+                    await kd.service.transfer.downloadBandwidth.take(slice.length, signal);
+                    continue;
+                }
+                const skippedPiece = slice.subarray(0, remainSkip);
+                options.onPhaseChange?.("bandwidth-wait");
+                await kd.service.transfer.downloadBandwidth.take(skippedPiece.length, signal);
+                slice = slice.subarray(remainSkip);
+                skipped = skip;
+            }
+
+            const remaining = expected - yielded;
+            if (slice.length > remaining) {
+                slice = slice.subarray(0, remaining);
+            }
+
+            let offset = 0;
+            while (offset < slice.length) {
+                if (signal.aborted) {
+                    throw new DOMException("The operation was aborted.", "AbortError");
+                }
+                const end = Math.min(offset + quantumSize, slice.length);
+                const quantum = slice.subarray(offset, end);
+                options.onPhaseChange?.("bandwidth-wait");
+                await kd.service.transfer.downloadBandwidth.take(quantum.length, signal);
+                options.onPhaseChange?.("network");
+                yielded += quantum.length;
+                offset = end;
+                yield quantum;
+            }
+        }
+    } finally {
+        // Stop further network transfer (critical when server returns 200 with a huge body).
+        await reader.cancel().catch(() => undefined);
+    }
+
+    if (signal.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+    }
+
+    if (yielded < expected) {
+        throw new Error(`${options.label} returned ${yielded}B, expected ${expected}B.`);
     }
 }

@@ -23,7 +23,7 @@ export class Tray {
                 },
             },
         ]);
-        this.tray.setToolTip("Nahida Desktop");
+        this.tray.setToolTip("Kiosk Desktop");
         this.tray.setContextMenu(contextMenu);
         this.tray.on("click", async () => {
             this.kd.window.main.focus();

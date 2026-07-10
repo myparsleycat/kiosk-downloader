@@ -21,8 +21,8 @@ export class HTTP {
                     : (options?.headers as Record<string, string> | undefined)),
                 ...(await this.getHeaders(url)),
             },
-            timeout: 100000,
-            retry: {
+            timeout: options?.timeout ?? 100_000,
+            retry: options?.retry ?? {
                 limit: 2,
                 statusCodes: [408, 413, 429, 500, 502, 503, 504, 524],
             },

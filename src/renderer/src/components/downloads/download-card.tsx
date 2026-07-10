@@ -1,5 +1,6 @@
 import type { DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
+import { isCollectionExpiresNever } from "@shared/download-errors";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import { ClockIcon, FolderIcon, LockIcon, TimerIcon } from "lucide-react";
 
@@ -12,25 +13,26 @@ export function DownloadCard({
   active: boolean;
   onClick: () => void;
 }) {
-  const { collection, progress, status } = item;
-  const selectedProgress = Object.values(progress).filter((p) => p.selected);
-  const totalBytes = selectedProgress.reduce((a, p) => a + p.size, 0);
-  const downloadedBytes = selectedProgress.reduce((a, p) => a + p.downloaded, 0);
+  const { collection, status, summary } = item;
+  const totalBytes = summary.totalBytes;
+  const downloadedBytes = summary.transferredBytes;
   const pct = totalBytes > 0 ? Math.min(100, (downloadedBytes / totalBytes) * 100) : 0;
-  const fileCount = selectedProgress.length;
-  const completedCount = selectedProgress.filter((p) => p.status === "completed").length;
+  const fileCount = summary.totalFiles;
+  const completedCount = summary.completedFiles;
   const speedLabel = status === "downloading" ? formatSpeed(item.speedBps) : null;
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0
       ? formatTime(item.elapsedMs / 1000, navigator.language)
       : null;
 
-  const expiresLabel = new Date(collection.expires * 1000).toLocaleDateString("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const expiresLabel = isCollectionExpiresNever(collection.expires)
+    ? "만료 없음"
+    : new Date(collection.expires * 1000).toLocaleDateString("ko-KR", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
   return (
     <button
@@ -116,6 +118,7 @@ export function DownloadCard({
 function StatusBadge({ status }: { status: DownloadItem["status"] }) {
   const map: Record<DownloadItem["status"], { label: string; cls: string }> = {
     downloading: { label: "다운로드", cls: "bg-primary/10 text-primary" },
+    inflating: { label: "해제 중", cls: "bg-primary/10 text-primary" },
     paused: { label: "일시정지", cls: "bg-muted text-muted-foreground" },
     completed: { label: "완료", cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
     queued: { label: "대기", cls: "bg-muted text-muted-foreground" },
