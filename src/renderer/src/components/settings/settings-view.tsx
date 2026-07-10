@@ -57,6 +57,7 @@ const SETTING_KEYS = [
   "general.createCollectionSubfolder",
   "general.asciiFilenames",
   "general.powerSaveBlockInTransfer",
+  "general.shutdownAfterTransfer",
   "general.logLevel",
   "general.theme",
   "transfer.segmentPoolSize",
@@ -80,6 +81,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.createCollectionSubfolder": true,
   "general.asciiFilenames": false,
   "general.powerSaveBlockInTransfer": true,
+  "general.shutdownAfterTransfer": false,
   "general.logLevel": "error",
   "general.theme": "system",
   "transfer.segmentPoolSize": SEGMENT_POOL_SIZE_DEFAULT,
@@ -230,6 +232,16 @@ export function SettingsView() {
                 onCheckedChange={(value) =>
                   void setSetting("general.powerSaveBlockInTransfer", value)
                 }
+              />
+            }
+          />
+          <SettingRow
+            title="전송 완료 후 시스템 종료"
+            description="업로드·다운로드가 모두 끝나면 기기를 종료합니다."
+            control={
+              <Switch
+                checked={settings["general.shutdownAfterTransfer"]}
+                onCheckedChange={(value) => void setSetting("general.shutdownAfterTransfer", value)}
               />
             }
           />

@@ -584,6 +584,9 @@ export class DownloadScheduler {
             this.progressBatcher.deactivate(collectionId);
             if (!wasTerminal) {
                 await this.emitUpdate(collectionId);
+                if (updatedCollection.status === "completed") {
+                    await this.kd.service.transfer.maybeShutdownAfterTransfer();
+                }
             }
         } else {
             this.progressBatcher.mark(collectionId, fileId);

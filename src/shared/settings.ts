@@ -16,6 +16,7 @@ export interface AppSettings {
     "general.logLevel": SettingLogLevel;
     "general.theme": SettingTheme;
     "general.powerSaveBlockInTransfer": boolean;
+    "general.shutdownAfterTransfer": boolean;
     "transfer.segmentPoolSize": number;
     "transfer.maxChunkRetries": number;
     "transfer.uploadMaxChunkRetries": number;
@@ -111,6 +112,11 @@ export const APP_SETTINGS = {
         publicKey: "general.powerSaveBlockInTransfer",
         scope: "general",
         storageKey: "powerSaveBlockInTransfer",
+    },
+    "general.shutdownAfterTransfer": {
+        publicKey: "general.shutdownAfterTransfer",
+        scope: "general",
+        storageKey: "shutdownAfterTransfer",
     },
     "transfer.segmentPoolSize": {
         publicKey: "transfer.segmentPoolSize",

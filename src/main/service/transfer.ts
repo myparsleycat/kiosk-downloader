@@ -2,11 +2,13 @@ import type { KioskDownloader } from "..";
 
 import { BandwidthLimiter } from "./bandwidth-limiter";
 import { syncMainWindowProgressBar } from "./os-progress-bar";
+import { shutdownSystem } from "./util";
 
 const MIB = 1024 * 1024;
 
 export class TransferService {
     private isPowerSaveBlockerActive = false;
+    private shutdownRequested = false;
 
     public readonly downloadBandwidth = new BandwidthLimiter();
     public readonly uploadBandwidth = new BandwidthLimiter();
@@ -63,6 +65,26 @@ export class TransferService {
             } catch (error) {
                 this.kd.logger.error(error, "TransferService:preventAppSuspension:stop");
             }
+        }
+    }
+
+    public async maybeShutdownAfterTransfer() {
+        if (this.shutdownRequested) {
+            return;
+        }
+        if (!(await this.kd.setting.general.getShutdownAfterTransfer())) {
+            return;
+        }
+        if (
+            this.kd.service.download.listOsProgressTransfers().length > 0 ||
+            this.kd.service.upload.listOsProgressTransfers().length > 0
+        ) {
+            return;
+        }
+
+        this.kd.logger.info("TransferService:maybeShutdownAfterTransfer:shutdown");
+        if (shutdownSystem()) {
+            this.shutdownRequested = true;
         }
     }
 }

@@ -216,6 +216,61 @@ describe("TransferChunkPool adaptive concurrency", () => {
         await expect(outcome).resolves.toBe("paused");
     });
 
+    it("keeps consecutive rate-limit strikes when another chunk succeeds during cooldown", async () => {
+        vi.useFakeTimers();
+        const pending: Array<(response: unknown) => void> = [];
+        let calls = 0;
+        const request = vi.fn(async (_url: string, options: { headers: { Range: string } }) => {
+            calls += 1;
+            if (calls <= 8) {
+                return successResponse(options.headers.Range);
+            }
+            return await new Promise((resolve) => pending.push(resolve));
+        });
+        const { pool, logger } = createHarness(request);
+        pool.start();
+        const registration = createRegistration(10);
+        const outcome = pool.register(registration);
+        for (let index = 0; index < 10 && pending.length < 2; index += 1) {
+            await flush();
+        }
+        expect(pending).toHaveLength(2);
+
+        pending[0]?.(rateLimitResponse().response);
+        pending[1]?.(successResponse("bytes=144-159"));
+        await flush();
+
+        expect(
+            logger.warn.mock.calls
+                .filter(([, message]) => message === "TransferChunkPool:rateLimited")
+                .map(
+                    ([context]) =>
+                        (context as { consecutiveRateLimits: number }).consecutiveRateLimits,
+                ),
+        ).toEqual([1]);
+
+        await vi.advanceTimersByTimeAsync(2000);
+        await flush();
+
+        for (let index = 0; index < 10 && pending.length < 3; index += 1) {
+            await flush();
+        }
+        expect(pending.length).toBeGreaterThanOrEqual(3);
+        pending[2]?.(rateLimitResponse().response);
+        await flush();
+
+        const episodes = logger.warn.mock.calls
+            .filter(([, message]) => message === "TransferChunkPool:rateLimited")
+            .map(
+                ([context]) => (context as { consecutiveRateLimits: number }).consecutiveRateLimits,
+            );
+        expect(episodes).toEqual([1, 2]);
+
+        pool.cancelSession("file");
+        registration.controller.abort();
+        await expect(outcome).resolves.toBe("paused");
+    });
+
     it("fails with the user-facing error after three consecutive single-worker limits", async () => {
         vi.useFakeTimers();
         const request = vi.fn(async () => rateLimitResponse().response);

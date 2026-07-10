@@ -301,7 +301,9 @@ export class TransferChunkPool {
     }
 
     private recordChunkSuccess() {
-        this.consecutiveRateLimits = 0;
+        if (Date.now() >= this.cooldownUntil) {
+            this.consecutiveRateLimits = 0;
+        }
         if (
             Date.now() < this.cooldownUntil ||
             this.targetWorkers >= TransferChunkPool.MAX_WORKERS
