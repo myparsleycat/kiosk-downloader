@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.1.0...v1.2.0) (2026-07-09)
+
+
+### Features
+
+* **download:** decode base64-encoded share URLs ([ee58e03](https://github.com/myparsleycat/kiosk-downloader/commit/ee58e03d4e9326b51af64b73ceef2f5adb349728))
+
 # [1.1.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.0.0...v1.1.0) (2026-07-09)
 
 
