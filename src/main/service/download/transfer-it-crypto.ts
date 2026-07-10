@@ -2,8 +2,9 @@ import { createDecipheriv, pbkdf2Sync } from "node:crypto";
 
 import { COLLECTION_EXPIRES_NEVER } from "@shared/download-errors";
 
-/** Dummy segment size stored for transfer collections (chunks use MEGA schedule). */
-export const TRANSFER_SEGMENT_SIZE = 1024 * 1024;
+/** Fixed Transfer download chunk size (also stored as collection segment_size). */
+export const TRANSFER_CHUNK_SIZE = 25 * 1024 * 1024;
+export const TRANSFER_SEGMENT_SIZE = TRANSFER_CHUNK_SIZE;
 
 export { COLLECTION_EXPIRES_NEVER };
 
@@ -116,23 +117,36 @@ export function decryptTransferChunk(key32: Buffer, start: number, enc: Buffer) 
     return byteOffset === 0 ? decrypted : decrypted.subarray(byteOffset);
 }
 
-/** MEGA download chunk schedule (128KiB ramp → 1MiB). */
-export function megaChunkSizes(fileSize: number, maxChunk = 1024 * 1024) {
+/** Split a Transfer file into fixed-size chunks (last chunk may be smaller). */
+export function transferChunkSizes(fileSize: number, chunkSize = TRANSFER_CHUNK_SIZE) {
     if (!Number.isFinite(fileSize) || fileSize <= 0) {
         return [] as { start: number; size: number }[];
     }
-    const chunks: { start: number; size: number }[] = [];
-    let p = 0;
-    for (let i = 1; i <= 8 && p < fileSize - i * 131072; i++) {
-        chunks.push({ start: p, size: i * 131072 });
-        p += i * 131072;
+    if (!Number.isFinite(chunkSize) || chunkSize < 1) {
+        throw new Error(`Invalid transfer chunk size: ${chunkSize}.`);
     }
-    while (p < fileSize) {
-        const size = Math.min(maxChunk, fileSize - p);
-        chunks.push({ start: p, size });
-        p += size;
+    const chunks: { start: number; size: number }[] = [];
+    let start = 0;
+    while (start < fileSize) {
+        const size = Math.min(chunkSize, fileSize - start);
+        chunks.push({ start, size });
+        start += size;
     }
     return chunks;
+}
+
+/** True when every stored chunk row matches the expected Transfer schedule at that index. */
+export function transferChunkLayoutMatches(
+    stored: ReadonlyArray<{ chunkIndex: number; offset: number; size: number }>,
+    expected: ReadonlyArray<{ start: number; size: number }>,
+) {
+    for (const row of stored) {
+        const chunk = expected[row.chunkIndex];
+        if (!chunk || chunk.start !== row.offset || chunk.size !== row.size) {
+            return false;
+        }
+    }
+    return true;
 }
 
 export function decodeTransferTitle(encoded: string | undefined, fallback: string) {

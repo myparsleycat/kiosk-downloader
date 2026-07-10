@@ -72,7 +72,7 @@ function compareWorkItems(a: TransferWorkItem, b: TransferWorkItem) {
 
 export class TransferChunkPool {
     private static readonly MAX_WORKERS = 4;
-    private static readonly SUCCESSES_PER_INCREASE = 8;
+    private static readonly SUCCESSES_PER_INCREASE = 2;
     private static readonly RATE_LIMIT_DELAYS_MS = [2000, 5000, 10000] as const;
 
     private readonly sessions = new Map<string, TransferSession>();

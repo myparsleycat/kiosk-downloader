@@ -1113,6 +1113,12 @@ export class DownloadScheduler {
     ) {
         let partWriter: PartFileWriter | null = null;
 
+        if (this.repository.reconcileTransferChunkLayout(file.id)) {
+            const partPath = this.getPartPath(collection, file);
+            await fse.remove(partPath).catch(() => undefined);
+            await PartFileWriter.removeSidecar(partPath);
+        }
+
         const chunks = this.repository.listChunks(file.id);
         await this.validateCompletedChunks(collection, file, chunks);
         this.repository.syncFileDownloadedBytes(file.id);

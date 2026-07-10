@@ -121,7 +121,7 @@ afterEach(() => {
 });
 
 describe("TransferChunkPool adaptive concurrency", () => {
-    it("starts with one worker and increases once per eight successful chunks up to four", async () => {
+    it("starts with one worker and increases once per two successful chunks up to four", async () => {
         const request = vi.fn(async (_url: string, options: { headers: { Range: string } }) =>
             successResponse(options.headers.Range),
         );
