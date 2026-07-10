@@ -17,13 +17,19 @@ export interface AppSettings {
     "general.powerSaveBlockInTransfer": boolean;
     "transfer.segmentPoolSize": number;
     "transfer.maxChunkRetries": number;
+    "transfer.uploadMaxChunkRetries": number;
     "transfer.streamWriteBatchBytes": number;
     "transfer.startupResumeMode": StartupResumeMode;
+    "transfer.uploadStartupResumeMode": StartupResumeMode;
 }
 
 export const CHUNK_RETRY_MIN = 3;
 export const CHUNK_RETRY_MAX = 10;
 export const CHUNK_RETRY_DEFAULT = 5;
+
+export const UPLOAD_CHUNK_RETRY_MIN = 1;
+export const UPLOAD_CHUNK_RETRY_MAX = 3;
+export const UPLOAD_CHUNK_RETRY_DEFAULT = 2;
 
 export const SEGMENT_POOL_SIZE_MIN = 2;
 export const SEGMENT_POOL_SIZE_MAX = 64;
@@ -95,6 +101,11 @@ export const APP_SETTINGS = {
         scope: "transfer",
         storageKey: "transfer.maxChunkRetries",
     },
+    "transfer.uploadMaxChunkRetries": {
+        publicKey: "transfer.uploadMaxChunkRetries",
+        scope: "transfer",
+        storageKey: "transfer.uploadMaxChunkRetries",
+    },
     "transfer.streamWriteBatchBytes": {
         publicKey: "transfer.streamWriteBatchBytes",
         scope: "transfer",
@@ -104,5 +115,10 @@ export const APP_SETTINGS = {
         publicKey: "transfer.startupResumeMode",
         scope: "transfer",
         storageKey: "transfer.startupResumeMode",
+    },
+    "transfer.uploadStartupResumeMode": {
+        publicKey: "transfer.uploadStartupResumeMode",
+        scope: "transfer",
+        storageKey: "transfer.uploadStartupResumeMode",
     },
 } as const satisfies Record<SettingKey, SettingDefinition>;

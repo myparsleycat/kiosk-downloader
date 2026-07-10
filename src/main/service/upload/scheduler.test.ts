@@ -241,7 +241,7 @@ function createKioskDownloader() {
         setting: {
             transfer: {
                 getSegmentPoolSize: vi.fn(async () => 8),
-                getMaxChunkRetries: vi.fn(async () => 3),
+                getUploadMaxChunkRetries: vi.fn(async () => 2),
             },
         },
         service: { transfer: { refreshPowerSaveBlock: vi.fn(async () => undefined) } },

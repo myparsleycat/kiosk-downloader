@@ -4,6 +4,9 @@ import {
     CHUNK_RETRY_DEFAULT,
     CHUNK_RETRY_MAX,
     CHUNK_RETRY_MIN,
+    UPLOAD_CHUNK_RETRY_DEFAULT,
+    UPLOAD_CHUNK_RETRY_MAX,
+    UPLOAD_CHUNK_RETRY_MIN,
     SETTING_LOG_LEVELS,
     SEGMENT_POOL_SIZE_DEFAULT,
     SEGMENT_POOL_SIZE_MAX,
@@ -70,6 +73,13 @@ function normalizeChunkRetries(value: number) {
         return CHUNK_RETRY_DEFAULT;
     }
     return Math.min(CHUNK_RETRY_MAX, Math.max(CHUNK_RETRY_MIN, Math.floor(value)));
+}
+
+function normalizeUploadChunkRetries(value: number) {
+    if (!Number.isFinite(value)) {
+        return UPLOAD_CHUNK_RETRY_DEFAULT;
+    }
+    return Math.min(UPLOAD_CHUNK_RETRY_MAX, Math.max(UPLOAD_CHUNK_RETRY_MIN, Math.floor(value)));
 }
 
 function normalizeSegmentPoolSize(value: number) {
@@ -243,6 +253,19 @@ export class Setting {
                 toStored: (value) => String(value),
                 normalize: normalizeChunkRetries,
             },
+            "transfer.uploadMaxChunkRetries": {
+                definition: APP_SETTINGS["transfer.uploadMaxChunkRetries"],
+                getDefault: () => UPLOAD_CHUNK_RETRY_DEFAULT,
+                fromStored: (value) =>
+                    parseBoundedIntegerSetting(
+                        value,
+                        UPLOAD_CHUNK_RETRY_DEFAULT,
+                        UPLOAD_CHUNK_RETRY_MIN,
+                        UPLOAD_CHUNK_RETRY_MAX,
+                    ),
+                toStored: (value) => String(value),
+                normalize: normalizeUploadChunkRetries,
+            },
             "transfer.streamWriteBatchBytes": {
                 definition: APP_SETTINGS["transfer.streamWriteBatchBytes"],
                 getDefault: () => STREAM_WRITE_BATCH_BYTES_DEFAULT,
@@ -252,6 +275,13 @@ export class Setting {
             },
             "transfer.startupResumeMode": {
                 definition: APP_SETTINGS["transfer.startupResumeMode"],
+                getDefault: () => "auto" as const,
+                fromStored: parseStartupResumeMode,
+                toStored: (value) => value,
+                normalize: normalizeStartupResumeMode,
+            },
+            "transfer.uploadStartupResumeMode": {
+                definition: APP_SETTINGS["transfer.uploadStartupResumeMode"],
                 getDefault: () => "auto" as const,
                 fromStored: parseStartupResumeMode,
                 toStored: (value) => value,
@@ -400,12 +430,18 @@ export class Setting {
         getMaxChunkRetries: async () => await this.get("transfer.maxChunkRetries"),
         setMaxChunkRetries: async (value: number) =>
             await this.set("transfer.maxChunkRetries", value),
+        getUploadMaxChunkRetries: async () => await this.get("transfer.uploadMaxChunkRetries"),
+        setUploadMaxChunkRetries: async (value: number) =>
+            await this.set("transfer.uploadMaxChunkRetries", value),
         getStreamWriteBatchBytes: async () => await this.get("transfer.streamWriteBatchBytes"),
         setStreamWriteBatchBytes: async (value: number) =>
             await this.set("transfer.streamWriteBatchBytes", value),
         getStartupResumeMode: async () => await this.get("transfer.startupResumeMode"),
         setStartupResumeMode: async (value: StartupResumeMode) =>
             await this.set("transfer.startupResumeMode", value),
+        getUploadStartupResumeMode: async () => await this.get("transfer.uploadStartupResumeMode"),
+        setUploadStartupResumeMode: async (value: StartupResumeMode) =>
+            await this.set("transfer.uploadStartupResumeMode", value),
     };
 }
 

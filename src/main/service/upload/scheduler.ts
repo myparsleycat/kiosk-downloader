@@ -1,12 +1,12 @@
 import { performance } from "node:perf_hooks";
 
 import {
-    CHUNK_RETRY_DEFAULT,
-    CHUNK_RETRY_MAX,
-    CHUNK_RETRY_MIN,
     SEGMENT_POOL_SIZE_DEFAULT,
     SEGMENT_POOL_SIZE_MAX,
     SEGMENT_POOL_SIZE_MIN,
+    UPLOAD_CHUNK_RETRY_DEFAULT,
+    UPLOAD_CHUNK_RETRY_MAX,
+    UPLOAD_CHUNK_RETRY_MIN,
 } from "@shared/settings";
 import { toErrorMessage } from "@shared/utils";
 
@@ -64,8 +64,8 @@ type CollectionWorkState = {
 
 function clampChunkRetries(value: number) {
     return Math.min(
-        CHUNK_RETRY_MAX,
-        Math.max(CHUNK_RETRY_MIN, ensurePositiveInteger(value, CHUNK_RETRY_DEFAULT)),
+        UPLOAD_CHUNK_RETRY_MAX,
+        Math.max(UPLOAD_CHUNK_RETRY_MIN, ensurePositiveInteger(value, UPLOAD_CHUNK_RETRY_DEFAULT)),
     );
 }
 
@@ -878,7 +878,9 @@ export class UploadScheduler {
     private async getSettings(): Promise<SchedulerSettings> {
         return {
             maxWorkers: clampSegmentPoolSize(await this.kd.setting.transfer.getSegmentPoolSize()),
-            maxChunkRetries: clampChunkRetries(await this.kd.setting.transfer.getMaxChunkRetries()),
+            maxChunkRetries: clampChunkRetries(
+                await this.kd.setting.transfer.getUploadMaxChunkRetries(),
+            ),
         };
     }
 }

@@ -13,6 +13,7 @@ import { Separator } from "@renderer/components/ui/separator";
 import { Switch } from "@renderer/components/ui/switch";
 import {
   type AppSettings,
+  CHUNK_RETRY_DEFAULT,
   CHUNK_RETRY_MAX,
   CHUNK_RETRY_MIN,
   SEGMENT_POOL_SIZE_DEFAULT,
@@ -26,6 +27,9 @@ import {
   type StartupResumeMode,
   STREAM_WRITE_BATCH_BYTES_DEFAULT,
   STREAM_WRITE_BATCH_BYTES_OPTIONS,
+  UPLOAD_CHUNK_RETRY_DEFAULT,
+  UPLOAD_CHUNK_RETRY_MAX,
+  UPLOAD_CHUNK_RETRY_MIN,
 } from "@shared/settings";
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
@@ -36,6 +40,7 @@ import {
   MoonIcon,
   PowerIcon,
   SettingsIcon,
+  UploadIcon,
   ZapIcon,
 } from "lucide-react";
 import * as React from "react";
@@ -50,8 +55,10 @@ const SETTING_KEYS = [
   "general.theme",
   "transfer.segmentPoolSize",
   "transfer.maxChunkRetries",
+  "transfer.uploadMaxChunkRetries",
   "transfer.streamWriteBatchBytes",
   "transfer.startupResumeMode",
+  "transfer.uploadStartupResumeMode",
 ] as const;
 
 type SettingsState = {
@@ -66,14 +73,24 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.logLevel": "error",
   "general.theme": "system",
   "transfer.segmentPoolSize": SEGMENT_POOL_SIZE_DEFAULT,
-  "transfer.maxChunkRetries": 5,
+  "transfer.maxChunkRetries": CHUNK_RETRY_DEFAULT,
+  "transfer.uploadMaxChunkRetries": UPLOAD_CHUNK_RETRY_DEFAULT,
   "transfer.streamWriteBatchBytes": STREAM_WRITE_BATCH_BYTES_DEFAULT,
   "transfer.startupResumeMode": "auto",
+  "transfer.uploadStartupResumeMode": "auto",
 };
 
 const chunkRetryOptions = Array.from(
   { length: CHUNK_RETRY_MAX - CHUNK_RETRY_MIN + 1 },
   (_, index) => CHUNK_RETRY_MIN + index,
+).map((value) => ({
+  value: String(value),
+  label: String(value),
+}));
+
+const uploadChunkRetryOptions = Array.from(
+  { length: UPLOAD_CHUNK_RETRY_MAX - UPLOAD_CHUNK_RETRY_MIN + 1 },
+  (_, index) => UPLOAD_CHUNK_RETRY_MIN + index,
 ).map((value) => ({
   value: String(value),
   label: String(value),
@@ -292,6 +309,63 @@ export function SettingsView() {
                 onValueChange={(value) => {
                   if (value === null) return;
                   void setSetting("transfer.startupResumeMode", value);
+                }}
+              >
+                <SelectTrigger className="w-34">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent finalFocus={false}>
+                  <SelectGroup>
+                    {startupResumeModeOptions.map((mode) => (
+                      <SelectItem key={mode.value} value={mode.value}>
+                        {mode.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            }
+          />
+        </Section>
+
+        <Section icon={<UploadIcon className="size-3.5" />} title="업로드 큐">
+          <SettingRow
+            title="청크 재시도"
+            description="청크 업로드 실패 시 최대 재시도 횟수입니다."
+            control={
+              <Select
+                items={uploadChunkRetryOptions}
+                value={String(settings["transfer.uploadMaxChunkRetries"])}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  void setSetting("transfer.uploadMaxChunkRetries", Number.parseInt(value, 10));
+                }}
+              >
+                <SelectTrigger className="w-34">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent finalFocus={false}>
+                  <SelectGroup>
+                    {uploadChunkRetryOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            }
+          />
+          <SettingRow
+            title="시작 시 이어받기"
+            description="앱 시작 시 이전 업로드를 자동으로 다시 시작할지 선택합니다."
+            control={
+              <Select
+                items={startupResumeModeOptions}
+                value={settings["transfer.uploadStartupResumeMode"]}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  void setSetting("transfer.uploadStartupResumeMode", value);
                 }}
               >
                 <SelectTrigger className="w-34">
