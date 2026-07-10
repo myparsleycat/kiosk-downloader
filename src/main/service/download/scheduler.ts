@@ -303,7 +303,7 @@ export class DownloadScheduler {
         const settings = await this.getSettings();
         const segmentPoolSize = settings.segmentPoolSize;
         this.segmentPool.resize(segmentPoolSize);
-        this.transferPool.resize(segmentPoolSize);
+        this.transferPool.start();
         const collections = this.repository.listRunnableCollections();
 
         for (const collection of collections) {
@@ -584,6 +584,9 @@ export class DownloadScheduler {
             this.progressBatcher.deactivate(collectionId);
             if (!wasTerminal) {
                 await this.emitUpdate(collectionId);
+                if (updatedCollection.status === "completed") {
+                    await this.kd.service.transfer.maybeShutdownAfterTransfer();
+                }
             }
         } else {
             this.progressBatcher.mark(collectionId, fileId);
@@ -1109,6 +1112,12 @@ export class DownloadScheduler {
         controller: AbortController,
     ) {
         let partWriter: PartFileWriter | null = null;
+
+        if (this.repository.reconcileTransferChunkLayout(file.id)) {
+            const partPath = this.getPartPath(collection, file);
+            await fse.remove(partPath).catch(() => undefined);
+            await PartFileWriter.removeSidecar(partPath);
+        }
 
         const chunks = this.repository.listChunks(file.id);
         await this.validateCompletedChunks(collection, file, chunks);

@@ -272,6 +272,12 @@ export class Setting {
                     await this.kd.service.transfer.refreshPowerSaveBlock();
                 },
             },
+            "general.shutdownAfterTransfer": {
+                definition: APP_SETTINGS["general.shutdownAfterTransfer"],
+                getDefault: () => false,
+                fromStored: (value) => parseBooleanSetting(value, false),
+                toStored: (value) => String(value),
+            },
             "transfer.segmentPoolSize": {
                 definition: APP_SETTINGS["transfer.segmentPoolSize"],
                 getDefault: () => SEGMENT_POOL_SIZE_DEFAULT,
@@ -500,6 +506,9 @@ export class Setting {
         getPowerSaveBlockInTransfer: async () => await this.get("general.powerSaveBlockInTransfer"),
         setPowerSaveBlockInTransfer: async (enabled: boolean) =>
             await this.set("general.powerSaveBlockInTransfer", enabled),
+        getShutdownAfterTransfer: async () => await this.get("general.shutdownAfterTransfer"),
+        setShutdownAfterTransfer: async (enabled: boolean) =>
+            await this.set("general.shutdownAfterTransfer", enabled),
         getRunInBackground: async () => await this.get("general.runInBackground"),
         setRunInBackground: async (enabled: boolean) =>
             await this.set("general.runInBackground", enabled),

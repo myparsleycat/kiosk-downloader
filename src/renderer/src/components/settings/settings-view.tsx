@@ -1,3 +1,13 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@renderer/components/ui/alert-dialog";
 import { Input } from "@renderer/components/ui/input";
 import { Label } from "@renderer/components/ui/label";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
@@ -57,6 +67,7 @@ const SETTING_KEYS = [
   "general.createCollectionSubfolder",
   "general.asciiFilenames",
   "general.powerSaveBlockInTransfer",
+  "general.shutdownAfterTransfer",
   "general.logLevel",
   "general.theme",
   "transfer.segmentPoolSize",
@@ -80,6 +91,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.createCollectionSubfolder": true,
   "general.asciiFilenames": false,
   "general.powerSaveBlockInTransfer": true,
+  "general.shutdownAfterTransfer": false,
   "general.logLevel": "error",
   "general.theme": "system",
   "transfer.segmentPoolSize": SEGMENT_POOL_SIZE_DEFAULT,
@@ -148,6 +160,7 @@ const themeOptions = SETTING_THEMES.map((value) => ({
 export function SettingsView() {
   const [settings, setSettings] = React.useState<SettingsState>(DEFAULT_SETTINGS);
   const [appStatus, setAppStatus] = React.useState<AppStatus | null>(null);
+  const [shutdownConfirmOpen, setShutdownConfirmOpen] = React.useState(false);
 
   React.useEffect(() => {
     void window.api
@@ -189,6 +202,29 @@ export function SettingsView() {
 
   return (
     <ScrollArea className="h-full">
+      <AlertDialog open={shutdownConfirmOpen} onOpenChange={setShutdownConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>전송 완료 후 시스템 종료</AlertDialogTitle>
+            <AlertDialogDescription>
+              업로드·다운로드가 모두 끝나면 PC가 자동으로 종료됩니다. 저장하지 않은 작업이 남아 있지
+              않은지 확인한 뒤 켜 주세요.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>취소</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShutdownConfirmOpen(false);
+                void setSetting("general.shutdownAfterTransfer", true);
+              }}
+            >
+              켜기
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
         <div className="flex items-center gap-2">
           <SettingsIcon className="size-4 text-muted-foreground" />
@@ -230,6 +266,22 @@ export function SettingsView() {
                 onCheckedChange={(value) =>
                   void setSetting("general.powerSaveBlockInTransfer", value)
                 }
+              />
+            }
+          />
+          <SettingRow
+            title="전송 완료 후 시스템 종료"
+            description="업로드·다운로드가 모두 끝나면 기기를 종료합니다."
+            control={
+              <Switch
+                checked={settings["general.shutdownAfterTransfer"]}
+                onCheckedChange={(value) => {
+                  if (value) {
+                    setShutdownConfirmOpen(true);
+                    return;
+                  }
+                  void setSetting("general.shutdownAfterTransfer", false);
+                }}
               />
             }
           />

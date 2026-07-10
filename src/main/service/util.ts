@@ -105,6 +105,28 @@ export function openCmd(path: string) {
     }).unref();
 }
 
+export function shutdownSystem() {
+    if (!app.isPackaged) {
+        kd.logger.info("util:shutdownSystem:skipped-dev");
+        return false;
+    }
+    if (process.platform !== "win32") {
+        kd.logger.warn({ platform: process.platform }, "util:shutdownSystem:unsupported");
+        return false;
+    }
+    try {
+        spawn("shutdown", ["/s", "/f", "/t", "0"], {
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+        }).unref();
+        return true;
+    } catch (error) {
+        kd.logger.error(error, "util:shutdownSystem");
+        return false;
+    }
+}
+
 export function trimTrailingNul(value: string) {
     let end = value.length;
 

@@ -1,5 +1,7 @@
 import { performance } from "node:perf_hooks";
 
+import { cachedSpeedOrClearIfStale, SPEED_EMA_TAU_MS, updateSpeedEma } from "../transfer-speed";
+
 const SPEED_WINDOW_MS = 3000;
 const MIN_SPEED_SAMPLE_SPAN_MS = 500;
 type ByteSample = { t: number; b: number };
@@ -15,6 +17,8 @@ export class UploadTransferMetrics {
     private readonly samplesByCollection = new Map<string, ByteSample[]>();
     private readonly speedByFile = new Map<string, number>();
     private readonly speedByCollection = new Map<string, number>();
+    private readonly lastEmaAtByFile = new Map<string, number>();
+    private readonly lastEmaAtByCollection = new Map<string, number>();
 
     public registerFile(collectionId: string, fileId: string) {
         this.collectionByFile.set(fileId, collectionId);
@@ -67,6 +71,7 @@ export class UploadTransferMetrics {
         }
         this.samplesByFile.delete(fileId);
         this.speedByFile.delete(fileId);
+        this.lastEmaAtByFile.delete(fileId);
         this.activeTransferredByFile.delete(fileId);
         this.observedTransferredByFile.delete(fileId);
         this.collectionByFile.delete(fileId);
@@ -87,6 +92,7 @@ export class UploadTransferMetrics {
                 this.observedTransferredByFile.get(fileId) ?? 0,
                 this.samplesByFile,
                 this.speedByFile,
+                this.lastEmaAtByFile,
             ),
         };
     }
@@ -104,6 +110,7 @@ export class UploadTransferMetrics {
             this.observedTransferredByCollection.get(collectionId) ?? 0,
             this.samplesByCollection,
             this.speedByCollection,
+            this.lastEmaAtByCollection,
         );
     }
 
@@ -116,6 +123,7 @@ export class UploadTransferMetrics {
         }
         this.samplesByCollection.delete(collectionId);
         this.speedByCollection.delete(collectionId);
+        this.lastEmaAtByCollection.delete(collectionId);
         this.activeTransferredByCollection.delete(collectionId);
         this.observedTransferredByCollection.delete(collectionId);
     }
@@ -168,6 +176,7 @@ export class UploadTransferMetrics {
         totalBytes: number,
         samplesByKey: Map<string, ByteSample[]>,
         speedByKey: Map<string, number>,
+        lastEmaAtByKey: Map<string, number>,
     ) {
         const now = performance.now();
         const samples = samplesByKey.get(key) ?? [];
@@ -176,20 +185,23 @@ export class UploadTransferMetrics {
         samplesByKey.set(key, window);
 
         if (window.length < 2) {
-            speedByKey.set(key, 0);
-            return 0;
+            return cachedSpeedOrClearIfStale(now, key, speedByKey, lastEmaAtByKey, SPEED_WINDOW_MS);
         }
 
         const first = window[0];
         const last = window[window.length - 1];
         const elapsedMs = last.t - first.t;
         if (elapsedMs < MIN_SPEED_SAMPLE_SPAN_MS) {
-            speedByKey.set(key, 0);
-            return 0;
+            return cachedSpeedOrClearIfStale(now, key, speedByKey, lastEmaAtByKey, SPEED_WINDOW_MS);
         }
 
-        const speedBps = Math.max(0, (last.b - first.b) / (elapsedMs / 1000));
+        const instantBps = Math.max(0, (last.b - first.b) / (elapsedMs / 1000));
+        const prevEma = speedByKey.get(key);
+        const lastEmaAt = lastEmaAtByKey.get(key);
+        const dtMs = lastEmaAt === undefined ? Number.POSITIVE_INFINITY : now - lastEmaAt;
+        const speedBps = updateSpeedEma(prevEma, instantBps, dtMs, SPEED_EMA_TAU_MS);
         speedByKey.set(key, speedBps);
+        lastEmaAtByKey.set(key, now);
         return speedBps;
     }
 }

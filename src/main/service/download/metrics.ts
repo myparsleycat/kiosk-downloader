@@ -1,3 +1,5 @@
+import { cachedSpeedOrClearIfStale, SPEED_EMA_TAU_MS, updateSpeedEma } from "../transfer-speed";
+
 const SPEED_WINDOW_MS = 2000;
 const MIN_SPEED_SAMPLE_SPAN_MS = 500;
 type ByteSample = { t: number; b: number };
@@ -15,6 +17,8 @@ export class DownloadTransferMetrics {
     private readonly samplesByCollection = new Map<string, ByteSample[]>();
     private readonly speedByFile = new Map<string, number>();
     private readonly speedByCollection = new Map<string, number>();
+    private readonly lastEmaAtByFile = new Map<string, number>();
+    private readonly lastEmaAtByCollection = new Map<string, number>();
     private readonly persistedByFile = new Map<string, number>();
 
     public registerFile(collectionId: string, fileId: string, bytes: number) {
@@ -81,6 +85,7 @@ export class DownloadTransferMetrics {
         }
         this.samplesByFile.delete(fileId);
         this.speedByFile.delete(fileId);
+        this.lastEmaAtByFile.delete(fileId);
         this.persistedByFile.delete(fileId);
         this.transferredByFile.delete(fileId);
         this.collectionByFile.delete(fileId);
@@ -104,6 +109,7 @@ export class DownloadTransferMetrics {
                 this.transferredByFile.get(fileId) ?? 0,
                 this.samplesByFile,
                 this.speedByFile,
+                this.lastEmaAtByFile,
             ),
         };
     }
@@ -121,12 +127,14 @@ export class DownloadTransferMetrics {
             this.transferredByCollection.get(collectionId) ?? 0,
             this.samplesByCollection,
             this.speedByCollection,
+            this.lastEmaAtByCollection,
         );
     }
 
     public clearCollection(collectionId: string) {
         this.samplesByCollection.delete(collectionId);
         this.speedByCollection.delete(collectionId);
+        this.lastEmaAtByCollection.delete(collectionId);
         this.writtenByCollection.delete(collectionId);
         this.transferredByCollection.delete(collectionId);
     }
@@ -193,6 +201,7 @@ export class DownloadTransferMetrics {
         totalBytes: number,
         samplesByKey: Map<string, ByteSample[]>,
         speedByKey: Map<string, number>,
+        lastEmaAtByKey: Map<string, number>,
     ) {
         const now = Date.now();
         const samples = samplesByKey.get(key) ?? [];
@@ -201,20 +210,23 @@ export class DownloadTransferMetrics {
         samplesByKey.set(key, window);
 
         if (window.length < 2) {
-            speedByKey.set(key, 0);
-            return 0;
+            return cachedSpeedOrClearIfStale(now, key, speedByKey, lastEmaAtByKey, SPEED_WINDOW_MS);
         }
 
         const first = window[0];
         const last = window[window.length - 1];
         const elapsedMs = last.t - first.t;
         if (elapsedMs < MIN_SPEED_SAMPLE_SPAN_MS) {
-            speedByKey.set(key, 0);
-            return 0;
+            return cachedSpeedOrClearIfStale(now, key, speedByKey, lastEmaAtByKey, SPEED_WINDOW_MS);
         }
 
-        const speedBps = Math.max(0, (last.b - first.b) / (elapsedMs / 1000));
+        const instantBps = Math.max(0, (last.b - first.b) / (elapsedMs / 1000));
+        const prevEma = speedByKey.get(key);
+        const lastEmaAt = lastEmaAtByKey.get(key);
+        const dtMs = lastEmaAt === undefined ? Number.POSITIVE_INFINITY : now - lastEmaAt;
+        const speedBps = updateSpeedEma(prevEma, instantBps, dtMs, SPEED_EMA_TAU_MS);
         speedByKey.set(key, speedBps);
+        lastEmaAtByKey.set(key, now);
         return speedBps;
     }
 }

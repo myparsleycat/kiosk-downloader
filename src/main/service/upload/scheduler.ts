@@ -700,6 +700,7 @@ export class UploadScheduler {
                 KioUploadClient.buildShareLink(Buffer.from(collection.collectionUuid, "hex")),
             );
             await this.emitUpdate(collectionId);
+            await this.kd.service.transfer.maybeShutdownAfterTransfer();
         } catch (error) {
             state.completing = false;
             const status = error instanceof UploadSessionExpiredError ? "expired" : "error";

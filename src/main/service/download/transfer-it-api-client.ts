@@ -44,6 +44,31 @@ type XiResponse = {
     size?: number[];
 };
 
+export const TRANSFER_RATE_LIMIT_ERROR =
+    "Transfer 서버가 다운로드 요청을 제한했습니다. 잠시 후 다시 시도해 주세요.";
+
+export class TransferRateLimitError extends Error {
+    public constructor(public readonly retryAfterMs?: number) {
+        super(TRANSFER_RATE_LIMIT_ERROR);
+        this.name = "TransferRateLimitError";
+    }
+}
+
+export function parseTransferRetryAfterMs(value: string | null) {
+    if (!value) {
+        return undefined;
+    }
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+        return seconds * 1000;
+    }
+    const date = Date.parse(value);
+    if (Number.isNaN(date)) {
+        return undefined;
+    }
+    return Math.max(0, date - Date.now());
+}
+
 function extractTransferId(url: string) {
     const xh = tryParseTransferUrl(url);
     if (!xh) {
@@ -83,6 +108,9 @@ function megaErrorMessage(code: number) {
 
 function assertMegaResult(value: unknown, stage: string) {
     if (typeof value === "number" && value < 0) {
+        if (value === -17) {
+            throw new TransferRateLimitError();
+        }
         throw new Error(megaErrorMessage(value));
     }
     if (value == null) {
@@ -206,7 +234,10 @@ export class TransferItApiClient {
             throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
         }
         if (response.status === 509) {
-            throw new Error("Transfer bandwidth quota exceeded (HTTP 509).");
+            await response.body?.cancel().catch(() => undefined);
+            throw new TransferRateLimitError(
+                parseTransferRetryAfterMs(response.headers.get("retry-after")),
+            );
         }
         if (!response.ok) {
             throw new Error(`Transfer API HTTP ${response.status}.`);

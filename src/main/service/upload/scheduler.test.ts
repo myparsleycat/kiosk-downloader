@@ -244,7 +244,12 @@ function createKioskDownloader() {
                 getUploadMaxChunkRetries: vi.fn(async () => 2),
             },
         },
-        service: { transfer: { refreshPowerSaveBlock: vi.fn(async () => undefined) } },
+        service: {
+            transfer: {
+                refreshPowerSaveBlock: vi.fn(async () => undefined),
+                maybeShutdownAfterTransfer: vi.fn(async () => undefined),
+            },
+        },
         logger: { error: vi.fn(), warn: vi.fn() },
     } as unknown as KioskDownloader;
 }

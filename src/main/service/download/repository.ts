@@ -24,7 +24,7 @@ import type {
     ZipEntryStoredMeta,
 } from "./types";
 
-import { megaChunkSizes } from "./transfer-it-crypto";
+import { transferChunkLayoutMatches, transferChunkSizes } from "./transfer-it-crypto";
 import { buildZipEntrySegmentChunks, supportsZipEntryPoolDownload } from "./zip-segment-map";
 
 const COLLECTION_EXPIRED_ERROR = "Collection has expired.";
@@ -556,6 +556,38 @@ export class DownloadRepository {
         const file = this.getFile(fileId);
         const collection = file ? this.getCollection(file.collectionId) : null;
         return file && collection ? this.buildChunks(collection, file) : [];
+    }
+
+    /**
+     * Drop Transfer chunk rows whose stored offset/size no longer match the current schedule.
+     * Returns true when rows were deleted so callers can clear the part file.
+     */
+    public reconcileTransferChunkLayout(fileId: string) {
+        const file = this.getFile(fileId);
+        const collection = file ? this.getCollection(file.collectionId) : null;
+        if (!file || !collection || (collection.provider ?? "kiosk") !== "transfer") {
+            return false;
+        }
+
+        const stored = this.kd.lib.db.all<Pick<DownloadChunkRow, "chunkIndex" | "offset" | "size">>(
+            `SELECT "chunk_index" AS "chunkIndex", "offset", "size"
+             FROM "download_chunk"
+             WHERE "file_id" = ?
+               AND "status" IN ('pending', 'downloading', 'completed', 'error')
+             ORDER BY "chunk_index" ASC`,
+            [fileId],
+        );
+        if (stored.length === 0) {
+            return false;
+        }
+
+        if (transferChunkLayoutMatches(stored, transferChunkSizes(file.size))) {
+            return false;
+        }
+
+        this.deleteAllChunksForFile(fileId);
+        this.syncFileDownloadedBytes(fileId);
+        return true;
     }
 
     public listPendingChunks(fileId: string) {
@@ -1180,9 +1212,9 @@ export class DownloadRepository {
         }
 
         if ((collection.provider ?? "kiosk") === "transfer") {
-            return megaChunkSizes(file.size).map((chunk, chunkIndex) => {
+            return transferChunkSizes(file.size).map((chunk, chunkIndex) => {
                 const stored = storedByIndex.get(chunkIndex);
-                if (stored) {
+                if (stored && stored.offset === chunk.start && stored.size === chunk.size) {
                     return {
                         ...stored,
                         collectionId: collection.id,
