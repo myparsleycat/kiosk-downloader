@@ -1,3 +1,4 @@
+import { FileTree, type FileTreeError } from "@renderer/components/tree/file-tree";
 import { Button } from "@renderer/components/ui/button";
 import {
   ContextMenu,
@@ -6,9 +7,17 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@renderer/components/ui/context-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@renderer/components/ui/dialog";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { cn } from "@renderer/lib/utils";
-import type { UploadItem } from "@shared/types";
+import type { DownloadStatus, FileProgress, UploadItem } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import {
   ClockIcon,
@@ -45,6 +54,7 @@ export function UploadList({
 }) {
   const [selectedId, setSelectedId] = React.useState<string | null>(items[0]?.id ?? null);
   const [filter, setFilter] = React.useState<UploadFilter>("all");
+  const [errorDetails, setErrorDetails] = React.useState<FileTreeError[] | null>(null);
 
   React.useEffect(() => {
     if (!focusUploadId) return;
@@ -150,6 +160,7 @@ export function UploadList({
                       item={item}
                       active={item.id === selectedId}
                       onClick={() => setSelectedId(item.id)}
+                      onShowError={() => setErrorDetails(getUploadErrors(item))}
                     />
                   </ContextMenuTrigger>
                   <ContextMenuContent>
@@ -208,9 +219,16 @@ export function UploadList({
           removing={removing}
           onCopyLink={handleCopyLink}
           onNewUpload={onNewUpload}
+          onError={setErrorDetails}
         />
       </div>
       {dialog}
+      <UploadErrorDialog
+        errors={errorDetails}
+        onOpenChange={(open) => {
+          if (!open) setErrorDetails(null);
+        }}
+      />
     </div>
   );
 }
@@ -221,12 +239,14 @@ function UploadDetail({
   removing,
   onCopyLink,
   onNewUpload,
+  onError,
 }: {
   item: UploadItem | null;
   onRemove: (item: UploadItem) => void;
   removing: boolean;
   onCopyLink: (item: UploadItem) => void;
   onNewUpload: () => void;
+  onError: (errors: FileTreeError[]) => void;
 }) {
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
 
@@ -345,7 +365,6 @@ function UploadDetail({
               <Button
                 variant="outline"
                 size="sm"
-                isLoading={pendingAction === "copy"}
                 onClick={() => runAction("copy", async () => onCopyLink(item))}
               >
                 <CopyIcon className="size-3.5" />
@@ -423,6 +442,8 @@ function UploadDetail({
       <ScrollArea className="flex-1">
         <div className="p-2">
           <UploadFileList
+            uploadId={item.id}
+            tree={item.tree}
             collectionStatus={status}
             pendingAction={pendingAction}
             progress={progress}
@@ -434,6 +455,7 @@ function UploadDetail({
                 window.api.invoke("upload:resumeFile", item.id, fileId, { force }),
               )
             }
+            onError={onError}
           />
         </div>
       </ScrollArea>
@@ -451,106 +473,104 @@ function UploadDetail({
 }
 
 function UploadFileList({
+  uploadId,
+  tree,
   collectionStatus,
   pendingAction,
   progress,
   onPauseFile,
   onResumeFile,
+  onError,
 }: {
+  uploadId: string;
+  tree: UploadItem["tree"];
   collectionStatus: UploadItem["status"];
   pendingAction: string | null;
   progress: UploadItem["progress"];
   onPauseFile: (fileId: string) => void;
   onResumeFile: (fileId: string, force: boolean) => void;
+  onError: (errors: FileTreeError[]) => void;
 }) {
-  const entries = Object.values(progress).sort((a, b) => a.path.localeCompare(b.path));
-
-  if (entries.length === 0) {
+  if (Object.keys(progress).length === 0) {
     return <div className="py-8 text-center text-xs text-muted-foreground">파일이 없습니다</div>;
   }
 
   return (
-    <div className="flex flex-col gap-0.5">
-      {entries.map((file) => {
-        const pct = file.size > 0 ? Math.min(100, (file.uploaded / file.size) * 100) : 100;
-        const speedLabel = file.status === "uploading" ? formatSpeed(file.speedBps) : null;
-        return (
-          <React.Fragment key={file.fileId}>
-            <div className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/40">
-              <span className="min-w-0 flex-1 truncate" title={file.path}>
-                {file.path}
-              </span>
-              <span className="shrink-0 tabular-nums text-muted-foreground">
-                {formatSize(file.uploaded)} / {formatSize(file.size)}
-              </span>
-              <span
-                className={cn(
-                  "w-[5.5rem] shrink-0 whitespace-nowrap text-right tabular-nums",
-                  speedLabel ? "text-primary" : "invisible",
-                )}
-              >
-                {speedLabel ?? "0 B/s"}
-              </span>
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                  file.status === "completed"
-                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                    : file.status === "error"
-                      ? "bg-destructive/10 text-destructive"
-                      : file.status === "uploading"
-                        ? "bg-primary/10 text-primary"
-                        : "bg-muted text-muted-foreground",
-                )}
-              >
-                {file.status === "completed"
-                  ? "완료"
-                  : file.status === "error"
-                    ? "오류"
-                    : file.status === "uploading"
-                      ? `${pct.toFixed(0)}%`
-                      : file.status === "paused"
-                        ? "일시정지"
-                        : "대기"}
-              </span>
-              <div className="flex w-5 shrink-0 items-center justify-end">
-                {file.status === "uploading" ? (
-                  <button
-                    type="button"
-                    className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-                    disabled={pendingAction === "file"}
-                    onClick={() => onPauseFile(file.fileId)}
-                    title="일시정지"
-                  >
-                    <PauseIcon className="size-3" />
-                  </button>
-                ) : (file.status === "paused" ||
-                    file.status === "pending" ||
-                    file.status === "error") &&
-                  collectionStatus !== "expired" ? (
-                  <button
-                    type="button"
-                    className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-                    disabled={pendingAction === "file"}
-                    onClick={() => onResumeFile(file.fileId, file.status === "error")}
-                    title={file.status === "error" ? "재시도" : "시작"}
-                  >
-                    <PlayIcon className="size-3" />
-                  </button>
-                ) : null}
-              </div>
-            </div>
-            {file.error && (
-              <p
-                className="-mt-0.5 truncate px-2 pb-1 text-[10px] text-destructive"
-                title={file.error}
-              >
-                {file.error}
-              </p>
-            )}
-          </React.Fragment>
-        );
-      })}
-    </div>
+    <>
+      <FileTree
+        mode="progress"
+        downloadId={`upload:${uploadId}`}
+        root={tree}
+        progress={toTreeProgress(progress)}
+        collectionStatus={toDownloadStatus(collectionStatus)}
+        onPauseFile={pendingAction === "file" ? undefined : onPauseFile}
+        onResumeFile={pendingAction === "file" ? undefined : onResumeFile}
+        onError={onError}
+      />
+    </>
   );
+}
+
+function getUploadErrors(item: UploadItem): FileTreeError[] {
+  const errors: FileTreeError[] = item.error ? [{ path: "업로드", message: item.error }] : [];
+
+  for (const file of Object.values(item.progress)) {
+    if (file.status === "error") {
+      errors.push({ path: file.path, message: file.error ?? "오류 정보가 없습니다." });
+    }
+  }
+
+  return errors;
+}
+
+function UploadErrorDialog({
+  errors,
+  onOpenChange,
+}: {
+  errors: FileTreeError[] | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={errors !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>업로드 오류 상세</DialogTitle>
+          <DialogDescription>{errors?.length ?? 0}개 오류가 발생했습니다.</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-80 space-y-3 overflow-y-auto rounded-md border bg-muted/30 p-3">
+          {errors?.map((error) => (
+            <div key={`${error.path}:${error.message}`} className="space-y-1 text-xs">
+              <p className="font-medium break-all">{error.path}</p>
+              <pre className="text-destructive whitespace-pre-wrap break-words font-mono">
+                {error.message}
+              </pre>
+            </div>
+          ))}
+        </div>
+        <DialogFooter showCloseButton />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function toTreeProgress(progress: UploadItem["progress"]): Record<string, FileProgress> {
+  return Object.fromEntries(
+    Object.entries(progress).map(([path, file]) => [
+      path,
+      {
+        fileId: file.fileId,
+        path: file.path,
+        status: file.status === "uploading" ? "downloading" : file.status,
+        downloaded: file.uploaded,
+        size: file.size,
+        selected: true,
+        speedBps: file.speedBps,
+        error: file.error,
+      },
+    ]),
+  );
+}
+
+function toDownloadStatus(status: UploadItem["status"]): DownloadStatus {
+  return status === "uploading" ? "downloading" : status;
 }

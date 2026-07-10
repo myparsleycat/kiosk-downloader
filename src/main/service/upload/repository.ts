@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { UploadItem, UploadStatus, FileUploadStatus } from "@shared/types";
+import type { DirNode, UploadItem, UploadStatus, FileUploadStatus } from "@shared/types";
 
 import type { KioskDownloader } from "../..";
 import type {
@@ -12,6 +12,10 @@ import type {
 
 function nowIso() {
     return new Date().toISOString();
+}
+
+function parseTree(value: string): DirNode {
+    return JSON.parse(value) as DirNode;
 }
 
 export class UploadRepository {
@@ -507,6 +511,7 @@ export class UploadRepository {
             passwordProtected: collection.passwordPlain != null,
             expires: collection.expires,
             shareLink: collection.shareLink,
+            tree: parseTree(collection.treeJson),
             progress,
             status: collection.status,
             createdAt: Date.parse(collection.createdAt),

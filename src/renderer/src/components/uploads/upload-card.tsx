@@ -8,10 +8,12 @@ export function UploadCard({
   item,
   active,
   onClick,
+  onShowError,
 }: {
   item: UploadItem;
   active: boolean;
   onClick: () => void;
+  onShowError?: () => void;
 }) {
   const { progress, status } = item;
   const allProgress = Object.values(progress);
@@ -70,7 +72,7 @@ export function UploadCard({
             </div>
           )}
         </div>
-        <UploadStatusBadge status={status} />
+        <UploadStatusBadge status={status} onClick={onShowError} />
       </div>
 
       <div className="mt-2.5 flex flex-col gap-1">
@@ -127,7 +129,7 @@ export function UploadCard({
   );
 }
 
-function UploadStatusBadge({ status }: { status: UploadStatus }) {
+function UploadStatusBadge({ status, onClick }: { status: UploadStatus; onClick?: () => void }) {
   const map: Record<UploadStatus, { label: string; cls: string }> = {
     uploading: { label: "업로드", cls: "bg-primary/10 text-primary" },
     paused: { label: "일시정지", cls: "bg-muted text-muted-foreground" },
@@ -137,9 +139,36 @@ function UploadStatusBadge({ status }: { status: UploadStatus }) {
     expired: { label: "만료", cls: "bg-muted text-muted-foreground" },
   };
   const s = map[status];
-  return (
-    <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium", s.cls)}>
-      {s.label}
-    </span>
+  const className = cn(
+    "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+    s.cls,
+    status === "error" &&
+      onClick &&
+      "cursor-pointer underline decoration-dotted underline-offset-2",
   );
+
+  if (status === "error" && onClick) {
+    return (
+      <span
+        role="button"
+        tabIndex={0}
+        className={className}
+        title="오류 상세 보기"
+        onClick={(event) => {
+          event.stopPropagation();
+          onClick();
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          event.stopPropagation();
+          onClick();
+        }}
+      >
+        {s.label}
+      </span>
+    );
+  }
+
+  return <span className={className}>{s.label}</span>;
 }

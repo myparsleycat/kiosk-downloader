@@ -150,6 +150,7 @@ export interface UploadItem {
     passwordProtected: boolean;
     expires: number;
     shareLink: string | null;
+    tree: CollectionTree;
     progress: Record<string, UploadFileProgress>;
     status: UploadStatus;
     speedBps?: number;

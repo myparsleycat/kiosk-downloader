@@ -38,6 +38,12 @@ export interface FileTreeProgressProps {
   onResumeFile?: (fileId: string, force: boolean) => void;
   onIncludeFile?: (fileId: string) => void;
   onIncludeFolder?: (folderPath: string) => void;
+  onError?: (errors: FileTreeError[]) => void;
+}
+
+export interface FileTreeError {
+  path: string;
+  message: string;
 }
 
 export type FileTreeProps = FileTreeSelectionProps | FileTreeProgressProps;
@@ -168,6 +174,10 @@ function FileRow({
   const pct = node.size > 0 ? Math.min(100, (downloaded / node.size) * 100) : 0;
   const selected = prog?.selected ?? true;
   const speedLabel = selected && status === "downloading" ? formatSpeed(prog?.speedBps) : null;
+  const errors =
+    status === "error"
+      ? [{ path: selectionKey, message: prog?.error ?? "오류 정보가 없습니다." }]
+      : [];
 
   return (
     <TreeRow
@@ -194,7 +204,11 @@ function FileRow({
           </span>
         ) : null,
         <div key="status" className="flex justify-end">
-          <StatusPill status={selected ? status : "skipped"} pct={pct} />
+          <StatusPill
+            status={selected ? status : "skipped"}
+            pct={pct}
+            onClick={errors.length > 0 ? () => props.onError?.(errors) : undefined}
+          />
         </div>,
         <div key="action" className="flex items-center justify-end">
           {selected && prog && status === "downloading" && props.onPauseFile && (
@@ -366,7 +380,15 @@ function DirRow({
                         {formatSize(dirSummary.downloaded)} / {formatSize(dirSummary.totalSize)}
                       </span>,
                       <div key="status" className="flex justify-end">
-                        <StatusPill status={dirSummary.status} pct={dirPct} />
+                        <StatusPill
+                          status={dirSummary.status}
+                          pct={dirPct}
+                          onClick={
+                            dirSummary.errors.length > 0
+                              ? () => props.onError?.(dirSummary.errors)
+                              : undefined
+                          }
+                        />
                       </div>,
                       null,
                     ]
@@ -442,6 +464,7 @@ function summarizeDirProgress(
   let hasDownloading = false;
   let hasPaused = false;
   let hasError = false;
+  const errors: FileTreeError[] = [];
 
   function walk(node: DirNode, stack: string[]) {
     for (const e of node.entries) {
@@ -471,6 +494,7 @@ function summarizeDirProgress(
           hasPaused = true;
         } else if (status === "error") {
           hasError = true;
+          errors.push({ path: key, message: prog?.error ?? "오류 정보가 없습니다." });
         } else if (status === "completed") {
           completedCount += 1;
         }
@@ -509,6 +533,7 @@ function summarizeDirProgress(
     hasDownloading,
     hasPaused,
     hasError,
+    errors,
     status,
   };
 }
@@ -593,7 +618,15 @@ function TreeRow({
   );
 }
 
-function StatusPill({ status, pct }: { status: string; pct: number }) {
+function StatusPill({
+  status,
+  pct,
+  onClick,
+}: {
+  status: string;
+  pct: number;
+  onClick?: () => void;
+}) {
   const label =
     status === "completed"
       ? "완료"
@@ -614,11 +647,27 @@ function StatusPill({ status, pct }: { status: string; pct: number }) {
         : status === "error"
           ? "text-destructive"
           : "text-muted-foreground";
-  return (
-    <span
-      className={cn("inline-block w-12 shrink-0 text-right text-xs font-medium tabular-nums", cls)}
-    >
-      {label}
-    </span>
+  const className = cn(
+    "inline-block w-12 shrink-0 text-right text-xs font-medium tabular-nums",
+    cls,
+    onClick && "cursor-pointer underline decoration-dotted underline-offset-2",
   );
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={(event) => {
+          event.stopPropagation();
+          onClick();
+        }}
+        title="오류 상세 보기"
+      >
+        {label}
+      </button>
+    );
+  }
+
+  return <span className={className}>{label}</span>;
 }
