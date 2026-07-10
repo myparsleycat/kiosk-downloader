@@ -46,8 +46,9 @@ export const STREAM_WRITE_BATCH_BYTES_OPTIONS = [
     1024 * 1024,
     2 * 1024 * 1024,
     4 * 1024 * 1024,
+    8 * 1024 * 1024,
 ] as const;
-export const STREAM_WRITE_BATCH_BYTES_DEFAULT = 1024 * 1024;
+export const STREAM_WRITE_BATCH_BYTES_DEFAULT = 2 * 1024 * 1024;
 
 export const INFLATE_BUFFER_BYTES_OPTIONS = [
     1024 * 1024,
