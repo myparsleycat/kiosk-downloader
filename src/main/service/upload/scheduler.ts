@@ -203,6 +203,8 @@ export class UploadScheduler {
             this.pauseFileState(fileId);
         }
         await this.waitForCollectionIdle(collectionId);
+        this.completeFinishedFiles(collectionId);
+        this.stopCollectionTimer(collectionId);
         this.deactivateCollection(collectionId);
     }
 
@@ -219,6 +221,7 @@ export class UploadScheduler {
         for (const fileId of state.fileIds) {
             this.resumeFileState(fileId);
         }
+        this.completeFinishedFiles(collectionId);
         if (
             [...state.fileIds].every((fileId) => {
                 const file = this.files.get(fileId);
@@ -238,7 +241,9 @@ export class UploadScheduler {
         }
         this.pauseFileState(fileId);
         await this.waitForFileIdle(state);
+        this.completeFinishedFiles(state.collectionId);
         if (!this.hasRunnableFile(state.collectionId)) {
+            this.stopCollectionTimer(state.collectionId);
             this.deactivateCollection(state.collectionId);
         }
     }
@@ -298,8 +303,7 @@ export class UploadScheduler {
             }
             chunksByFile.set(file.id, this.buildFileChunks(collection, file));
         }
-        // Incomplete files always restart from sequence 0; server skips stored segments.
-        this.repository.resetIncompleteCollectionProgress(collection.id);
+        this.repository.syncCollectionUploadedBytesFromCompletedChunks(collection.id);
         this.registerCollection(collection.id, chunksByFile);
         return this.collections.get(collection.id) ?? null;
     }
@@ -360,7 +364,7 @@ export class UploadScheduler {
                 collectionId,
                 fileId,
                 chunks,
-                completed: new Set(),
+                completed: new Set(this.repository.listCompletedChunkIndexes(fileId)),
                 queued: new Set(),
                 inFlightSequences: new Set(),
                 inFlight: 0,
@@ -610,6 +614,9 @@ export class UploadScheduler {
             }
             return;
         }
+        if (this.completeFinishedFiles(collectionId)) {
+            await this.emitUpdate(collectionId);
+        }
         if (
             [...collection.fileIds].some((fileId) => {
                 const file = this.files.get(fileId);
@@ -622,6 +629,27 @@ export class UploadScheduler {
             return;
         }
         await this.finalizeCollection(collectionId);
+    }
+
+    private completeFinishedFiles(collectionId: string) {
+        const collection = this.collections.get(collectionId);
+        if (!collection) {
+            return false;
+        }
+        let completedAny = false;
+        for (const fileId of collection.fileIds) {
+            const file = this.files.get(fileId);
+            if (!file || file.inFlight > 0 || file.completed.size !== file.chunks.length) {
+                continue;
+            }
+            const persisted = this.repository.getFile(fileId);
+            if (!persisted || persisted.status === "completed") {
+                continue;
+            }
+            this.repository.completeFile(fileId);
+            completedAny = true;
+        }
+        return completedAny;
     }
 
     private async finalizeCollection(collectionId: string) {
@@ -712,9 +740,12 @@ export class UploadScheduler {
         if (this.repository.getFile(fileId)?.status === "completed") {
             return;
         }
-        file.completed.clear();
+        for (const chunkIndex of this.repository.listCompletedChunkIndexes(fileId)) {
+            file.completed.add(chunkIndex);
+        }
         file.queued.clear();
         this.metrics.clearFile(fileId);
+        this.metrics.registerFile(file.collectionId, fileId);
         file.paused = false;
         file.failed = false;
         file.generation += 1;

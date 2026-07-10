@@ -279,38 +279,56 @@ export class UploadRepository {
         );
     }
 
-    public resetIncompleteFileProgress(fileId: string) {
-        const timestamp = nowIso();
-        this.kd.lib.db.transaction((tx) => {
-            tx.run(`DELETE FROM "upload_chunk" WHERE "file_id" = ?`, [fileId]);
-            tx.run(
-                `UPDATE "upload_file"
-                 SET "uploaded_bytes" = 0, "updated_at" = ?
-                 WHERE "id" = ? AND "status" != 'completed'`,
-                [timestamp, fileId],
-            );
-        });
+    public listCompletedChunkIndexes(fileId: string): number[] {
+        return this.kd.lib.db
+            .all<{ chunkIndex: number }>(
+                `SELECT "chunk_index" AS "chunkIndex"
+                 FROM "upload_chunk"
+                 WHERE "file_id" = ? AND "status" = 'completed'
+                 ORDER BY "chunk_index" ASC`,
+                [fileId],
+            )
+            .map((row) => row.chunkIndex);
     }
 
-    public resetIncompleteCollectionProgress(collectionId: string) {
-        const timestamp = nowIso();
-        this.kd.lib.db.transaction((tx) => {
-            tx.run(
-                `DELETE FROM "upload_chunk"
-                 WHERE "collection_id" = ?
-                   AND "file_id" IN (
-                       SELECT "id" FROM "upload_file"
-                       WHERE "collection_id" = ? AND "status" != 'completed'
-                   )`,
-                [collectionId, collectionId],
-            );
-            tx.run(
-                `UPDATE "upload_file"
-                 SET "uploaded_bytes" = 0, "updated_at" = ?
-                 WHERE "collection_id" = ? AND "status" != 'completed'`,
-                [timestamp, collectionId],
-            );
-        });
+    public syncUploadedBytesFromCompletedChunks(fileId: string) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_file"
+             SET "uploaded_bytes" = MIN(
+                     "size",
+                     COALESCE(
+                         (
+                             SELECT SUM("size")
+                             FROM "upload_chunk"
+                             WHERE "file_id" = "upload_file"."id" AND "status" = 'completed'
+                         ),
+                         0
+                     )
+                 ),
+                 "updated_at" = ?
+             WHERE "id" = ? AND "status" != 'completed'`,
+            [nowIso(), fileId],
+        );
+    }
+
+    public syncCollectionUploadedBytesFromCompletedChunks(collectionId: string) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_file"
+             SET "uploaded_bytes" = MIN(
+                     "size",
+                     COALESCE(
+                         (
+                             SELECT SUM("size")
+                             FROM "upload_chunk"
+                             WHERE "file_id" = "upload_file"."id" AND "status" = 'completed'
+                         ),
+                         0
+                     )
+                 ),
+                 "updated_at" = ?
+             WHERE "collection_id" = ? AND "status" != 'completed'`,
+            [nowIso(), collectionId],
+        );
     }
 
     public pauseCollection(collectionId: string) {
@@ -359,8 +377,7 @@ export class UploadRepository {
                 );
             }
         });
-        // Restart incomplete files from sequence 0; server skips already-stored segments.
-        this.resetIncompleteCollectionProgress(collectionId);
+        this.syncCollectionUploadedBytesFromCompletedChunks(collectionId);
     }
 
     public pauseFile(fileId: string) {
@@ -386,7 +403,7 @@ export class UploadRepository {
              WHERE "id" = ? AND "status" IN ('paused', 'pending', 'error')`,
             [timestamp, fileId],
         );
-        this.resetIncompleteFileProgress(fileId);
+        this.syncUploadedBytesFromCompletedChunks(fileId);
     }
 
     public addFileUploadedBytes(fileId: string, bytes: number) {
@@ -395,6 +412,22 @@ export class UploadRepository {
              SET "uploaded_bytes" = MIN("size", "uploaded_bytes" + ?), "updated_at" = ?
              WHERE "id" = ?`,
             [bytes, nowIso(), fileId],
+        );
+    }
+
+    public completeFile(fileId: string) {
+        const file = this.getFile(fileId);
+        if (!file || file.status === "completed") {
+            return;
+        }
+        this.kd.lib.db.run(
+            `UPDATE "upload_file"
+             SET "status" = 'completed',
+                 "uploaded_bytes" = "size",
+                 "updated_at" = ?,
+                 "error" = NULL
+             WHERE "id" = ?`,
+            [nowIso(), fileId],
         );
     }
 
