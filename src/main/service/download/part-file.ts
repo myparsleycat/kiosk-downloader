@@ -67,6 +67,7 @@ export class PartFileWriter {
         callbacks?: {
             onTransferProgress?: (transferredBytes: number) => void;
             onWriteProgress?: (writtenBytes: number) => void;
+            onWritePhaseChange?: (writing: boolean) => void;
         },
         options?: { alreadyWritten?: number },
     ) {
@@ -77,6 +78,10 @@ export class PartFileWriter {
         let transferred = 0;
         let written = alreadyWritten;
         let crc = alreadyWritten > 0 ? await this.readCrcSeed(offset, alreadyWritten) : 0;
+        if (written === expectedSize) {
+            await this.writeDigestInternal(chunkIndex, crc >>> 0);
+            return written;
+        }
         const pending: Uint8Array[] = [];
         let pendingBytes = 0;
 
@@ -96,10 +101,15 @@ export class PartFileWriter {
                 const batch = takePendingBatch(pending, streamWriteBatchBytes);
                 pendingBytes -= batch.length;
                 const writeOffset = offset + written;
-                await this.writePartialInternal(writeOffset, batch);
+                callbacks?.onWritePhaseChange?.(true);
+                try {
+                    await this.writePartialInternal(writeOffset, batch);
+                } finally {
+                    callbacks?.onWritePhaseChange?.(false);
+                }
                 crc = crc32(batch, crc);
                 written += batch.length;
-                callbacks?.onWriteProgress?.(written - alreadyWritten);
+                callbacks?.onWriteProgress?.(written);
             }
 
             if (written + pendingBytes >= expectedSize) {
@@ -109,10 +119,15 @@ export class PartFileWriter {
 
         if (pendingBytes > 0) {
             const batch = takePendingBatch(pending, pendingBytes);
-            await this.writePartialInternal(offset + written, batch);
+            callbacks?.onWritePhaseChange?.(true);
+            try {
+                await this.writePartialInternal(offset + written, batch);
+            } finally {
+                callbacks?.onWritePhaseChange?.(false);
+            }
             crc = crc32(batch, crc);
             written += batch.length;
-            callbacks?.onWriteProgress?.(written - alreadyWritten);
+            callbacks?.onWriteProgress?.(written);
         }
 
         if (written < expectedSize) {

@@ -74,4 +74,115 @@ describe("PartFileWriter.writeChunkFromStream resume", () => {
             }),
         ).resolves.toBe(true);
     });
+
+    it("reports committed progress including the existing prefix", async () => {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
+        tempDirs.push(dir);
+
+        const payload = Buffer.from("abcdefghijklmnopqrst");
+        const splitAt = 8;
+        const partPath = path.join(dir, "resume.part");
+        await fse.writeFile(partPath, payload.subarray(0, splitAt));
+
+        const writeProgress: number[] = [];
+        const writer = new PartFileWriter(partPath);
+        await writer.open(payload.length, 1);
+        await writer.writeChunkFromStream(
+            0,
+            0,
+            bytesFrom([payload.subarray(splitAt)]),
+            payload.length,
+            4,
+            { onWriteProgress: (bytes) => writeProgress.push(bytes) },
+            { alreadyWritten: splitAt },
+        );
+        await writer.close();
+
+        expect(writeProgress).toEqual([12, 16, 20]);
+        expect(await fse.readFile(partPath)).toEqual(payload);
+    });
+
+    it("does not commit a partial pending batch when the source fails", async () => {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
+        tempDirs.push(dir);
+
+        const prefix = Buffer.from("abcdefgh");
+        const partPath = path.join(dir, "resume.part");
+        await fse.writeFile(partPath, prefix);
+
+        async function* failingSource() {
+            yield Buffer.from("ijk");
+            throw new Error("connection lost");
+        }
+
+        const writeProgress: number[] = [];
+        const writer = new PartFileWriter(partPath);
+        await writer.open(16, 1);
+        await expect(
+            writer.writeChunkFromStream(
+                0,
+                0,
+                failingSource(),
+                16,
+                4,
+                {
+                    onWriteProgress: (bytes) => writeProgress.push(bytes),
+                },
+                { alreadyWritten: prefix.length },
+            ),
+        ).rejects.toThrow("connection lost");
+        await writer.close();
+
+        expect(writeProgress).toEqual([]);
+        expect(await fse.readFile(partPath)).toEqual(prefix);
+    });
+
+    it("rejects a resume offset beyond the available part-file prefix", async () => {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
+        tempDirs.push(dir);
+
+        const partPath = path.join(dir, "resume.part");
+        await fse.writeFile(partPath, Buffer.from("abcd"));
+
+        const writer = new PartFileWriter(partPath);
+        await writer.open(12, 1);
+        await expect(
+            writer.writeChunkFromStream(0, 0, bytesFrom([Buffer.from("ijkl")]), 12, 4, undefined, {
+                alreadyWritten: 8,
+            }),
+        ).rejects.toThrow("Part file is shorter than resume offset");
+        await writer.close();
+    });
+
+    it("rebuilds the digest without opening the source when the payload is fully written", async () => {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
+        tempDirs.push(dir);
+
+        const payload = Buffer.from("fully-written-payload");
+        const partPath = path.join(dir, "resume.part");
+        await fse.writeFile(partPath, payload);
+        let sourceOpened = false;
+        async function* unexpectedSource() {
+            sourceOpened = true;
+            yield Buffer.alloc(0);
+        }
+
+        const writer = new PartFileWriter(partPath);
+        await writer.open(payload.length, 1);
+        await expect(
+            writer.writeChunkFromStream(0, 0, unexpectedSource(), payload.length, 4, undefined, {
+                alreadyWritten: payload.length,
+            }),
+        ).resolves.toBe(payload.length);
+        await writer.close();
+
+        expect(sourceOpened).toBe(false);
+        await expect(
+            PartFileWriter.isChunkValid(partPath, {
+                chunkIndex: 0,
+                offset: 0,
+                size: payload.length,
+            }),
+        ).resolves.toBe(true);
+    });
 });

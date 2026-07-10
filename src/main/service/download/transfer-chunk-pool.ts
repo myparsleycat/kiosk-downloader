@@ -8,6 +8,14 @@ import type { FileDownloadOutcome } from "./segment-pool";
 import type { TransferItApiClient } from "./transfer-it-api-client";
 import type { DownloadChunkRow, DownloadCollectionRow, DownloadFileRow } from "./types";
 
+import {
+    SLOW_CHUNK_MAX_RECONNECTS,
+    SLOW_CHUNK_THRESHOLD_RATIO,
+    SlowChunkMonitor,
+    isAbortError,
+    sleepWithAbort,
+    slowReconnectDelayMs,
+} from "./slow-chunk-monitor";
 import { base64urlDecode, decryptTransferChunk } from "./transfer-it-crypto";
 
 export type TransferFileRegistration = {
@@ -64,6 +72,7 @@ export class TransferChunkPool {
     private targetWorkers = 1;
     private runningWorkers = 0;
     private readonly waiters: Array<() => void> = [];
+    private readonly slowChunkMonitor = new SlowChunkMonitor();
 
     public constructor(private readonly deps: TransferPoolDeps) {}
 
@@ -231,7 +240,7 @@ export class TransferChunkPool {
                 }
             } catch (error) {
                 if (
-                    (error instanceof DOMException && error.name === "AbortError") ||
+                    isAbortError(error) ||
                     session.registration.controller.signal.aborted ||
                     session.aborted
                 ) {
@@ -263,36 +272,99 @@ export class TransferChunkPool {
 
     private async processChunk(session: TransferSession, chunk: DownloadChunkRow) {
         const { registration } = session;
-        const signal = registration.controller.signal;
-        this.deps.repository.markChunkDownloading(chunk);
+        const controller = registration.controller;
+        const maxAttempts = registration.maxChunkRetries + 1;
 
-        let lastError: unknown;
-        for (let attempt = 0; attempt <= registration.maxChunkRetries; attempt++) {
-            if (signal.aborted || session.aborted) {
+        let errorAttempt = 1;
+        let slowReconnects = 0;
+        let needsMarkDownloading = true;
+        let committedBytes = Math.max(0, Math.min(chunk.size, chunk.downloadedBytes));
+
+        while (errorAttempt <= maxAttempts) {
+            if (session.failed || session.aborted || controller.signal.aborted) {
+                this.deps.repository.markChunkPending(registration.file.id, chunk.chunkIndex);
                 throw new DOMException("The operation was aborted.", "AbortError");
             }
 
-            try {
-                const enc = await this.fetchEncryptedRange(session, chunk, signal);
-                const plain = decryptTransferChunk(registration.nodeKey, chunk.offset, enc);
-                if (plain.length !== chunk.size) {
-                    throw new Error(
-                        `Decrypted chunk size mismatch: got ${plain.length}, expected ${chunk.size}.`,
-                    );
+            if (needsMarkDownloading) {
+                this.deps.repository.markChunkDownloading(chunk);
+                needsMarkDownloading = false;
+            }
+
+            const attemptController = new AbortController();
+            const onSessionAbort = () => {
+                if (!attemptController.signal.aborted) {
+                    attemptController.abort();
                 }
-                await registration.partWriter.writeAt(chunk.offset, plain, chunk.chunkIndex);
-                this.deps.repository.markChunkCompleted(chunk, chunk.size);
+            };
+            const transfer = this.slowChunkMonitor.register({
+                fileId: registration.file.id,
+                chunkIndex: chunk.chunkIndex,
+                chunkSize: chunk.size,
+                cohortKey: "transfer-cdn",
+                initialTransferredBytes: committedBytes,
+                attemptController,
+                slowReconnects,
+            });
+            const resumeOffset = committedBytes;
+
+            try {
+                if (controller.signal.aborted) {
+                    onSessionAbort();
+                } else {
+                    controller.signal.addEventListener("abort", onSessionAbort);
+                }
+
+                const plain = this.streamDecryptedRange(
+                    session,
+                    chunk,
+                    attemptController.signal,
+                    resumeOffset,
+                    (transferredBytes) => {
+                        this.slowChunkMonitor.recordSample(
+                            transfer.key,
+                            resumeOffset + transferredBytes,
+                        );
+                        this.deps.metrics.setChunkTransferProgress(
+                            registration.file.id,
+                            chunk.chunkIndex,
+                            resumeOffset + transferredBytes,
+                        );
+                    },
+                    (phase) => this.slowChunkMonitor.setPhase(transfer.key, phase),
+                );
+                const bytes = await registration.partWriter.writeChunkFromStream(
+                    chunk.offset,
+                    chunk.chunkIndex,
+                    plain,
+                    chunk.size,
+                    256 * 1024,
+                    {
+                        onWriteProgress: (writtenBytes) => {
+                            committedBytes = writtenBytes;
+                            this.deps.repository.markChunkPartial(
+                                registration.file.id,
+                                chunk.chunkIndex,
+                                writtenBytes,
+                            );
+                            this.deps.metrics.setChunkWriteProgress(
+                                registration.file.id,
+                                chunk.chunkIndex,
+                                writtenBytes,
+                            );
+                        },
+                        onWritePhaseChange: (writing) => {
+                            this.slowChunkMonitor.setPhase(
+                                transfer.key,
+                                writing ? "disk-write" : "network",
+                            );
+                        },
+                    },
+                    { alreadyWritten: resumeOffset },
+                );
+                this.slowChunkMonitor.setPhase(transfer.key, "processing");
+                this.deps.repository.markChunkCompleted(chunk, bytes);
                 this.deps.repository.syncFileDownloadedBytes(registration.file.id);
-                this.deps.metrics.setChunkTransferProgress(
-                    registration.file.id,
-                    chunk.chunkIndex,
-                    chunk.size,
-                );
-                this.deps.metrics.setChunkWriteProgress(
-                    registration.file.id,
-                    chunk.chunkIndex,
-                    chunk.size,
-                );
                 const updatedFile = this.deps.repository.getFile(registration.file.id);
                 this.deps.metrics.clearChunk(
                     registration.file.id,
@@ -301,24 +373,95 @@ export class TransferChunkPool {
                 );
                 return;
             } catch (error) {
-                lastError = error;
-                if (
-                    (error instanceof DOMException && error.name === "AbortError") ||
-                    signal.aborted
-                ) {
+                const abortReason = transfer.abortReason;
+                const detect = transfer.detect;
+                const chunkSpeedBps = transfer.chunkSpeedBps;
+                const peerMedianBps = transfer.peerMedianBps;
+                const transferredBytes = transfer.transferredBytes;
+                this.deps.metrics.clearChunk(registration.file.id, chunk.chunkIndex);
+
+                if (controller.signal.aborted || session.aborted) {
+                    this.deps.repository.markChunkPending(registration.file.id, chunk.chunkIndex);
+                    throw new DOMException("The operation was aborted.", "AbortError");
+                }
+
+                if (abortReason === "slow-chunk" && slowReconnects < SLOW_CHUNK_MAX_RECONNECTS) {
+                    slowReconnects += 1;
+                    this.deps.kd.logger.warn(
+                        {
+                            channel: "transfer-download",
+                            reason: "slow-chunk-reconnect",
+                            detect: detect ?? "relative",
+                            fileId: registration.file.id,
+                            chunkIndex: chunk.chunkIndex,
+                            offset: chunk.offset,
+                            expectedSize: chunk.size,
+                            chunkSpeedBps,
+                            peerMedianBps,
+                            thresholdRatio: SLOW_CHUNK_THRESHOLD_RATIO,
+                            slowReconnect: slowReconnects,
+                            maxSlowReconnects: SLOW_CHUNK_MAX_RECONNECTS,
+                            transferredBytes,
+                        },
+                        "TransferChunkPool:fetchEncryptedRange",
+                    );
+                    try {
+                        await sleepWithAbort(slowReconnectDelayMs(), controller.signal);
+                    } catch (abortError) {
+                        if (isAbortError(abortError) || controller.signal.aborted) {
+                            this.deps.repository.markChunkPending(
+                                registration.file.id,
+                                chunk.chunkIndex,
+                            );
+                            throw new DOMException("The operation was aborted.", "AbortError");
+                        }
+                        throw abortError;
+                    }
+                    continue;
+                }
+
+                if (isAbortError(error) && abortReason !== "slow-chunk") {
+                    this.deps.repository.markChunkPending(registration.file.id, chunk.chunkIndex);
                     throw error;
                 }
+
                 session.cdnUrl = null;
-                if (attempt === registration.maxChunkRetries) {
-                    break;
+                const message = toErrorMessage(error);
+                if (errorAttempt < maxAttempts) {
+                    this.deps.kd.logger.warn(
+                        {
+                            channel: "transfer-download",
+                            fileId: registration.file.id,
+                            chunkIndex: chunk.chunkIndex,
+                            offset: chunk.offset,
+                            expectedSize: chunk.size,
+                            attempt: errorAttempt,
+                            maxRetries: registration.maxChunkRetries,
+                            message,
+                        },
+                        "TransferChunkPool:fetchEncryptedRange",
+                    );
+                    this.deps.repository.markChunkPending(registration.file.id, chunk.chunkIndex);
+                    try {
+                        await sleepWithAbort(1000 * errorAttempt, controller.signal);
+                    } catch (abortError) {
+                        if (isAbortError(abortError) || controller.signal.aborted) {
+                            throw new DOMException("The operation was aborted.", "AbortError");
+                        }
+                        throw abortError;
+                    }
+                    errorAttempt += 1;
+                    needsMarkDownloading = true;
+                    continue;
                 }
-                await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+
+                this.deps.repository.markChunkError(chunk, message);
+                throw error instanceof Error ? error : new Error(message);
+            } finally {
+                this.slowChunkMonitor.unregister(transfer.key);
+                controller.signal.removeEventListener("abort", onSessionAbort);
             }
         }
-
-        const message = toErrorMessage(lastError);
-        this.deps.repository.markChunkError(chunk, message);
-        throw lastError instanceof Error ? lastError : new Error(message);
     }
 
     private async ensureCdnUrl(session: TransferSession, signal: AbortSignal) {
@@ -338,18 +481,23 @@ export class TransferChunkPool {
         return result.url;
     }
 
-    private async fetchEncryptedRange(
+    private async *streamDecryptedRange(
         session: TransferSession,
         chunk: DownloadChunkRow,
         signal: AbortSignal,
+        alreadyWritten: number,
+        onTransferProgress?: (transferredBytes: number) => void,
+        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
     ) {
         let url = await this.ensureCdnUrl(session, signal);
-        const range = `bytes=${chunk.offset}-${chunk.offset + chunk.size - 1}`;
+        const requestStart = chunk.offset + alreadyWritten;
+        const range = `bytes=${requestStart}-${chunk.offset + chunk.size - 1}`;
 
         let response = await this.deps.kd.http.request(url, {
             method: "GET",
             headers: { Range: range },
             signal,
+            timeout: false,
         });
 
         if (response.status === 403 || response.status === 404) {
@@ -359,6 +507,7 @@ export class TransferChunkPool {
                 method: "GET",
                 headers: { Range: range },
                 signal,
+                timeout: false,
             });
         }
 
@@ -368,16 +517,90 @@ export class TransferChunkPool {
         if (response.status !== 206 && response.status !== 200) {
             throw new Error(`Transfer CDN HTTP ${response.status}.`);
         }
+        if (!response.body) {
+            throw new Error("Transfer CDN response has no body.");
+        }
 
-        const buffer = Buffer.from(await response.arrayBuffer());
-        await this.deps.kd.service.transfer.downloadBandwidth.take(buffer.length, signal);
+        const contentRange = response.headers.get("content-range");
+        if (response.status === 206 && !contentRange?.startsWith(`bytes ${requestStart}-`)) {
+            await response.body.cancel().catch(() => undefined);
+            throw new Error(`Transfer CDN returned invalid Content-Range for ${range}.`);
+        }
 
-        if (buffer.length !== chunk.size) {
+        const reader = response.body.getReader();
+        let transferred = 0;
+        let skipped = 0;
+        const skip = response.status === 200 ? requestStart : 0;
+        const expected = chunk.size - alreadyWritten;
+
+        try {
+            while (true) {
+                if (signal.aborted) {
+                    throw new DOMException("The operation was aborted.", "AbortError");
+                }
+
+                onPhaseChange?.("network");
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                if (!value || value.length === 0) {
+                    continue;
+                }
+
+                onPhaseChange?.("bandwidth-wait");
+                await this.deps.kd.service.transfer.downloadBandwidth.take(value.length, signal);
+                onPhaseChange?.("network");
+                let encrypted = value;
+                if (skipped < skip) {
+                    const skipBytes = Math.min(encrypted.length, skip - skipped);
+                    skipped += skipBytes;
+                    encrypted = encrypted.subarray(skipBytes);
+                }
+                if (encrypted.length === 0) {
+                    continue;
+                }
+                const remaining = expected - transferred;
+                if (encrypted.length > remaining) {
+                    encrypted = encrypted.subarray(0, remaining);
+                }
+                const plain = decryptTransferChunk(
+                    session.registration.nodeKey,
+                    requestStart + transferred,
+                    Buffer.from(encrypted),
+                );
+                transferred += encrypted.length;
+                onTransferProgress?.(transferred);
+                yield plain;
+                if (transferred >= expected) {
+                    break;
+                }
+            }
+        } catch (error) {
+            try {
+                await reader.cancel();
+            } catch {
+                // ignore cancel failures after abort/error
+            }
+            throw error;
+        } finally {
+            try {
+                await reader.cancel();
+            } catch {
+                // response may already be closed
+            }
+            try {
+                reader.releaseLock();
+            } catch {
+                // already released after cancel
+            }
+        }
+
+        if (transferred !== expected) {
             throw new Error(
-                `Transfer CDN returned ${buffer.length}B, expected ${chunk.size}B for range ${range}.`,
+                `Transfer CDN returned ${transferred}B, expected ${expected}B for range ${range}.`,
             );
         }
-        return buffer;
     }
 }
 

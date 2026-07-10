@@ -286,8 +286,10 @@ export class DownloadRepository {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(
-                `DELETE FROM "download_chunk"
+                `UPDATE "download_chunk"
+                 SET "status" = 'pending', "updated_at" = ?, "error" = NULL
                  WHERE "status" = 'downloading'`,
+                [timestamp],
             );
             tx.run(
                 `UPDATE "download_file"
@@ -638,7 +640,6 @@ export class DownloadRepository {
                  "offset" = excluded."offset",
                  "size" = excluded."size",
                  "status" = 'downloading',
-                 "downloaded_bytes" = 0,
                  "attempts" = "download_chunk"."attempts" + 1,
                  "updated_at" = excluded."updated_at",
                  "error" = NULL`,
@@ -681,6 +682,28 @@ export class DownloadRepository {
 
     public markChunkPending(fileId: string, chunkIndex: number) {
         this.kd.lib.db.run(
+            `UPDATE "download_chunk"
+             SET "status" = 'pending', "updated_at" = ?, "error" = NULL
+             WHERE "file_id" = ? AND "chunk_index" = ?`,
+            [nowIso(), fileId, chunkIndex],
+        );
+    }
+
+    public markChunkPartial(fileId: string, chunkIndex: number, downloadedBytes: number) {
+        if (!Number.isFinite(downloadedBytes)) {
+            return;
+        }
+        this.kd.lib.db.run(
+            `UPDATE "download_chunk"
+             SET "downloaded_bytes" = MIN("size", MAX("downloaded_bytes", ?)),
+                 "updated_at" = ?
+             WHERE "file_id" = ? AND "chunk_index" = ?`,
+            [Math.max(0, Math.floor(downloadedBytes)), nowIso(), fileId, chunkIndex],
+        );
+    }
+
+    public resetChunkPartial(fileId: string, chunkIndex: number) {
+        this.kd.lib.db.run(
             `DELETE FROM "download_chunk"
              WHERE "file_id" = ? AND "chunk_index" = ?`,
             [fileId, chunkIndex],
@@ -715,9 +738,10 @@ export class DownloadRepository {
 
     public resetRunningChunksForFile(fileId: string) {
         this.kd.lib.db.run(
-            `DELETE FROM "download_chunk"
+            `UPDATE "download_chunk"
+             SET "status" = 'pending', "updated_at" = ?, "error" = NULL
              WHERE "file_id" = ? AND "status" = 'downloading'`,
-            [fileId],
+            [nowIso(), fileId],
         );
     }
 
@@ -758,9 +782,10 @@ export class DownloadRepository {
                 [timestamp, collectionId],
             );
             tx.run(
-                `DELETE FROM "download_chunk"
+                `UPDATE "download_chunk"
+                 SET "status" = 'pending', "updated_at" = ?, "error" = NULL
                  WHERE "collection_id" = ? AND "status" = 'downloading'`,
-                [collectionId],
+                [timestamp, collectionId],
             );
         });
     }
@@ -816,9 +841,10 @@ export class DownloadRepository {
                 [timestamp, fileId],
             );
             tx.run(
-                `DELETE FROM "download_chunk"
+                `UPDATE "download_chunk"
+                 SET "status" = 'pending', "updated_at" = ?, "error" = NULL
                  WHERE "file_id" = ? AND "status" = 'downloading'`,
-                [fileId],
+                [timestamp, fileId],
             );
         });
     }
@@ -1078,7 +1104,8 @@ export class DownloadRepository {
                             "updated_at" AS "updatedAt",
                             "error"
                      FROM "download_chunk"
-                     WHERE "file_id" = ? AND "status" IN ('downloading', 'completed', 'error')
+                     WHERE "file_id" = ?
+                       AND "status" IN ('pending', 'downloading', 'completed', 'error')
                      ORDER BY "chunk_index" ASC`,
                     [file.id],
                 )

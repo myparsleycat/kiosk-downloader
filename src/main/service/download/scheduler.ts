@@ -1223,7 +1223,7 @@ export class DownloadScheduler {
         for (const chunk of completedChunks) {
             const isValid = await PartFileWriter.isChunkValid(partPath, chunk);
             if (!isValid) {
-                this.repository.markChunkPending(chunk.fileId, chunk.chunkIndex);
+                this.repository.resetChunkPartial(chunk.fileId, chunk.chunkIndex);
             }
         }
     }

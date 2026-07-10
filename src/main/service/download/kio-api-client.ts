@@ -170,10 +170,17 @@ export class KioApiClient {
         });
     }
 
-    public streamSegment(segment: SegmentDescriptor, chunk: DownloadChunkRow, signal: AbortSignal) {
-        return streamSegmentBytes(this.kd, segment, 0, chunk.size, signal, {
+    public streamSegment(
+        segment: SegmentDescriptor,
+        chunk: DownloadChunkRow,
+        signal: AbortSignal,
+        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
+        localStart = 0,
+    ) {
+        return streamSegmentBytes(this.kd, segment, localStart, chunk.size, signal, {
             label: `Segment ${chunk.chunkIndex}`,
-            mode: "full",
+            mode: localStart > 0 ? "range" : "full",
+            onPhaseChange,
         });
     }
 
@@ -186,10 +193,13 @@ export class KioApiClient {
         segment: SegmentDescriptor,
         range: { localStart: number; localEnd: number },
         signal: AbortSignal,
+        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
+        useRange = false,
     ) {
         return streamSegmentBytes(this.kd, segment, range.localStart, range.localEnd, signal, {
             label: "Segment range",
-            mode: "slice",
+            mode: useRange ? "range" : "slice",
+            onPhaseChange,
         });
     }
 
@@ -376,7 +386,11 @@ export async function* streamSegmentBytes(
     localStart: number,
     localEnd: number,
     signal: AbortSignal,
-    options: { label: string; mode: "full" | "range" | "slice" },
+    options: {
+        label: string;
+        mode: "full" | "range" | "slice";
+        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void;
+    },
 ): AsyncGenerator<Uint8Array> {
     const expected = localEnd - localStart;
     if (expected <= 0) {
@@ -420,6 +434,7 @@ export async function* streamSegmentBytes(
                 throw new DOMException("The operation was aborted.", "AbortError");
             }
 
+            options.onPhaseChange?.("network");
             const { done, value } = await reader.read();
             if (done) {
                 break;
@@ -433,10 +448,12 @@ export async function* streamSegmentBytes(
                 const remainSkip = skip - skipped;
                 if (slice.length <= remainSkip) {
                     skipped += slice.length;
+                    options.onPhaseChange?.("bandwidth-wait");
                     await kd.service.transfer.downloadBandwidth.take(slice.length, signal);
                     continue;
                 }
                 const skippedPiece = slice.subarray(0, remainSkip);
+                options.onPhaseChange?.("bandwidth-wait");
                 await kd.service.transfer.downloadBandwidth.take(skippedPiece.length, signal);
                 slice = slice.subarray(remainSkip);
                 skipped = skip;
@@ -454,7 +471,9 @@ export async function* streamSegmentBytes(
                 }
                 const end = Math.min(offset + quantumSize, slice.length);
                 const quantum = slice.subarray(offset, end);
+                options.onPhaseChange?.("bandwidth-wait");
                 await kd.service.transfer.downloadBandwidth.take(quantum.length, signal);
+                options.onPhaseChange?.("network");
                 yielded += quantum.length;
                 offset = end;
                 yield quantum;

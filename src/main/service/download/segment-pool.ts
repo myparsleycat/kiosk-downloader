@@ -14,6 +14,15 @@ import type {
     ZipEntrySegmentRange,
 } from "./types";
 
+import {
+    SLOW_CHUNK_MAX_RECONNECTS,
+    SLOW_CHUNK_THRESHOLD_RATIO,
+    SlowChunkMonitor,
+    isAbortError,
+    sleepWithAbort,
+    slowReconnectDelayMs,
+} from "./slow-chunk-monitor";
+
 export type FileDownloadOutcome = "completed" | "paused" | "failed";
 
 export type FileDownloadRegistration = {
@@ -62,113 +71,8 @@ type SegmentPoolDeps = {
     onChunkSettled: () => void;
 };
 
-type ByteSample = { t: number; b: number };
-
-type SlowChunkDetect = "stall" | "relative";
-
-type InFlightChunkTransfer = {
-    key: string;
-    fileId: string;
-    chunkIndex: number;
-    chunkSize: number;
-    startedAt: number;
-    lastProgressAt: number;
-    samples: ByteSample[];
-    transferredBytes: number;
-    attemptController: AbortController;
-    slowReconnects: number;
-    slowTickCount: number;
-    abortReason: "slow-chunk" | null;
-    detect: SlowChunkDetect | null;
-    chunkSpeedBps: number;
-    peerMedianBps: number;
-};
-
-const SLOW_CHUNK_MAX_RECONNECTS = 2;
-const SLOW_CHUNK_THRESHOLD_RATIO = 0.25;
-const SLOW_CHUNK_MIN_OBSERVE_MS = 3000;
-const SLOW_CHUNK_MIN_PEERS = 1;
-const SLOW_CHUNK_CHECK_INTERVAL_MS = 1000;
-const SLOW_CHUNK_SPEED_WINDOW_MS = 2000;
-const SLOW_CHUNK_MIN_SPEED_SAMPLE_SPAN_MS = 500;
-const SLOW_CHUNK_NEAR_COMPLETE_RATIO = 0.85;
-const SLOW_CHUNK_REQUIRED_SLOW_TICKS = 2;
-const SLOW_CHUNK_MIN_ABSOLUTE_BPS = 64 * 1024;
-const SLOW_CHUNK_RECONNECT_DELAY_MS = 500;
-const SLOW_CHUNK_RECONNECT_JITTER_MS = 250;
-const SLOW_CHUNK_STALL_TIMEOUT_MS = 15_000;
-
-function isAbortError(error: unknown) {
-    return error instanceof DOMException && error.name === "AbortError";
-}
-
 function chunkBackoffMs(attempt: number) {
     return 1000 * 2 ** (attempt - 1);
-}
-
-function sleepWithAbort(ms: number, signal: AbortSignal) {
-    return new Promise<void>((resolve, reject) => {
-        if (signal.aborted) {
-            reject(new DOMException("The operation was aborted.", "AbortError"));
-            return;
-        }
-
-        const timer = setTimeout(() => {
-            signal.removeEventListener("abort", onAbort);
-            resolve();
-        }, ms);
-        const onAbort = () => {
-            clearTimeout(timer);
-            signal.removeEventListener("abort", onAbort);
-            reject(new DOMException("The operation was aborted.", "AbortError"));
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
-    });
-}
-
-function inFlightKey(fileId: string, chunkIndex: number) {
-    return `${fileId}:${chunkIndex}`;
-}
-
-/** null = not measurable; number = measured bps (including 0 stall). */
-function speedFromSamples(samples: ByteSample[], now: number): number | null {
-    const window = samples.filter((sample) => now - sample.t <= SLOW_CHUNK_SPEED_WINDOW_MS);
-    if (window.length < 2) {
-        return null;
-    }
-
-    const first = window[0];
-    const last = window[window.length - 1];
-    if (!first || !last) {
-        return null;
-    }
-
-    const elapsedMs = last.t - first.t;
-    if (elapsedMs < SLOW_CHUNK_MIN_SPEED_SAMPLE_SPAN_MS) {
-        return null;
-    }
-
-    return Math.max(0, (last.b - first.b) / (elapsedMs / 1000));
-}
-
-function median(values: number[]) {
-    if (values.length === 0) {
-        return 0;
-    }
-
-    const sorted = [...values].sort((left, right) => left - right);
-    const mid = Math.floor(sorted.length / 2);
-    if (sorted.length % 2 === 0) {
-        return ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
-    }
-    return sorted[mid] ?? 0;
-}
-
-function slowReconnectDelayMs() {
-    return (
-        SLOW_CHUNK_RECONNECT_DELAY_MS +
-        Math.floor(Math.random() * (SLOW_CHUNK_RECONNECT_JITTER_MS + 1))
-    );
 }
 
 export class GlobalSegmentPool {
@@ -178,8 +82,7 @@ export class GlobalSegmentPool {
     private readonly queue: SegmentWorkItem[] = [];
     private readonly sessions = new Map<string, FileDownloadSession>();
     private readonly waiters: Array<() => void> = [];
-    private readonly inFlightTransfers = new Map<string, InFlightChunkTransfer>();
-    private slowChunkMonitorTimer: ReturnType<typeof setInterval> | null = null;
+    private readonly slowChunkMonitor = new SlowChunkMonitor();
 
     public constructor(private readonly deps: SegmentPoolDeps) {}
 
@@ -356,196 +259,6 @@ export class GlobalSegmentPool {
         }
     }
 
-    private registerInFlightTransfer(input: {
-        fileId: string;
-        chunkIndex: number;
-        chunkSize: number;
-        attemptController: AbortController;
-        slowReconnects: number;
-    }) {
-        const now = Date.now();
-        const key = inFlightKey(input.fileId, input.chunkIndex);
-        const transfer: InFlightChunkTransfer = {
-            key,
-            fileId: input.fileId,
-            chunkIndex: input.chunkIndex,
-            chunkSize: input.chunkSize,
-            startedAt: now,
-            lastProgressAt: now,
-            samples: [{ t: now, b: 0 }],
-            transferredBytes: 0,
-            attemptController: input.attemptController,
-            slowReconnects: input.slowReconnects,
-            slowTickCount: 0,
-            abortReason: null,
-            detect: null,
-            chunkSpeedBps: 0,
-            peerMedianBps: 0,
-        };
-        this.inFlightTransfers.set(key, transfer);
-        this.ensureSlowChunkMonitor();
-        return transfer;
-    }
-
-    private recordInFlightTransferSample(key: string, transferredBytes: number) {
-        const transfer = this.inFlightTransfers.get(key);
-        if (!transfer) {
-            return;
-        }
-
-        const now = Date.now();
-        const normalized = Math.max(0, transferredBytes);
-        if (normalized > transfer.transferredBytes) {
-            transfer.lastProgressAt = now;
-        }
-        transfer.transferredBytes = normalized;
-        transfer.samples.push({ t: now, b: normalized });
-        transfer.samples = transfer.samples.filter(
-            (sample) => now - sample.t <= SLOW_CHUNK_SPEED_WINDOW_MS,
-        );
-    }
-
-    private unregisterInFlightTransfer(key: string) {
-        this.inFlightTransfers.delete(key);
-        this.stopSlowChunkMonitorIfIdle();
-    }
-
-    private ensureSlowChunkMonitor() {
-        if (this.slowChunkMonitorTimer) {
-            return;
-        }
-
-        this.slowChunkMonitorTimer = setInterval(() => {
-            this.evaluateSlowChunks();
-        }, SLOW_CHUNK_CHECK_INTERVAL_MS);
-        this.slowChunkMonitorTimer.unref?.();
-    }
-
-    private stopSlowChunkMonitorIfIdle() {
-        if (this.inFlightTransfers.size > 0 || !this.slowChunkMonitorTimer) {
-            return;
-        }
-
-        clearInterval(this.slowChunkMonitorTimer);
-        this.slowChunkMonitorTimer = null;
-    }
-
-    private evaluateSlowChunks() {
-        const entries = [...this.inFlightTransfers.values()];
-        if (entries.length === 0) {
-            return;
-        }
-
-        const now = Date.now();
-        const scored = entries.map((entry) => ({
-            entry,
-            speed: speedFromSamples(entry.samples, now),
-        }));
-
-        const stallCandidates: SlowAbortCandidate[] = [];
-        const relativeCandidates: SlowAbortCandidate[] = [];
-
-        for (const { entry, speed } of scored) {
-            if (entry.slowReconnects >= SLOW_CHUNK_MAX_RECONNECTS) {
-                entry.slowTickCount = 0;
-                continue;
-            }
-            if (entry.abortReason !== null || entry.attemptController.signal.aborted) {
-                continue;
-            }
-
-            const observedMs = now - entry.startedAt;
-            if (observedMs < SLOW_CHUNK_MIN_OBSERVE_MS) {
-                entry.slowTickCount = 0;
-                continue;
-            }
-
-            const isStalled = now - entry.lastProgressAt >= SLOW_CHUNK_STALL_TIMEOUT_MS;
-            if (isStalled) {
-                entry.slowTickCount = 0;
-                stallCandidates.push({
-                    entry,
-                    speed,
-                    peerMedianBps: 0,
-                    detect: "stall",
-                });
-                continue;
-            }
-
-            const nearComplete =
-                entry.chunkSize > 0 &&
-                entry.transferredBytes / entry.chunkSize >= SLOW_CHUNK_NEAR_COMPLETE_RATIO;
-            if (nearComplete) {
-                entry.slowTickCount = 0;
-                continue;
-            }
-
-            if (speed === null || speed >= SLOW_CHUNK_MIN_ABSOLUTE_BPS) {
-                entry.slowTickCount = 0;
-                continue;
-            }
-
-            const peerMedianBps = this.peerMedianBps(scored, entry);
-            if (peerMedianBps <= 0) {
-                entry.slowTickCount = 0;
-                continue;
-            }
-
-            if (speed >= peerMedianBps * SLOW_CHUNK_THRESHOLD_RATIO) {
-                entry.slowTickCount = 0;
-                continue;
-            }
-
-            entry.slowTickCount += 1;
-            if (entry.slowTickCount >= SLOW_CHUNK_REQUIRED_SLOW_TICKS) {
-                relativeCandidates.push({
-                    entry,
-                    speed,
-                    peerMedianBps,
-                    detect: "relative",
-                });
-            }
-        }
-
-        const pick =
-            pickOldestCandidate(stallCandidates) ?? pickSlowestCandidate(relativeCandidates);
-        if (!pick) {
-            return;
-        }
-
-        pick.entry.abortReason = "slow-chunk";
-        pick.entry.detect = pick.detect;
-        pick.entry.chunkSpeedBps = pick.speed ?? 0;
-        pick.entry.peerMedianBps = pick.peerMedianBps;
-        pick.entry.attemptController.abort();
-    }
-
-    private peerMedianBps(
-        scored: Array<{ entry: InFlightChunkTransfer; speed: number | null }>,
-        candidate: InFlightChunkTransfer,
-    ) {
-        const positiveSpeeds = (items: typeof scored) =>
-            items
-                .filter(
-                    (item) =>
-                        item.entry.key !== candidate.key && item.speed !== null && item.speed > 0,
-                )
-                .map((item) => item.speed as number);
-
-        const sameFilePeers = positiveSpeeds(
-            scored.filter((item) => item.entry.fileId === candidate.fileId),
-        );
-        if (sameFilePeers.length >= SLOW_CHUNK_MIN_PEERS) {
-            return median(sameFilePeers);
-        }
-
-        const globalPeers = positiveSpeeds(scored);
-        if (globalPeers.length < SLOW_CHUNK_MIN_PEERS) {
-            return 0;
-        }
-        return median(globalPeers);
-    }
-
     private async processChunk(session: FileDownloadSession, chunk: DownloadChunkRow) {
         const {
             file,
@@ -594,6 +307,7 @@ export class GlobalSegmentPool {
         let errorAttempt = 1;
         let slowReconnects = 0;
         let needsMarkDownloading = true;
+        let committedBytes = Math.max(0, Math.min(chunk.size, chunk.downloadedBytes));
 
         while (errorAttempt <= maxAttempts) {
             if (session.failed || session.aborted || controller.signal.aborted) {
@@ -613,13 +327,16 @@ export class GlobalSegmentPool {
                     attemptController.abort();
                 }
             };
-            const transfer = this.registerInFlightTransfer({
+            const transfer = this.slowChunkMonitor.register({
                 fileId: file.id,
                 chunkIndex: chunk.chunkIndex,
                 chunkSize: chunk.size,
+                cohortKey: `${segment.type}:${mode}`,
+                initialTransferredBytes: committedBytes,
                 attemptController,
                 slowReconnects,
             });
+            const resumeOffset = committedBytes;
 
             try {
                 if (controller.signal.aborted) {
@@ -628,17 +345,28 @@ export class GlobalSegmentPool {
                     controller.signal.addEventListener("abort", onSessionAbort);
                 }
 
+                const onPhaseChange = (phase: "network" | "bandwidth-wait") => {
+                    this.slowChunkMonitor.setPhase(transfer.key, phase);
+                };
                 const source =
                     mode === "byte-range" && range
                         ? this.deps.api.streamSegmentRange(
                               segment,
                               {
-                                  localStart: range.localStart,
+                                  localStart: range.localStart + resumeOffset,
                                   localEnd: range.localEnd,
                               },
                               attemptController.signal,
+                              onPhaseChange,
+                              resumeOffset > 0,
                           )
-                        : this.deps.api.streamSegment(segment, chunk, attemptController.signal);
+                        : this.deps.api.streamSegment(
+                              segment,
+                              chunk,
+                              attemptController.signal,
+                              onPhaseChange,
+                              resumeOffset,
+                          );
 
                 const scaleProgress = (bytes: number) => {
                     if (!progressScale || progressScale.sourceTotal <= 0) {
@@ -657,22 +385,39 @@ export class GlobalSegmentPool {
                     streamWriteBatchBytes,
                     {
                         onTransferProgress: (transferredBytes) => {
-                            this.recordInFlightTransferSample(transfer.key, transferredBytes);
+                            this.slowChunkMonitor.recordSample(
+                                transfer.key,
+                                resumeOffset + transferredBytes,
+                            );
                             this.deps.metrics.setChunkTransferProgress(
                                 file.id,
                                 chunk.chunkIndex,
-                                scaleProgress(transferredBytes),
+                                scaleProgress(resumeOffset + transferredBytes),
                             );
                         },
                         onWriteProgress: (writtenBytes) => {
+                            committedBytes = writtenBytes;
+                            this.deps.repository.markChunkPartial(
+                                file.id,
+                                chunk.chunkIndex,
+                                writtenBytes,
+                            );
                             this.deps.metrics.setChunkWriteProgress(
                                 file.id,
                                 chunk.chunkIndex,
                                 scaleProgress(writtenBytes),
                             );
                         },
+                        onWritePhaseChange: (writing) => {
+                            this.slowChunkMonitor.setPhase(
+                                transfer.key,
+                                writing ? "disk-write" : "network",
+                            );
+                        },
                     },
+                    { alreadyWritten: resumeOffset },
                 );
+                this.slowChunkMonitor.setPhase(transfer.key, "processing");
                 this.deps.repository.markChunkCompleted(chunk, bytes);
                 if (progressScale) {
                     this.deps.repository.syncScaledDownloadedBytes(
@@ -799,7 +544,7 @@ export class GlobalSegmentPool {
                 releaseInFlight();
                 return;
             } finally {
-                this.unregisterInFlightTransfer(transfer.key);
+                this.slowChunkMonitor.unregister(transfer.key);
                 controller.signal.removeEventListener("abort", onSessionAbort);
             }
         }
@@ -820,39 +565,6 @@ export class GlobalSegmentPool {
         this.removeSessionItemsFromQueue(session.id);
         this.tryCompleteSession(session);
     }
-}
-
-type SlowAbortCandidate = {
-    entry: InFlightChunkTransfer;
-    speed: number | null;
-    peerMedianBps: number;
-    detect: SlowChunkDetect;
-};
-
-function pickOldestCandidate(candidates: SlowAbortCandidate[]) {
-    let best: SlowAbortCandidate | null = null;
-    for (const candidate of candidates) {
-        if (!best || candidate.entry.startedAt < best.entry.startedAt) {
-            best = candidate;
-        }
-    }
-    return best;
-}
-
-function pickSlowestCandidate(candidates: SlowAbortCandidate[]) {
-    let best: SlowAbortCandidate | null = null;
-    for (const candidate of candidates) {
-        if (!best) {
-            best = candidate;
-            continue;
-        }
-        const candidateSpeed = candidate.speed ?? Number.POSITIVE_INFINITY;
-        const bestSpeed = best.speed ?? Number.POSITIVE_INFINITY;
-        if (candidateSpeed < bestSpeed) {
-            best = candidate;
-        }
-    }
-    return best;
 }
 
 function compareWorkItems(left: SegmentWorkItem, right: SegmentWorkItem) {

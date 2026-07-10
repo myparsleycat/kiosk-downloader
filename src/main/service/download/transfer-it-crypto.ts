@@ -103,11 +103,17 @@ export function decryptTransferChunk(key32: Buffer, start: number, enc: Buffer) 
     }
     const iv = Buffer.alloc(16);
     key32.subarray(16, 24).copy(iv, 0);
-    if (start !== 0) {
-        incrementCtrBuffer(iv, start / 16);
+    const blockOffset = Math.floor(start / 16);
+    const byteOffset = start % 16;
+    if (blockOffset !== 0) {
+        incrementCtrBuffer(iv, blockOffset);
     }
     const dec = createDecipheriv("aes-128-ctr", aesKey, iv);
-    return Buffer.concat([dec.update(enc), dec.final()]);
+    const decrypted = Buffer.concat([
+        dec.update(byteOffset === 0 ? enc : Buffer.concat([Buffer.alloc(byteOffset), enc])),
+        dec.final(),
+    ]);
+    return byteOffset === 0 ? decrypted : decrypted.subarray(byteOffset);
 }
 
 /** MEGA download chunk schedule (128KiB ramp → 1MiB). */
