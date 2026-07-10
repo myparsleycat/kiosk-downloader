@@ -1,11 +1,24 @@
 import validator from "validator";
 
+import type { DownloadProvider } from "./types";
+
+export type { DownloadProvider };
+export type ParsedDownloadUrl = {
+    provider: DownloadProvider;
+    id: string;
+};
+
 export const SHARE_HOST = "kio.ac";
 export const SHARE_PATH_PREFIX = "/c/";
 export const SHARE_ID_LENGTH = 22;
 
+export const TRANSFER_HOST = "transfer.it";
+export const TRANSFER_PATH_PREFIX = "/t/";
+export const TRANSFER_ID_LENGTH = 12;
+
 const UUID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 const UUID_DECODE_TABLE = new Map(UUID_ALPHABET.split("").map((char, index) => [char, index]));
+const TRANSFER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 export function tryExtractShareId(url: string) {
     let parsed: URL;
@@ -28,6 +41,32 @@ export function tryExtractShareId(url: string) {
     }
 
     return shareId;
+}
+
+export function tryExtractTransferId(url: string) {
+    let parsed: URL;
+    try {
+        parsed = new URL(url.trim());
+    } catch {
+        return null;
+    }
+
+    if (parsed.hostname !== TRANSFER_HOST && parsed.hostname !== `www.${TRANSFER_HOST}`) {
+        return null;
+    }
+    if (!parsed.pathname.startsWith(TRANSFER_PATH_PREFIX)) {
+        return null;
+    }
+
+    const transferId = parsed.pathname.slice(TRANSFER_PATH_PREFIX.length).split("/")[0];
+    if (!transferId || transferId.length !== TRANSFER_ID_LENGTH) {
+        return null;
+    }
+    if (!TRANSFER_ID_PATTERN.test(transferId)) {
+        return null;
+    }
+
+    return transferId;
 }
 
 export function shareIdToUuidBytes(shareId: string) {
@@ -107,6 +146,28 @@ export function tryParseShareUrl(url: string) {
     return shareId;
 }
 
+export function tryParseTransferUrl(url: string) {
+    return tryExtractTransferId(url);
+}
+
+export function tryParseDownloadUrl(url: string): ParsedDownloadUrl | null {
+    const shareId = tryParseShareUrl(url);
+    if (shareId) {
+        return { provider: "kiosk", id: shareId };
+    }
+
+    const transferId = tryParseTransferUrl(url);
+    if (transferId) {
+        return { provider: "transfer", id: transferId };
+    }
+
+    return null;
+}
+
+export function buildTransferUrl(transferId: string): string {
+    return `https://${TRANSFER_HOST}${TRANSFER_PATH_PREFIX}${transferId}`;
+}
+
 export function tryDecodeShareUrlBase64(input: string) {
     let current = input.trim();
     if (!current) {
@@ -131,7 +192,7 @@ export function tryDecodeShareUrlBase64(input: string) {
         if (!next || next === current) {
             return null;
         }
-        if (tryParseShareUrl(next)) {
+        if (tryParseDownloadUrl(next)) {
             return next;
         }
         current = next;

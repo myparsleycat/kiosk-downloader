@@ -1,5 +1,6 @@
 import type { DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
+import { isCollectionExpiresNever } from "@shared/download-errors";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import { ClockIcon, FolderIcon, LockIcon, TimerIcon } from "lucide-react";
 
@@ -24,12 +25,14 @@ export function DownloadCard({
       ? formatTime(item.elapsedMs / 1000, navigator.language)
       : null;
 
-  const expiresLabel = new Date(collection.expires * 1000).toLocaleDateString("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const expiresLabel = isCollectionExpiresNever(collection.expires)
+    ? "만료 없음"
+    : new Date(collection.expires * 1000).toLocaleDateString("ko-KR", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
   return (
     <button

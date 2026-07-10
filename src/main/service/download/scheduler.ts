@@ -21,6 +21,7 @@ import type { KioskDownloader } from "../..";
 import type { KioApiClient } from "./kio-api-client";
 import type { DownloadTransferMetrics } from "./metrics";
 import type { DownloadRepository } from "./repository";
+import type { TransferItApiClient } from "./transfer-it-api-client";
 import type {
     DownloadChunkRow,
     DownloadCollectionRow,
@@ -33,6 +34,7 @@ import type {
 import { TransferProgressBatcher } from "../transfer-progress-batcher";
 import { getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
+import { TransferChunkPool, parseTransferNodeKey } from "./transfer-chunk-pool";
 import { openZipFileEntry } from "./zip-index";
 import { inflateRawFile, zipDeflateProgressScale } from "./zip-inflate";
 import { ZipRangeReader } from "./zip-range-reader";
@@ -41,6 +43,10 @@ import {
     computeStoredDataOffset,
     supportsZipEntryPoolDownload,
 } from "./zip-segment-map";
+
+type SessionCacheEntry =
+    | { kind: "kiosk"; cat: string; fetchedAt: number }
+    | { kind: "transfer"; authPw?: string; fetchedAt: number };
 
 function isActiveFileDownloadStatus(status: FileDownloadStatus | undefined) {
     return status === "downloading" || status === "inflating";
@@ -130,9 +136,10 @@ export class DownloadScheduler {
     private readonly fileControllers = new Map<string, AbortController>();
     private readonly manualCollections = new Set<string>();
     private readonly manualFiles = new Set<string>();
-    private readonly sessionCache = new Map<string, { cat: string; fetchedAt: number }>();
+    private readonly sessionCache = new Map<string, SessionCacheEntry>();
     private readonly progressBatcher: TransferProgressBatcher;
     private readonly segmentPool: GlobalSegmentPool;
+    private readonly transferPool: TransferChunkPool;
     private readonly fileStartOrder: string[] = [];
     private readonly collectionStartOrder: string[] = [];
     private readonly fileStartedAt = new Map<string, number>();
@@ -145,6 +152,7 @@ export class DownloadScheduler {
     public constructor(
         private readonly kd: KioskDownloader,
         private readonly api: KioApiClient,
+        private readonly transferApi: TransferItApiClient,
         private readonly repository: DownloadRepository,
         private readonly metrics: DownloadTransferMetrics,
         private readonly emitUpdate: (collectionId?: string) => Promise<void>,
@@ -170,6 +178,15 @@ export class DownloadScheduler {
         this.segmentPool = new GlobalSegmentPool({
             kd: this.kd,
             api: this.api,
+            repository: this.repository,
+            metrics: this.metrics,
+            onChunkSettled: () => {
+                void this.schedule();
+            },
+        });
+        this.transferPool = new TransferChunkPool({
+            kd: this.kd,
+            api: this.transferApi,
             repository: this.repository,
             metrics: this.metrics,
             onChunkSettled: () => {
@@ -213,6 +230,7 @@ export class DownloadScheduler {
         this.manualCollections.delete(collectionId);
         for (const fileId of this.activeFilesByCollection.get(collectionId) ?? []) {
             this.segmentPool.cancelSession(fileId);
+            this.transferPool.cancelSession(fileId);
             this.fileControllers.get(fileId)?.abort();
             this.metrics.clearFile(fileId);
         }
@@ -232,6 +250,7 @@ export class DownloadScheduler {
         this.manualFiles.delete(fileId);
         this.nonPooledZipEntries.delete(fileId);
         this.segmentPool.cancelSession(fileId);
+        this.transferPool.cancelSession(fileId);
         this.fileControllers.get(fileId)?.abort();
         this.metrics.clearFile(fileId);
     }
@@ -244,6 +263,7 @@ export class DownloadScheduler {
     public removeCollection(collectionId: string) {
         for (const fileId of this.activeFilesByCollection.get(collectionId) ?? []) {
             this.segmentPool.cancelSession(fileId);
+            this.transferPool.cancelSession(fileId);
             this.fileControllers.get(fileId)?.abort();
             this.metrics.clearFile(fileId);
             this.clearFileStartTracking(fileId);
@@ -283,6 +303,7 @@ export class DownloadScheduler {
         const settings = await this.getSettings();
         const segmentPoolSize = settings.segmentPoolSize;
         this.segmentPool.resize(segmentPoolSize);
+        this.transferPool.resize(segmentPoolSize);
         const collections = this.repository.listRunnableCollections();
 
         for (const collection of collections) {
@@ -366,6 +387,18 @@ export class DownloadScheduler {
         return 2;
     }
 
+    private getTotalInFlight() {
+        return this.segmentPool.getTotalInFlight() + this.transferPool.getTotalInFlight();
+    }
+
+    private getOutstandingChunks(fileId: string) {
+        const segmentOutstanding = this.segmentPool.getOutstandingChunks(fileId);
+        if (segmentOutstanding !== null) {
+            return segmentOutstanding;
+        }
+        return this.transferPool.getOutstandingChunks(fileId);
+    }
+
     private canStartFile(collectionId: string, segmentPoolSize: number) {
         const activeFileIds = [...(this.activeFilesByCollection.get(collectionId) ?? [])].filter(
             (fileId) => this.fileControllers.has(fileId),
@@ -375,14 +408,14 @@ export class DownloadScheduler {
             return true;
         }
 
-        if (this.segmentPool.getTotalInFlight() >= segmentPoolSize) {
+        if (this.getTotalInFlight() >= segmentPoolSize) {
             return false;
         }
 
         let outstandingChunks = 0;
         let nonPooledCount = 0;
         for (const fileId of activeFileIds) {
-            const outstanding = this.segmentPool.getOutstandingChunks(fileId);
+            const outstanding = this.getOutstandingChunks(fileId);
             if (outstanding === null) {
                 if (this.nonPooledZipEntries.has(fileId)) {
                     nonPooledCount += 1;
@@ -587,7 +620,15 @@ export class DownloadScheduler {
             this.progressBatcher.mark(collectionId, fileId);
 
             if (file.sourceKind === "zip_entry") {
+                if ((collection.provider ?? "kiosk") === "transfer") {
+                    throw new Error("ZIP entry downloads are not supported for transfer.it.");
+                }
                 await this.runZipEntry(collection, file, settings, controller);
+                return;
+            }
+
+            if ((collection.provider ?? "kiosk") === "transfer") {
+                await this.runTransferFile(collection, file, settings, controller);
                 return;
             }
 
@@ -1061,9 +1102,80 @@ export class DownloadScheduler {
         this.metrics.clearCollection(collectionId);
     }
 
+    private async runTransferFile(
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        settings: SchedulerSettings,
+        controller: AbortController,
+    ) {
+        let partWriter: PartFileWriter | null = null;
+
+        const chunks = this.repository.listChunks(file.id);
+        await this.validateCompletedChunks(collection, file, chunks);
+        this.repository.syncFileDownloadedBytes(file.id);
+
+        const refreshedFile = this.repository.getFile(file.id);
+        const refreshedCollection = this.repository.getCollection(collection.id);
+        if (!refreshedFile || !refreshedCollection) {
+            return;
+        }
+
+        const refreshedChunks = this.repository.listChunks(refreshedFile.id);
+        if (refreshedFile.size === 0 || this.areChunksComplete(refreshedChunks)) {
+            await this.finalizeFile(refreshedCollection, refreshedFile);
+            return;
+        }
+
+        const authPw = this.getTransferAuth(refreshedCollection);
+        const nodeKey = parseTransferNodeKey(refreshedFile.sourceMetaJson);
+        const pendingChunks = refreshedChunks.filter(
+            (chunk) => chunk.status === "pending" || chunk.status === "error",
+        );
+        partWriter = new PartFileWriter(this.getPartPath(refreshedCollection, refreshedFile));
+        await partWriter.open(refreshedFile.size, refreshedChunks.length);
+
+        try {
+            const outcome = await this.transferPool.register({
+                collection: refreshedCollection,
+                file: refreshedFile,
+                nodeKey,
+                authPw,
+                partWriter,
+                controller,
+                maxChunkRetries: settings.maxChunkRetries,
+                priority: this.getFilePriority(refreshedCollection.id, refreshedFile.id),
+                chunks: pendingChunks,
+                startedAt: this.fileStartedAt.get(refreshedFile.id) ?? Date.now(),
+                collectionStartedAt:
+                    this.collectionStartedAt.get(refreshedCollection.id) ?? Date.now(),
+            });
+
+            if (outcome === "paused") {
+                if (!this.repository.hasErroredChunk(refreshedFile.id)) {
+                    const currentFile = this.repository.getFile(refreshedFile.id);
+                    if (isActiveFileDownloadStatus(currentFile?.status)) {
+                        this.repository.markFileStatus(refreshedFile.id, "pending");
+                        this.progressBatcher.mark(refreshedCollection.id, refreshedFile.id);
+                    }
+                }
+                return;
+            }
+
+            if (outcome === "failed") {
+                return;
+            }
+
+            if (this.areChunksComplete(this.repository.listChunks(refreshedFile.id))) {
+                await this.finalizeFile(refreshedCollection, refreshedFile);
+            }
+        } finally {
+            await partWriter?.close();
+        }
+    }
+
     private async getCollectionToken(collection: DownloadCollectionRow) {
         const cached = this.sessionCache.get(collection.id);
-        if (cached) {
+        if (cached?.kind === "kiosk") {
             return cached.cat;
         }
 
@@ -1071,8 +1183,27 @@ export class DownloadScheduler {
         this.repository.updateCollectionFreshMeta(collection.id, {
             expires: refreshed.expires,
         });
-        this.sessionCache.set(collection.id, { cat: refreshed.cat, fetchedAt: Date.now() });
+        this.sessionCache.set(collection.id, {
+            kind: "kiosk",
+            cat: refreshed.cat,
+            fetchedAt: Date.now(),
+        });
         return refreshed.cat;
+    }
+
+    private getTransferAuth(collection: DownloadCollectionRow) {
+        const cached = this.sessionCache.get(collection.id);
+        if (cached?.kind === "transfer") {
+            return cached.authPw;
+        }
+
+        const authPw = this.transferApi.deriveAuthPw(collection);
+        this.sessionCache.set(collection.id, {
+            kind: "transfer",
+            authPw,
+            fetchedAt: Date.now(),
+        });
+        return authPw;
     }
 
     private async validateCompletedChunks(

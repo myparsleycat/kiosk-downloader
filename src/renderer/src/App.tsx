@@ -1,5 +1,5 @@
 import { cn } from "@renderer/lib/utils";
-import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
+import { tryDecodeShareUrlBase64, tryParseDownloadUrl } from "@shared/share-url";
 import type { DownloadItem, UploadItem } from "@shared/types";
 import {
   DownloadIcon,
@@ -85,7 +85,7 @@ function MainComponent() {
 
       const text = e.clipboardData?.getData("text") ?? "";
       const resolved = tryDecodeShareUrlBase64(text) ?? text;
-      if (!tryParseShareUrl(resolved.trim())) return;
+      if (!tryParseDownloadUrl(resolved.trim())) return;
 
       e.preventDefault();
       useNewDownloadDraft.getState().setUrl(resolved.trim());

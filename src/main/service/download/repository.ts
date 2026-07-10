@@ -20,12 +20,49 @@ import type {
     DownloadCollectionRow,
     DownloadFileRow,
     FlatTreeFile,
+    TransferFileSourceMeta,
     ZipEntryStoredMeta,
 } from "./types";
 
+import { megaChunkSizes } from "./transfer-it-crypto";
 import { buildZipEntrySegmentChunks, supportsZipEntryPoolDownload } from "./zip-segment-map";
 
 const COLLECTION_EXPIRED_ERROR = "Collection has expired.";
+
+const COLLECTION_SELECT = `"id",
+                    "share_id" AS "shareId",
+                    "source_url" AS "sourceUrl",
+                    "password_plain" AS "passwordPlain",
+                    "name",
+                    "root_id" AS "rootId",
+                    "segment_size" AS "segmentSize",
+                    "expires",
+                    "tree_json" AS "treeJson",
+                    "save_path" AS "savePath",
+                    "status",
+                    "created_at" AS "createdAt",
+                    "updated_at" AS "updatedAt",
+                    "elapsed_ms" AS "elapsedMs",
+                    "error",
+                    "ascii_filenames" AS "asciiFilenames",
+                    COALESCE("provider", 'kiosk') AS "provider"`;
+
+const FILE_SELECT = `"id",
+                    "collection_id" AS "collectionId",
+                    "remote_id" AS "remoteId",
+                    "path",
+                    "name",
+                    "size",
+                    "selected",
+                    "status",
+                    "downloaded_bytes" AS "downloadedBytes",
+                    "paused_by_user" AS "pausedByUser",
+                    "created_at" AS "createdAt",
+                    "updated_at" AS "updatedAt",
+                    "error",
+                    COALESCE("source_kind", 'file') AS "sourceKind",
+                    "zip_entry_json" AS "zipEntryJson",
+                    "source_meta_json" AS "sourceMetaJson"`;
 
 function tryParseZipEntryMeta(raw: string | null): ZipEntryStoredMeta | null {
     if (!raw) {
@@ -73,8 +110,24 @@ function rowToCollection(row: DownloadCollectionRow): Collection {
         expires: row.expires,
         segmentSize: row.segmentSize,
         passwordProtected: row.passwordPlain != null,
+        provider: row.provider ?? "kiosk",
         tree: parseTree(row.treeJson),
     };
+}
+
+function transferSourceMetaJson(
+    loaded: CreateDownloadRecord["loaded"],
+    remoteId: string,
+): string | null {
+    if (loaded.provider !== "transfer") {
+        return null;
+    }
+    const nodeKey = loaded.nodeKeys.get(remoteId);
+    if (!nodeKey) {
+        return null;
+    }
+    const meta: TransferFileSourceMeta = { nodeKey };
+    return JSON.stringify(meta);
 }
 
 export function flattenDownloadTree(
@@ -282,8 +335,9 @@ export class DownloadRepository {
                 `INSERT INTO "download_collection"
                  ("id", "share_id", "source_url", "password_plain", "name", "root_id",
                   "segment_size", "expires", "tree_json", "save_path", "status",
-                  "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames")
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL, ?)`,
+                  "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames",
+                  "provider")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?)`,
                 [
                     collectionId,
                     record.loaded.collection.shareId,
@@ -298,6 +352,7 @@ export class DownloadRepository {
                     timestamp,
                     timestamp,
                     record.asciiFilenames ? 1 : 0,
+                    record.loaded.provider,
                 ],
             );
 
@@ -306,8 +361,8 @@ export class DownloadRepository {
                     `INSERT INTO "download_file"
                      ("id", "collection_id", "remote_id", "path", "name", "size", "selected",
                       "status", "downloaded_bytes", "paused_by_user", "created_at", "updated_at",
-                      "error", "source_kind", "zip_entry_json")
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL, ?, ?)`,
+                      "error", "source_kind", "zip_entry_json", "source_meta_json")
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL, ?, ?, ?)`,
                     [
                         file.id,
                         collectionId,
@@ -320,6 +375,7 @@ export class DownloadRepository {
                         timestamp,
                         file.sourceKind,
                         file.zipEntryJson,
+                        file.sourceMetaJson ?? transferSourceMetaJson(record.loaded, file.remoteId),
                     ],
                 );
             }
@@ -330,22 +386,7 @@ export class DownloadRepository {
 
     public listItems() {
         const collections = this.kd.lib.db.all<DownloadCollectionRow>(
-            `SELECT "id",
-                    "share_id" AS "shareId",
-                    "source_url" AS "sourceUrl",
-                    "password_plain" AS "passwordPlain",
-                    "name",
-                    "root_id" AS "rootId",
-                    "segment_size" AS "segmentSize",
-                    "expires",
-                    "tree_json" AS "treeJson",
-                    "save_path" AS "savePath",
-                    "status",
-                    "created_at" AS "createdAt",
-                    "updated_at" AS "updatedAt",
-                    "elapsed_ms" AS "elapsedMs",
-                    "error",
-                    "ascii_filenames" AS "asciiFilenames"
+            `SELECT ${COLLECTION_SELECT}
              FROM "download_collection"
              ORDER BY "created_at" DESC`,
         );
@@ -359,22 +400,7 @@ export class DownloadRepository {
 
     public getCollection(collectionId: string) {
         return this.kd.lib.db.get<DownloadCollectionRow>(
-            `SELECT "id",
-                    "share_id" AS "shareId",
-                    "source_url" AS "sourceUrl",
-                    "password_plain" AS "passwordPlain",
-                    "name",
-                    "root_id" AS "rootId",
-                    "segment_size" AS "segmentSize",
-                    "expires",
-                    "tree_json" AS "treeJson",
-                    "save_path" AS "savePath",
-                    "status",
-                    "created_at" AS "createdAt",
-                    "updated_at" AS "updatedAt",
-                    "elapsed_ms" AS "elapsedMs",
-                    "error",
-                    "ascii_filenames" AS "asciiFilenames"
+            `SELECT ${COLLECTION_SELECT}
              FROM "download_collection"
              WHERE "id" = ?
              LIMIT 1`,
@@ -384,22 +410,7 @@ export class DownloadRepository {
 
     public listRunnableCollections() {
         return this.kd.lib.db.all<DownloadCollectionRow>(
-            `SELECT "id",
-                    "share_id" AS "shareId",
-                    "source_url" AS "sourceUrl",
-                    "password_plain" AS "passwordPlain",
-                    "name",
-                    "root_id" AS "rootId",
-                    "segment_size" AS "segmentSize",
-                    "expires",
-                    "tree_json" AS "treeJson",
-                    "save_path" AS "savePath",
-                    "status",
-                    "created_at" AS "createdAt",
-                    "updated_at" AS "updatedAt",
-                    "elapsed_ms" AS "elapsedMs",
-                    "error",
-                    "ascii_filenames" AS "asciiFilenames"
+            `SELECT ${COLLECTION_SELECT}
              FROM "download_collection"
              WHERE "status" IN ('queued', 'downloading', 'inflating')
              ORDER BY "created_at" ASC`,
@@ -429,21 +440,7 @@ export class DownloadRepository {
 
     public listFiles(collectionId: string) {
         return this.kd.lib.db.all<DownloadFileRow>(
-            `SELECT "id",
-                    "collection_id" AS "collectionId",
-                    "remote_id" AS "remoteId",
-                    "path",
-                    "name",
-                    "size",
-                    "selected",
-                    "status",
-                    "downloaded_bytes" AS "downloadedBytes",
-                    "paused_by_user" AS "pausedByUser",
-                    "created_at" AS "createdAt",
-                    "updated_at" AS "updatedAt",
-                    "error",
-                    COALESCE("source_kind", 'file') AS "sourceKind",
-                    "zip_entry_json" AS "zipEntryJson"
+            `SELECT ${FILE_SELECT}
              FROM "download_file"
              WHERE "collection_id" = ?
              ORDER BY "path" ASC`,
@@ -453,21 +450,7 @@ export class DownloadRepository {
 
     public listPendingFiles(collectionId: string) {
         return this.kd.lib.db.all<DownloadFileRow>(
-            `SELECT "id",
-                    "collection_id" AS "collectionId",
-                    "remote_id" AS "remoteId",
-                    "path",
-                    "name",
-                    "size",
-                    "selected",
-                    "status",
-                    "downloaded_bytes" AS "downloadedBytes",
-                    "paused_by_user" AS "pausedByUser",
-                    "created_at" AS "createdAt",
-                    "updated_at" AS "updatedAt",
-                    "error",
-                    COALESCE("source_kind", 'file') AS "sourceKind",
-                    "zip_entry_json" AS "zipEntryJson"
+            `SELECT ${FILE_SELECT}
              FROM "download_file"
              WHERE "collection_id" = ?
                AND "selected" = 1
@@ -500,21 +483,7 @@ export class DownloadRepository {
         const prioritized = [...prioritizedFileIds].slice(0, 400);
         const excluded = [...excludedFileIds];
         return this.kd.lib.db.get<DownloadFileRow>(
-            `SELECT "id",
-                    "collection_id" AS "collectionId",
-                    "remote_id" AS "remoteId",
-                    "path",
-                    "name",
-                    "size",
-                    "selected",
-                    "status",
-                    "downloaded_bytes" AS "downloadedBytes",
-                    "paused_by_user" AS "pausedByUser",
-                    "created_at" AS "createdAt",
-                    "updated_at" AS "updatedAt",
-                    "error",
-                    COALESCE("source_kind", 'file') AS "sourceKind",
-                    "zip_entry_json" AS "zipEntryJson"
+            `SELECT ${FILE_SELECT}
              FROM "download_file"
              WHERE "collection_id" = ?
                AND "selected" = 1
@@ -539,21 +508,7 @@ export class DownloadRepository {
             }
             const batch = ids.slice(offset, offset + 400);
             return this.kd.lib.db.all<DownloadFileRow>(
-                `SELECT "id",
-                        "collection_id" AS "collectionId",
-                        "remote_id" AS "remoteId",
-                        "path",
-                        "name",
-                        "size",
-                        "selected",
-                        "status",
-                        "downloaded_bytes" AS "downloadedBytes",
-                        "paused_by_user" AS "pausedByUser",
-                        "created_at" AS "createdAt",
-                        "updated_at" AS "updatedAt",
-                        "error",
-                        COALESCE("source_kind", 'file') AS "sourceKind",
-                        "zip_entry_json" AS "zipEntryJson"
+                `SELECT ${FILE_SELECT}
                  FROM "download_file"
                  WHERE "collection_id" = ?
                    AND "id" IN (${batch.map(() => "?").join(", ")})`,
@@ -587,21 +542,7 @@ export class DownloadRepository {
 
     public getFile(fileId: string) {
         return this.kd.lib.db.get<DownloadFileRow>(
-            `SELECT "id",
-                    "collection_id" AS "collectionId",
-                    "remote_id" AS "remoteId",
-                    "path",
-                    "name",
-                    "size",
-                    "selected",
-                    "status",
-                    "downloaded_bytes" AS "downloadedBytes",
-                    "paused_by_user" AS "pausedByUser",
-                    "created_at" AS "createdAt",
-                    "updated_at" AS "updatedAt",
-                    "error",
-                    COALESCE("source_kind", 'file') AS "sourceKind",
-                    "zip_entry_json" AS "zipEntryJson"
+            `SELECT ${FILE_SELECT}
              FROM "download_file"
              WHERE "id" = ?
              LIMIT 1`,
@@ -1209,6 +1150,33 @@ export class DownloadRepository {
                     error: null,
                 },
             ];
+        }
+
+        if ((collection.provider ?? "kiosk") === "transfer") {
+            return megaChunkSizes(file.size).map((chunk, chunkIndex) => {
+                const stored = storedByIndex.get(chunkIndex);
+                if (stored) {
+                    return {
+                        ...stored,
+                        collectionId: collection.id,
+                        fileId: file.id,
+                        offset: chunk.start,
+                        size: chunk.size,
+                    };
+                }
+                return {
+                    collectionId: collection.id,
+                    fileId: file.id,
+                    chunkIndex,
+                    offset: chunk.start,
+                    size: chunk.size,
+                    status: "pending" as const,
+                    downloadedBytes: 0,
+                    attempts: 0,
+                    updatedAt: file.updatedAt,
+                    error: null,
+                };
+            });
         }
 
         const segmentSize = requireSegmentSize(collection.segmentSize);

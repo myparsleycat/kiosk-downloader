@@ -48,7 +48,7 @@ export type TableSpec = {
     foreignKeys?: TableForeignKeySpec[];
 };
 
-export const APP_SCHEMA_VERSION = 4;
+export const APP_SCHEMA_VERSION = 5;
 
 export const TABLE_SPECS: TableSpec[] = [
     {
@@ -99,6 +99,12 @@ export const TABLE_SPECS: TableSpec[] = [
                 defaultSql: "0",
                 boolean: true,
             },
+            {
+                name: "provider",
+                type: "TEXT",
+                notNull: true,
+                defaultSql: "'kiosk'",
+            },
         ],
         indexes: [
             { name: "idx_download_collection_status", columns: ["status"] },
@@ -134,6 +140,7 @@ export const TABLE_SPECS: TableSpec[] = [
                 defaultSql: "'file'",
             },
             { name: "zip_entry_json", type: "TEXT" },
+            { name: "source_meta_json", type: "TEXT" },
         ],
         indexes: [
             { name: "idx_download_file_collection_id", columns: ["collection_id"] },

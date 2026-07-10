@@ -25,12 +25,13 @@ import { useNewDownloadDraft } from "@renderer/stores/new-download-draft";
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import {
   getIpcErrorCause,
+  isCollectionExpiresNever,
   isCollectionInvalidPasswordError,
   isCollectionPasswordRequiredError,
   isZipInvalidPasswordError,
   isZipPasswordRequiredError,
 } from "@shared/download-errors";
-import { tryDecodeShareUrlBase64, tryParseShareUrl } from "@shared/share-url";
+import { tryDecodeShareUrlBase64, tryParseDownloadUrl } from "@shared/share-url";
 import { formatSize } from "@shared/utils";
 import { setZipEntries } from "@shared/zip-tree";
 import {
@@ -114,8 +115,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
   const loadCollection = React.useCallback(
     async (trimmedUrl: string, loadPassword?: string) => {
-      const shareId = tryParseShareUrl(trimmedUrl);
-      if (!shareId) {
+      const parsed = tryParseDownloadUrl(trimmedUrl);
+      if (!parsed) {
         return;
       }
 
@@ -136,7 +137,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         setSelected(collectAllPaths(loaded.tree));
         setPasswordRequired(false);
         setPasswordInvalid(false);
-        setProbedShareId(shareId);
+        setProbedShareId(parsed.id);
       } catch (error) {
         if (seq !== loadSeqRef.current) {
           return;
@@ -151,7 +152,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
         if (!loadPassword && isCollectionPasswordRequiredError(error)) {
           setPasswordRequired(true);
-          setProbedShareId(shareId);
+          setProbedShareId(parsed.id);
           setCollection(null);
           setSelected(new Set());
           requestAnimationFrame(() => passwordInputRef.current?.focus());
@@ -176,7 +177,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
   const verifyPassword = React.useCallback(() => {
     const trimmedUrl = url.trim();
-    if (passwordRequired !== true || !password.trim() || !tryParseShareUrl(trimmedUrl)) {
+    if (passwordRequired !== true || !password.trim() || !tryParseDownloadUrl(trimmedUrl)) {
       return;
     }
 
@@ -185,20 +186,20 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
   React.useEffect(() => {
     const trimmedUrl = url.trim();
-    const shareId = tryParseShareUrl(trimmedUrl);
+    const parsed = tryParseDownloadUrl(trimmedUrl);
 
-    if (!shareId) {
+    if (!parsed) {
       loadSeqRef.current += 1;
       clearProbeState();
       setLoading(false);
       return;
     }
 
-    if (shareId === collection?.shareId) {
+    if (parsed.id === collection?.shareId) {
       return;
     }
 
-    if (shareId === probedShareId && passwordRequired === true) {
+    if (parsed.id === probedShareId && passwordRequired === true) {
       return;
     }
 
@@ -281,7 +282,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     setSortDir("desc");
   };
 
-  const currentShareId = tryParseShareUrl(url.trim());
+  const currentShareId = tryParseDownloadUrl(url.trim())?.id ?? null;
   const collectionSynced = collection !== null && currentShareId === collection.shareId && !loading;
   const canStart =
     collectionSynced && summary.count > 0 && savePath.trim().length > 0 && passwordInvalid !== true;
@@ -296,7 +297,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     if (
       !collection ||
       !canStart ||
-      tryParseShareUrl(url.trim()) !== collection.shareId ||
+      tryParseDownloadUrl(url.trim())?.id !== collection.shareId ||
       loading
     ) {
       return;
@@ -333,7 +334,9 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       <div className="flex w-[320px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="border-b px-4 py-3">
           <h2 className="cn-font-heading text-sm font-medium">새 다운로드</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">kio.ac 공유 링크를 입력하세요</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            kio.ac 또는 transfer.it 공유 링크를 입력하세요
+          </p>
         </div>
 
         <ScrollArea className="flex-1">
@@ -349,7 +352,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   <InputGroupInput
                     ref={urlInputRef}
                     id="url-input"
-                    placeholder="https://kio.ac/c/..."
+                    placeholder="https://kio.ac/c/... 또는 https://transfer.it/t/..."
                     value={url}
                     onChange={(e) => {
                       const value = e.target.value;
@@ -421,7 +424,9 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                     <span className="font-mono text-[11px]">{collection.shareId}</span>
                   </MetaRow>
                   <MetaRow icon={<ClockIcon className="size-3" />} label="만료">
-                    {new Date(collection.expires * 1000).toLocaleString("ko-KR")}
+                    {isCollectionExpiresNever(collection.expires)
+                      ? "없음"
+                      : new Date(collection.expires * 1000).toLocaleString("ko-KR")}
                   </MetaRow>
                   <MetaRow icon={<HardDriveIcon className="size-3" />} label="총 파일">
                     {totalFiles}개 · {formatSize(totalBytes)}

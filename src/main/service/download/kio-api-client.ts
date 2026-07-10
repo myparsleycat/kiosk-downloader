@@ -17,7 +17,7 @@ import type { KioskDownloader } from "../..";
 import type {
     DownloadChunkRow,
     DownloadCollectionRow,
-    LoadedCollection,
+    LoadedKioskCollection,
     SegmentDescriptor,
 } from "./types";
 
@@ -86,7 +86,7 @@ function extractShareId(url: string) {
 export class KioApiClient {
     public constructor(private readonly kd: KioskDownloader) {}
 
-    public async loadCollection(payload: LoadCollectionPayload): Promise<LoadedCollection> {
+    public async loadCollection(payload: LoadCollectionPayload): Promise<LoadedKioskCollection> {
         const shareId = extractShareId(payload.url);
         const uuid = shareIdToUuid(shareId);
         const unlocked = await this.unlockCollection(uuid, payload.password);
@@ -99,8 +99,10 @@ export class KioApiClient {
                 expires: unlocked.expires,
                 segmentSize: unlocked.segmentSize,
                 passwordProtected: unlocked.passwordProtected,
+                provider: "kiosk",
                 tree,
             },
+            provider: "kiosk",
             cat: unlocked.cat,
             rootId: unlocked.rootId,
             passwordProtected: unlocked.passwordProtected,

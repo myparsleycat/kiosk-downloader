@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
+import { tryParseDownloadUrl } from "@shared/share-url";
 import type {
     CreateDownloadPayload,
     DownloadItem,
@@ -19,7 +20,12 @@ import fg from "fast-glob";
 import fse from "fs-extra";
 
 import type { KioskDownloader } from "../..";
-import type { DownloadCollectionRow, DownloadFileRow, LoadedCollection } from "./types";
+import type {
+    DownloadCollectionRow,
+    DownloadFileRow,
+    LoadedCollection,
+    LoadedKioskCollection,
+} from "./types";
 
 import { toOsProgressTransfer } from "../os-progress-bar";
 import { KioApiClient } from "./kio-api-client";
@@ -27,12 +33,14 @@ import { DownloadTransferMetrics } from "./metrics";
 import { PartFileWriter, getStagingPartPath } from "./part-file";
 import { DownloadRepository } from "./repository";
 import { DownloadScheduler } from "./scheduler";
+import { TransferItApiClient } from "./transfer-it-api-client";
 import { indexZipFromSegments } from "./zip-index";
 
 const CAT_CACHE_TTL_MS = 10 * 60 * 1000;
 
 export class DownloadService {
     private readonly api: KioApiClient;
+    private readonly transferApi: TransferItApiClient;
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
@@ -40,10 +48,12 @@ export class DownloadService {
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
+        this.transferApi = new TransferItApiClient(kd);
         this.repository = new DownloadRepository(kd);
         this.scheduler = new DownloadScheduler(
             kd,
             this.api,
+            this.transferApi,
             this.repository,
             this.metrics,
             async (id) => {
@@ -94,8 +104,7 @@ export class DownloadService {
 
     public async loadCollection(payload: LoadCollectionPayload) {
         try {
-            const loaded = await this.api.loadCollection(payload);
-            this.cacheCat(loaded.collection.shareId, loaded.cat);
+            const loaded = await this.loadCollectionUnlocked(payload);
             return loaded.collection;
         } catch (error) {
             this.kd.logger.error(
@@ -114,6 +123,9 @@ export class DownloadService {
     public async listZipEntries(payload: ListZipEntriesPayload): Promise<ListZipEntriesResult> {
         try {
             const loaded = await this.loadCollectionUnlocked(payload);
+            if (loaded.provider === "transfer") {
+                throw new Error("ZIP entry browsing is not supported for transfer.it.");
+            }
             const found = findZipNodeById(loaded.collection.tree, payload.fileId);
             if (!found) {
                 throw new Error(`ZIP file not found: ${payload.fileId}`);
@@ -142,6 +154,13 @@ export class DownloadService {
 
     public async probeCollection(payload: ProbeCollectionPayload) {
         try {
+            const parsed = tryParseDownloadUrl(payload.url);
+            if (!parsed) {
+                throw new Error("Invalid share URL.");
+            }
+            if (parsed.provider === "transfer") {
+                return await this.transferApi.probeCollection(payload);
+            }
             return await this.api.probeCollection(payload);
         } catch (error) {
             this.kd.logger.error(
@@ -162,13 +181,15 @@ export class DownloadService {
         const selectedPaths = new Set(payload.selectedPaths);
         let tree = loaded.collection.tree;
 
-        for (const { zip, path: zipPath } of listZipNodes(tree)) {
-            if (!isZipExtractMode(zipPath, selectedPaths)) {
-                continue;
+        if (loaded.provider === "kiosk") {
+            for (const { zip, path: zipPath } of listZipNodes(tree)) {
+                if (!isZipExtractMode(zipPath, selectedPaths)) {
+                    continue;
+                }
+                const zipPassword = payload.zipPasswords?.[zip.id];
+                const indexed = await this.indexZipNode(loaded, zip.id, zip.size, zipPassword);
+                tree = setZipEntries(tree, zip.id, indexed.entries);
             }
-            const zipPassword = payload.zipPasswords?.[zip.id];
-            const indexed = await this.indexZipNode(loaded, zip.id, zip.size, zipPassword);
-            tree = setZipEntries(tree, zip.id, indexed.entries);
         }
 
         const enriched: LoadedCollection = {
@@ -217,6 +238,13 @@ export class DownloadService {
         url: string;
         password?: string;
     }): Promise<LoadedCollection> {
+        const parsed = tryParseDownloadUrl(payload.url);
+        if (!parsed) {
+            throw new Error("Invalid share URL.");
+        }
+        if (parsed.provider === "transfer") {
+            return this.transferApi.loadCollection(payload);
+        }
         const loaded = await this.api.loadCollection(payload);
         this.cacheCat(loaded.collection.shareId, loaded.cat);
         return loaded;
@@ -226,7 +254,7 @@ export class DownloadService {
         this.catCache.set(shareId, { cat, expiresAt: Date.now() + CAT_CACHE_TTL_MS });
     }
 
-    private async getCat(loaded: LoadedCollection) {
+    private async getCat(loaded: LoadedKioskCollection) {
         const cached = this.catCache.get(loaded.collection.shareId);
         if (cached && cached.expiresAt > Date.now()) {
             return cached.cat;
@@ -236,7 +264,7 @@ export class DownloadService {
     }
 
     private async indexZipNode(
-        loaded: LoadedCollection,
+        loaded: LoadedKioskCollection,
         remoteFileId: string,
         fileSize: number,
         zipPassword?: string,

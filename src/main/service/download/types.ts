@@ -1,16 +1,29 @@
 import type {
     ChunkDownloadStatus,
     Collection,
+    DownloadProvider,
     DownloadStatus,
     FileDownloadStatus,
 } from "@shared/types";
 
-export type LoadedCollection = {
+export type LoadedKioskCollection = {
+    provider: "kiosk";
     collection: Collection;
     cat: string;
     rootId: string;
     passwordProtected: boolean;
 };
+
+export type LoadedTransferCollection = {
+    provider: "transfer";
+    collection: Collection;
+    rootId: string;
+    passwordProtected: boolean;
+    authPw?: string;
+    nodeKeys: Map<string, string>;
+};
+
+export type LoadedCollection = LoadedKioskCollection | LoadedTransferCollection;
 
 export type SegmentDescriptor = {
     type: "cdn" | "edge";
@@ -24,6 +37,7 @@ export type FlatTreeFile = {
     size: number;
     sourceKind: "file" | "zip_entry";
     zipEntryJson: string | null;
+    sourceMetaJson?: string | null;
     selected?: boolean;
 };
 
@@ -44,6 +58,7 @@ export type DownloadCollectionRow = {
     elapsedMs: number;
     error: string | null;
     asciiFilenames: number;
+    provider: DownloadProvider;
 };
 
 export type DownloadFileRow = {
@@ -62,6 +77,7 @@ export type DownloadFileRow = {
     error: string | null;
     sourceKind: "file" | "zip_entry";
     zipEntryJson: string | null;
+    sourceMetaJson: string | null;
 };
 
 export type DownloadChunkRow = {
@@ -85,6 +101,10 @@ export type CreateDownloadRecord = {
     selectedPaths: string[];
     asciiFilenames: boolean;
     zipPasswords?: Record<string, string>;
+};
+
+export type TransferFileSourceMeta = {
+    nodeKey: string;
 };
 
 export type ZipEntryStoredMeta = {

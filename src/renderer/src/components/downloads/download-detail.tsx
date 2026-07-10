@@ -11,6 +11,7 @@ import { Separator } from "@renderer/components/ui/separator";
 import type { DownloadItem, SortDir, SortField } from "@renderer/lib/types";
 import { sortTree } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
+import { isCollectionExpiresNever } from "@shared/download-errors";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import {
   ArrowDownIcon,
@@ -88,13 +89,15 @@ export function DownloadDetail({
     }
   };
 
-  const expiresLabel = new Date(collection.expires * 1000).toLocaleString("ko-KR", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const expiresLabel = isCollectionExpiresNever(collection.expires)
+    ? "없음"
+    : new Date(collection.expires * 1000).toLocaleString("ko-KR", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
   return (
     <div className="flex h-full flex-col">

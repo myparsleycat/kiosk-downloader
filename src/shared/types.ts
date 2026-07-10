@@ -76,6 +76,8 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
+export type DownloadProvider = "kiosk" | "transfer";
+
 export interface Collection {
     shareId: string;
     name: string;
@@ -83,6 +85,7 @@ export interface Collection {
     segmentSize: number;
     passwordProtected: boolean;
     tree: CollectionTree;
+    provider?: DownloadProvider;
 }
 
 export type DownloadStatus =
