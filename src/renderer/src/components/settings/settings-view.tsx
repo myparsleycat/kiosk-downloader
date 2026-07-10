@@ -78,7 +78,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.runOnStartup": false,
   "general.runInBackground": true,
   "general.createCollectionSubfolder": true,
-  "general.asciiFilenames": true,
+  "general.asciiFilenames": false,
   "general.powerSaveBlockInTransfer": true,
   "general.logLevel": "error",
   "general.theme": "system",

@@ -239,8 +239,8 @@ export class Setting {
             },
             "general.asciiFilenames": {
                 definition: APP_SETTINGS["general.asciiFilenames"],
-                getDefault: () => true,
-                fromStored: (value) => parseBooleanSetting(value, true),
+                getDefault: () => false,
+                fromStored: (value) => parseBooleanSetting(value, false),
                 toStored: (value) => String(value),
             },
             "general.logLevel": {
