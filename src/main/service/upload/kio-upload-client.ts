@@ -67,18 +67,52 @@ function asRecord(value: unknown) {
     return value as Record<string, unknown>;
 }
 
-function createUploadStream(bytes: Buffer) {
+function createUploadStream(
+    bytes: Buffer,
+    limiter: { take: (bytes: number, signal?: AbortSignal) => Promise<void> },
+    signal: AbortSignal,
+) {
     let offset = 0;
+    let takeAbort: AbortController | null = null;
+
     return new ReadableStream<Uint8Array>({
-        pull(controller) {
+        async pull(controller) {
             if (offset >= bytes.length) {
                 controller.close();
                 return;
             }
 
+            if (signal.aborted) {
+                controller.error(new DOMException("The operation was aborted.", "AbortError"));
+                return;
+            }
+
             const nextOffset = Math.min(offset + UPLOAD_STREAM_CHUNK_SIZE, bytes.length);
-            controller.enqueue(bytes.subarray(offset, nextOffset));
-            offset = nextOffset;
+            const chunk = bytes.subarray(offset, nextOffset);
+            takeAbort = new AbortController();
+            const onAbort = () => takeAbort?.abort();
+            signal.addEventListener("abort", onAbort, { once: true });
+            try {
+                await limiter.take(chunk.length, takeAbort.signal);
+                if (signal.aborted) {
+                    controller.error(new DOMException("The operation was aborted.", "AbortError"));
+                    return;
+                }
+                controller.enqueue(chunk);
+                offset = nextOffset;
+            } catch (error) {
+                controller.error(
+                    error instanceof Error
+                        ? error
+                        : new DOMException("The operation was aborted.", "AbortError"),
+                );
+            } finally {
+                signal.removeEventListener("abort", onAbort);
+                takeAbort = null;
+            }
+        },
+        cancel() {
+            takeAbort?.abort();
         },
     });
 }
@@ -395,7 +429,7 @@ export class KioUploadClient {
         onProgress?.(0);
         const response = await this.kd.http.request(putUrl, {
             method: "PUT",
-            body: createUploadStream(bytes),
+            body: createUploadStream(bytes, this.kd.service.transfer.uploadBandwidth, signal),
             headers: {
                 "Content-Length": bytes.byteLength.toString(),
                 "Kiosk-ESUT": token,

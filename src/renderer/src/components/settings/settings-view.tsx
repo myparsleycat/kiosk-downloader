@@ -13,6 +13,9 @@ import { Separator } from "@renderer/components/ui/separator";
 import { Switch } from "@renderer/components/ui/switch";
 import {
   type AppSettings,
+  BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+  BANDWIDTH_LIMIT_MIBPS_MAX,
+  BANDWIDTH_LIMIT_MIBPS_MIN,
   CHUNK_RETRY_DEFAULT,
   CHUNK_RETRY_MAX,
   CHUNK_RETRY_MIN,
@@ -59,6 +62,8 @@ const SETTING_KEYS = [
   "transfer.streamWriteBatchBytes",
   "transfer.startupResumeMode",
   "transfer.uploadStartupResumeMode",
+  "transfer.downloadBandwidthLimitMibps",
+  "transfer.uploadBandwidthLimitMibps",
 ] as const;
 
 type SettingsState = {
@@ -78,6 +83,8 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.streamWriteBatchBytes": STREAM_WRITE_BATCH_BYTES_DEFAULT,
   "transfer.startupResumeMode": "auto",
   "transfer.uploadStartupResumeMode": "auto",
+  "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+  "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
 };
 
 const chunkRetryOptions = Array.from(
@@ -234,6 +241,23 @@ export function SettingsView() {
 
         <Section icon={<DownloadIcon className="size-3.5" />} title="다운로드 큐">
           <SettingRow
+            title="대역폭 제한"
+            description="다운로드 합산 속도 상한입니다. 0이면 무제한입니다."
+            control={
+              <div className="flex items-center gap-2">
+                <NumberSetting
+                  value={settings["transfer.downloadBandwidthLimitMibps"]}
+                  min={BANDWIDTH_LIMIT_MIBPS_MIN}
+                  max={BANDWIDTH_LIMIT_MIBPS_MAX}
+                  onChange={(value) =>
+                    void setSetting("transfer.downloadBandwidthLimitMibps", value)
+                  }
+                />
+                <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+              </div>
+            }
+          />
+          <SettingRow
             title="세그먼트 풀 크기"
             description="앱 전체에서 공유하는 세그먼트 풀의 최대 크기입니다. 여러 파일·컬렉션에 고르게 나뉩니다."
             control={
@@ -329,6 +353,21 @@ export function SettingsView() {
         </Section>
 
         <Section icon={<UploadIcon className="size-3.5" />} title="업로드 큐">
+          <SettingRow
+            title="대역폭 제한"
+            description="업로드 합산 속도 상한입니다. 0이면 무제한입니다."
+            control={
+              <div className="flex items-center gap-2">
+                <NumberSetting
+                  value={settings["transfer.uploadBandwidthLimitMibps"]}
+                  min={BANDWIDTH_LIMIT_MIBPS_MIN}
+                  max={BANDWIDTH_LIMIT_MIBPS_MAX}
+                  onChange={(value) => void setSetting("transfer.uploadBandwidthLimitMibps", value)}
+                />
+                <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+              </div>
+            }
+          />
           <SettingRow
             title="청크 재시도"
             description="청크 업로드 실패 시 최대 재시도 횟수입니다."

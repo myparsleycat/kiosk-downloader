@@ -1,6 +1,9 @@
 import {
     APP_SETTINGS,
     type AppSettings,
+    BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+    BANDWIDTH_LIMIT_MIBPS_MAX,
+    BANDWIDTH_LIMIT_MIBPS_MIN,
     CHUNK_RETRY_DEFAULT,
     CHUNK_RETRY_MAX,
     CHUNK_RETRY_MIN,
@@ -87,6 +90,16 @@ function normalizeSegmentPoolSize(value: number) {
         return SEGMENT_POOL_SIZE_DEFAULT;
     }
     return Math.min(SEGMENT_POOL_SIZE_MAX, Math.max(SEGMENT_POOL_SIZE_MIN, Math.floor(value)));
+}
+
+function normalizeBandwidthLimitMibps(value: number) {
+    if (!Number.isFinite(value)) {
+        return BANDWIDTH_LIMIT_MIBPS_DEFAULT;
+    }
+    return Math.min(
+        BANDWIDTH_LIMIT_MIBPS_MAX,
+        Math.max(BANDWIDTH_LIMIT_MIBPS_MIN, Math.floor(value)),
+    );
 }
 
 function parseStreamWriteBatchBytes(value: string | null | undefined) {
@@ -287,6 +300,38 @@ export class Setting {
                 toStored: (value) => value,
                 normalize: normalizeStartupResumeMode,
             },
+            "transfer.downloadBandwidthLimitMibps": {
+                definition: APP_SETTINGS["transfer.downloadBandwidthLimitMibps"],
+                getDefault: () => BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                fromStored: (value) =>
+                    parseBoundedIntegerSetting(
+                        value,
+                        BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                        BANDWIDTH_LIMIT_MIBPS_MIN,
+                        BANDWIDTH_LIMIT_MIBPS_MAX,
+                    ),
+                toStored: (value) => String(value),
+                normalize: normalizeBandwidthLimitMibps,
+                afterSet: (value) => {
+                    this.kd.service.transfer.setDownloadBandwidthLimitMibps(value);
+                },
+            },
+            "transfer.uploadBandwidthLimitMibps": {
+                definition: APP_SETTINGS["transfer.uploadBandwidthLimitMibps"],
+                getDefault: () => BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                fromStored: (value) =>
+                    parseBoundedIntegerSetting(
+                        value,
+                        BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                        BANDWIDTH_LIMIT_MIBPS_MIN,
+                        BANDWIDTH_LIMIT_MIBPS_MAX,
+                    ),
+                toStored: (value) => String(value),
+                normalize: normalizeBandwidthLimitMibps,
+                afterSet: (value) => {
+                    this.kd.service.transfer.setUploadBandwidthLimitMibps(value);
+                },
+            },
         };
 
         return this.settingSpecs;
@@ -442,6 +487,14 @@ export class Setting {
         getUploadStartupResumeMode: async () => await this.get("transfer.uploadStartupResumeMode"),
         setUploadStartupResumeMode: async (value: StartupResumeMode) =>
             await this.set("transfer.uploadStartupResumeMode", value),
+        getDownloadBandwidthLimitMibps: async () =>
+            await this.get("transfer.downloadBandwidthLimitMibps"),
+        setDownloadBandwidthLimitMibps: async (value: number) =>
+            await this.set("transfer.downloadBandwidthLimitMibps", value),
+        getUploadBandwidthLimitMibps: async () =>
+            await this.get("transfer.uploadBandwidthLimitMibps"),
+        setUploadBandwidthLimitMibps: async (value: number) =>
+            await this.set("transfer.uploadBandwidthLimitMibps", value),
     };
 }
 

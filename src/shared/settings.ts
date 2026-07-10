@@ -21,6 +21,8 @@ export interface AppSettings {
     "transfer.streamWriteBatchBytes": number;
     "transfer.startupResumeMode": StartupResumeMode;
     "transfer.uploadStartupResumeMode": StartupResumeMode;
+    "transfer.downloadBandwidthLimitMibps": number;
+    "transfer.uploadBandwidthLimitMibps": number;
 }
 
 export const CHUNK_RETRY_MIN = 3;
@@ -43,6 +45,10 @@ export const STREAM_WRITE_BATCH_BYTES_OPTIONS = [
     4 * 1024 * 1024,
 ] as const;
 export const STREAM_WRITE_BATCH_BYTES_DEFAULT = 1024 * 1024;
+
+export const BANDWIDTH_LIMIT_MIBPS_MIN = 0;
+export const BANDWIDTH_LIMIT_MIBPS_MAX = 1024;
+export const BANDWIDTH_LIMIT_MIBPS_DEFAULT = 0;
 
 export type SettingKey = keyof AppSettings;
 
@@ -120,5 +126,15 @@ export const APP_SETTINGS = {
         publicKey: "transfer.uploadStartupResumeMode",
         scope: "transfer",
         storageKey: "transfer.uploadStartupResumeMode",
+    },
+    "transfer.downloadBandwidthLimitMibps": {
+        publicKey: "transfer.downloadBandwidthLimitMibps",
+        scope: "transfer",
+        storageKey: "transfer.downloadBandwidthLimitMibps",
+    },
+    "transfer.uploadBandwidthLimitMibps": {
+        publicKey: "transfer.uploadBandwidthLimitMibps",
+        scope: "transfer",
+        storageKey: "transfer.uploadBandwidthLimitMibps",
     },
 } as const satisfies Record<SettingKey, SettingDefinition>;

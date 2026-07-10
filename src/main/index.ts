@@ -110,6 +110,7 @@ export class KioskDownloader {
 
         // Reconcile before services because some constructors may read persisted app state.
         await this.lib.db.reconcile();
+        await this.service.transfer.applyBandwidthLimitsFromSettings();
 
         this.service.download.registerStartupTasks();
         await this.service.startupCleanup.runAll();

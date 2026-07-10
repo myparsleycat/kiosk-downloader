@@ -141,6 +141,13 @@ describe("KioUploadClient.uploadSegment", () => {
     function createClient() {
         return new KioUploadClient({
             http: { request: httpRequest },
+            service: {
+                transfer: {
+                    uploadBandwidth: {
+                        take: async () => undefined,
+                    },
+                },
+            },
         } as never);
     }
 

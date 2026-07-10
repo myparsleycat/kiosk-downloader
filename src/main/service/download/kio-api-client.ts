@@ -208,6 +208,7 @@ export class KioApiClient {
 
         const reader = response.body.getReader();
         let yielded = 0;
+        const quantumSize = 64 * 1024;
 
         try {
             while (yielded < chunk.size) {
@@ -227,8 +228,20 @@ export class KioApiClient {
 
                 const remaining = chunk.size - yielded;
                 const slice = value.length > remaining ? value.subarray(0, remaining) : value;
-                yielded += slice.length;
-                yield slice;
+                let offset = 0;
+                while (offset < slice.length) {
+                    if (signal.aborted) {
+                        await reader.cancel();
+                        throw new DOMException("The operation was aborted.", "AbortError");
+                    }
+
+                    const end = Math.min(offset + quantumSize, slice.length);
+                    const quantum = slice.subarray(offset, end);
+                    await this.kd.service.transfer.downloadBandwidth.take(quantum.length, signal);
+                    yielded += quantum.length;
+                    offset = end;
+                    yield quantum;
+                }
             }
         } finally {
             reader.releaseLock();
