@@ -60,7 +60,20 @@ export function countFiles(dir: DirNode): number {
     return count;
 }
 
+const dirTotalSizeCache = new WeakMap<DirNode, number>();
+
 export function dirTotalSize(dir: DirNode | ZipNode): number {
+    if (dir.type === "zip" && !dir.entries) {
+        return dir.size;
+    }
+
+    if (dir.type === "dir") {
+        const cached = dirTotalSizeCache.get(dir);
+        if (cached !== undefined) {
+            return cached;
+        }
+    }
+
     let total = 0;
     for (const entry of asDirEntries(dir)) {
         if (entry.kind === "file") {
@@ -68,11 +81,14 @@ export function dirTotalSize(dir: DirNode | ZipNode): number {
             continue;
         }
         if (entry.kind === "zip") {
-            const zip = entry.node as ZipNode;
-            total += zip.entries ? dirTotalSize(zip) : zip.size;
+            total += dirTotalSize(entry.node as ZipNode);
             continue;
         }
         total += dirTotalSize(entry.node as DirNode);
+    }
+
+    if (dir.type === "dir") {
+        dirTotalSizeCache.set(dir, total);
     }
     return total;
 }
