@@ -11,7 +11,7 @@ import type {
     UploadTreeFile,
 } from "@shared/types";
 import { MAX_UPLOAD_FILES } from "@shared/types";
-import { normalizePath, toErrorMessage } from "@shared/utils";
+import { normalizePath } from "@shared/utils";
 import { clipboard } from "electron";
 import fg from "fast-glob";
 import type { Entry } from "fast-glob";
@@ -20,6 +20,7 @@ import fse from "fs-extra";
 import type { KioskDownloader } from "../..";
 import type { ServerFileMapping, UploadSourceFile } from "./types";
 
+import { withLoggedError } from "../../lib/logged-error";
 import { toOsProgressTransfer } from "../os-progress-bar";
 import { KioUploadClient } from "./kio-upload-client";
 import { UploadTransferMetrics } from "./metrics";
@@ -65,20 +66,18 @@ export class UploadService {
     }
 
     public async solveTurnstile(): Promise<string> {
-        try {
-            const parentWindow = this.kd.window.main.window;
-            return await this.turnstile.solve(parentWindow);
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "upload:solveTurnstile",
-                    stage: "turnstile",
-                    message: toErrorMessage(error),
-                },
-                "UploadService:solveTurnstile",
-            );
-            throw error;
-        }
+        return withLoggedError(
+            this.kd.logger,
+            "UploadService:solveTurnstile",
+            {
+                channel: "upload:solveTurnstile",
+                stage: "turnstile",
+            },
+            async () => {
+                const parentWindow = this.kd.window.main.window;
+                return await this.turnstile.solve(parentWindow);
+            },
+        );
     }
 
     public async expandPaths(
@@ -111,58 +110,56 @@ export class UploadService {
     }
 
     public async create(payload: CreateUploadPayload): Promise<UploadItem | null> {
-        try {
-            const files = await this.resolveCreateFiles(payload.tree);
-            const tree = buildDirTreeFromFiles(files);
+        return withLoggedError(
+            this.kd.logger,
+            "UploadService:create",
+            {
+                channel: "upload:create",
+                stage: "create",
+                fileCount: payload.tree.length,
+                name: payload.options.name,
+            },
+            async () => {
+                const files = await this.resolveCreateFiles(payload.tree);
+                const tree = buildDirTreeFromFiles(files);
 
-            const created = await this.api.createCollection(
-                files,
-                payload.options,
-                payload.turnstileToken,
-            );
+                const created = await this.api.createCollection(
+                    files,
+                    payload.options,
+                    payload.turnstileToken,
+                );
 
-            const collectionId = this.repository.insertUpload({
-                created,
-                options: payload.options,
-                files: files.map((file) => ({
-                    path: file.path,
-                    name: file.name,
-                    size: file.size,
-                    fsPath: file.fsPath,
-                    sourceMtimeMs: file.sourceMtimeMs,
-                })),
-                segmentSize: UPLOAD_SEGMENT_SIZE,
-                tree,
-            });
+                const collectionId = this.repository.insertUpload({
+                    created,
+                    options: payload.options,
+                    files: files.map((file) => ({
+                        path: file.path,
+                        name: file.name,
+                        size: file.size,
+                        fsPath: file.fsPath,
+                        sourceMtimeMs: file.sourceMtimeMs,
+                    })),
+                    segmentSize: UPLOAD_SEGMENT_SIZE,
+                    tree,
+                });
 
-            this.backfillRemoteIds(collectionId, created.workItems);
-            this.clearDraftSources();
+                this.backfillRemoteIds(collectionId, created.workItems);
+                this.clearDraftSources();
 
-            const fileRows = this.repository.listFiles(collectionId);
-            this.scheduler.registerWorkItems(
-                collectionId,
-                fileRows.map((file) => ({ id: file.id, remoteId: file.remoteId })),
-                created.workItems,
-            );
+                const fileRows = this.repository.listFiles(collectionId);
+                this.scheduler.registerWorkItems(
+                    collectionId,
+                    fileRows.map((file) => ({ id: file.id, remoteId: file.remoteId })),
+                    created.workItems,
+                );
 
-            await this.emitUpdate(collectionId);
-            void this.scheduler.schedule();
+                await this.emitUpdate(collectionId);
+                void this.scheduler.schedule();
 
-            const item = this.repository.getItem(collectionId);
-            return item ? this.enrichItem(item) : null;
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "upload:create",
-                    stage: "create",
-                    fileCount: payload.tree.length,
-                    name: payload.options.name,
-                    message: toErrorMessage(error),
-                },
-                "UploadService:create",
-            );
-            throw error;
-        }
+                const item = this.repository.getItem(collectionId);
+                return item ? this.enrichItem(item) : null;
+            },
+        );
     }
 
     public async list(): Promise<UploadItem[]> {

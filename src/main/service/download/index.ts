@@ -13,7 +13,6 @@ import type {
     ProbeCollectionPayload,
     ResumePayload,
 } from "@shared/types";
-import { toErrorMessage } from "@shared/utils";
 import { findZipNodeById, isZipExtractMode, listZipNodes, setZipEntries } from "@shared/zip-tree";
 import { shell } from "electron";
 import fg from "fast-glob";
@@ -27,6 +26,7 @@ import type {
     LoadedKioskCollection,
 } from "./types";
 
+import { withLoggedError } from "../../lib/logged-error";
 import { toOsProgressTransfer } from "../os-progress-bar";
 import { showOpenDialog, showSaveDialog } from "../util";
 import { KioApiClient } from "./kio-api-client";
@@ -110,77 +110,71 @@ export class DownloadService {
     }
 
     public async loadCollection(payload: LoadCollectionPayload) {
-        try {
-            const loaded = await this.loadCollectionUnlocked(payload);
-            return loaded.collection;
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:loadCollection",
-                    stage: "load",
-                    url: payload.url,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:loadCollection",
-            );
-            throw error;
-        }
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:loadCollection",
+            {
+                channel: "download:loadCollection",
+                stage: "load",
+                url: payload.url,
+            },
+            async () => {
+                const loaded = await this.loadCollectionUnlocked(payload);
+                return loaded.collection;
+            },
+        );
     }
 
     public async listZipEntries(payload: ListZipEntriesPayload): Promise<ListZipEntriesResult> {
-        try {
-            const loaded = await this.loadCollectionUnlocked(payload);
-            if (loaded.provider === "transfer") {
-                throw new Error("ZIP entry browsing is not supported for transfer.it.");
-            }
-            const found = findZipNodeById(loaded.collection.tree, payload.fileId);
-            if (!found) {
-                throw new Error(`ZIP file not found: ${payload.fileId}`);
-            }
-            const indexed = await this.indexZipNode(
-                loaded,
-                found.zip.id,
-                found.zip.size,
-                payload.zipPassword,
-            );
-            return { entries: indexed.entries };
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:listZipEntries",
-                    stage: "index",
-                    url: payload.url,
-                    fileId: payload.fileId,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:listZipEntries",
-            );
-            throw error;
-        }
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:listZipEntries",
+            {
+                channel: "download:listZipEntries",
+                stage: "index",
+                url: payload.url,
+                fileId: payload.fileId,
+            },
+            async () => {
+                const loaded = await this.loadCollectionUnlocked(payload);
+                if (loaded.provider === "transfer") {
+                    throw new Error("ZIP entry browsing is not supported for transfer.it.");
+                }
+                const found = findZipNodeById(loaded.collection.tree, payload.fileId);
+                if (!found) {
+                    throw new Error(`ZIP file not found: ${payload.fileId}`);
+                }
+                const indexed = await this.indexZipNode(
+                    loaded,
+                    found.zip.id,
+                    found.zip.size,
+                    payload.zipPassword,
+                );
+                return { entries: indexed.entries };
+            },
+        );
     }
 
     public async probeCollection(payload: ProbeCollectionPayload) {
-        try {
-            const parsed = tryParseDownloadUrl(payload.url);
-            if (!parsed) {
-                throw new Error("Invalid share URL.");
-            }
-            if (parsed.provider === "transfer") {
-                return await this.transferApi.probeCollection(payload);
-            }
-            return await this.api.probeCollection(payload);
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:probeCollection",
-                    stage: "probe",
-                    url: payload.url,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:probeCollection",
-            );
-            throw error;
-        }
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:probeCollection",
+            {
+                channel: "download:probeCollection",
+                stage: "probe",
+                url: payload.url,
+            },
+            async () => {
+                const parsed = tryParseDownloadUrl(payload.url);
+                if (!parsed) {
+                    throw new Error("Invalid share URL.");
+                }
+                if (parsed.provider === "transfer") {
+                    return await this.transferApi.probeCollection(payload);
+                }
+                return await this.api.probeCollection(payload);
+            },
+        );
     }
 
     public async create(payload: CreateDownloadPayload) {
@@ -352,22 +346,20 @@ export class DownloadService {
             const item = this.repository.getItem(file.collectionId);
             return item ? this.enrichItem(item) : null;
         }
-        try {
-            this.repository.includeFile(fileId);
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:includeFile",
-                    stage: "include",
-                    downloadId,
-                    fileId,
-                    filePath: file.path,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:includeFile",
-            );
-            throw error;
-        }
+        await withLoggedError(
+            this.kd.logger,
+            "DownloadService:includeFile",
+            {
+                channel: "download:includeFile",
+                stage: "include",
+                downloadId,
+                fileId,
+                filePath: file.path,
+            },
+            () => {
+                this.repository.includeFile(fileId);
+            },
+        );
         this.repository.markCollectionStatus(file.collectionId, "queued");
         this.scheduler.resumeFile(fileId);
         await this.emitUpdate(file.collectionId);
@@ -386,22 +378,17 @@ export class DownloadService {
             return item ? this.enrichItem(item) : null;
         }
 
-        let fileIds: string[] = [];
-        try {
-            fileIds = this.repository.includeFolder(downloadId, folderPath);
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:includeFolder",
-                    stage: "include",
-                    downloadId,
-                    folderPath,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:includeFolder",
-            );
-            throw error;
-        }
+        const fileIds = await withLoggedError(
+            this.kd.logger,
+            "DownloadService:includeFolder",
+            {
+                channel: "download:includeFolder",
+                stage: "include",
+                downloadId,
+                folderPath,
+            },
+            () => this.repository.includeFolder(downloadId, folderPath),
+        );
 
         if (fileIds.length === 0) {
             const item = this.repository.getItem(downloadId);
@@ -447,22 +434,17 @@ export class DownloadService {
             throw new Error("Download item not found.");
         }
 
-        let payload;
-        try {
-            payload = this.repository.buildTransferPayload(collectionId);
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:exportCollection",
-                    stage: "build",
-                    collectionId,
-                    collectionName: collection.name,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:exportCollection",
-            );
-            throw error;
-        }
+        const payload = await withLoggedError(
+            this.kd.logger,
+            "DownloadService:exportCollection",
+            {
+                channel: "download:exportCollection",
+                stage: "build",
+                collectionId,
+                collectionName: collection.name,
+            },
+            () => this.repository.buildTransferPayload(collectionId),
+        );
 
         const saveResult = await showSaveDialog({
             title: "컬렉션 내보내기",
@@ -477,22 +459,18 @@ export class DownloadService {
             ? saveResult.filePath
             : `${saveResult.filePath}.kdx`;
 
-        try {
-            await fse.writeFile(filePath, encodeDownloadTransfer(payload));
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:exportCollection",
-                    stage: "write",
-                    collectionId,
-                    collectionName: collection.name,
-                    filePath,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:exportCollection",
-            );
-            throw error;
-        }
+        await withLoggedError(
+            this.kd.logger,
+            "DownloadService:exportCollection",
+            {
+                channel: "download:exportCollection",
+                stage: "write",
+                collectionId,
+                collectionName: collection.name,
+                filePath,
+            },
+            () => fse.writeFile(filePath, encodeDownloadTransfer(payload)),
+        );
 
         return { filePath };
     }
@@ -508,24 +486,21 @@ export class DownloadService {
         }
         const transferPath = openResult.filePaths[0];
 
-        let payload;
-        try {
-            if ((await fse.stat(transferPath)).size > MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES) {
-                throw new Error("Transfer file is too large.");
-            }
-            payload = decodeDownloadTransfer(await fse.readFile(transferPath));
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:importCollection",
-                    stage: "decode",
-                    transferPath,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:importCollection",
-            );
-            throw error;
-        }
+        const payload = await withLoggedError(
+            this.kd.logger,
+            "DownloadService:importCollection",
+            {
+                channel: "download:importCollection",
+                stage: "decode",
+                transferPath,
+            },
+            async () => {
+                if ((await fse.stat(transferPath)).size > MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES) {
+                    throw new Error("Transfer file is too large.");
+                }
+                return decodeDownloadTransfer(await fse.readFile(transferPath));
+            },
+        );
 
         const lastDownloadPath = await this.kd.setting.get("general.lastDownloadPath");
         const folderResult = await showOpenDialog({
@@ -556,25 +531,23 @@ export class DownloadService {
               )
             : basePath;
 
-        let collectionId: string;
-        try {
-            collectionId = this.repository.insertImportedDownload(payload, savePath);
-            this.repository.ensureCollectionNotExpired(collectionId);
-        } catch (error) {
-            this.kd.logger.error(
-                {
-                    channel: "download:importCollection",
-                    stage: "insert",
-                    transferPath,
-                    savePath,
-                    collectionName: payload.collection.name,
-                    shareId: payload.collection.shareId,
-                    message: toErrorMessage(error),
-                },
-                "DownloadService:importCollection",
-            );
-            throw error;
-        }
+        const collectionId = await withLoggedError(
+            this.kd.logger,
+            "DownloadService:importCollection",
+            {
+                channel: "download:importCollection",
+                stage: "insert",
+                transferPath,
+                savePath,
+                collectionName: payload.collection.name,
+                shareId: payload.collection.shareId,
+            },
+            () => {
+                const id = this.repository.insertImportedDownload(payload, savePath);
+                this.repository.ensureCollectionNotExpired(id);
+                return id;
+            },
+        );
 
         await this.emitUpdate(collectionId);
         const imported = this.repository.getCollection(collectionId);
