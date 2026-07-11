@@ -18,7 +18,6 @@ import {
     type SettingDefinition,
     type SettingKey,
     type SettingLogLevel,
-    type SettingTheme,
     STARTUP_RESUME_MODES,
     type StartupResumeMode,
     STREAM_WRITE_BATCH_BYTES_DEFAULT,
@@ -60,120 +59,40 @@ function parseBooleanSetting(value: string | null | undefined, fallback: boolean
     return value === "true";
 }
 
+function clampInteger(value: number, min: number, max: number, fallback: number) {
+    if (!Number.isFinite(value)) {
+        return fallback;
+    }
+    return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function fromOptions<T>(value: unknown, options: readonly T[], fallback: T): T {
+    return options.find((option) => option === value) ?? fallback;
+}
+
 function parseBoundedIntegerSetting(
     value: string | null | undefined,
     fallback: number,
     min: number,
     max: number,
 ) {
-    const parsed = Number.parseInt(value ?? "", 10);
-    if (!Number.isFinite(parsed)) {
-        return fallback;
-    }
-    return Math.min(max, Math.max(min, Math.floor(parsed)));
-}
-
-function normalizeChunkRetries(value: number) {
-    if (!Number.isFinite(value)) {
-        return CHUNK_RETRY_DEFAULT;
-    }
-    return Math.min(CHUNK_RETRY_MAX, Math.max(CHUNK_RETRY_MIN, Math.floor(value)));
-}
-
-function normalizeUploadChunkRetries(value: number) {
-    if (!Number.isFinite(value)) {
-        return UPLOAD_CHUNK_RETRY_DEFAULT;
-    }
-    return Math.min(UPLOAD_CHUNK_RETRY_MAX, Math.max(UPLOAD_CHUNK_RETRY_MIN, Math.floor(value)));
-}
-
-function normalizeSegmentPoolSize(value: number) {
-    if (!Number.isFinite(value)) {
-        return SEGMENT_POOL_SIZE_DEFAULT;
-    }
-    return Math.min(SEGMENT_POOL_SIZE_MAX, Math.max(SEGMENT_POOL_SIZE_MIN, Math.floor(value)));
-}
-
-function normalizeBandwidthLimitMibps(value: number) {
-    if (!Number.isFinite(value)) {
-        return BANDWIDTH_LIMIT_MIBPS_DEFAULT;
-    }
-    return Math.min(
-        BANDWIDTH_LIMIT_MIBPS_MAX,
-        Math.max(BANDWIDTH_LIMIT_MIBPS_MIN, Math.floor(value)),
-    );
+    return clampInteger(Number.parseInt(value ?? "", 10), min, max, fallback);
 }
 
 function parseStreamWriteBatchBytes(value: string | null | undefined) {
-    const parsed = Number.parseInt(value ?? "", 10);
-    if (
-        !Number.isFinite(parsed) ||
-        !STREAM_WRITE_BATCH_BYTES_OPTIONS.includes(
-            parsed as (typeof STREAM_WRITE_BATCH_BYTES_OPTIONS)[number],
-        )
-    ) {
-        return STREAM_WRITE_BATCH_BYTES_DEFAULT;
-    }
-    return parsed;
-}
-
-function normalizeStreamWriteBatchBytes(value: number) {
-    if (
-        STREAM_WRITE_BATCH_BYTES_OPTIONS.includes(
-            value as (typeof STREAM_WRITE_BATCH_BYTES_OPTIONS)[number],
-        )
-    ) {
-        return value;
-    }
-    return STREAM_WRITE_BATCH_BYTES_DEFAULT;
+    return fromOptions(
+        Number.parseInt(value ?? "", 10),
+        STREAM_WRITE_BATCH_BYTES_OPTIONS,
+        STREAM_WRITE_BATCH_BYTES_DEFAULT,
+    );
 }
 
 function parseInflateBufferBytes(value: string | null | undefined) {
-    const parsed = Number.parseInt(value ?? "", 10);
-    if (
-        !Number.isFinite(parsed) ||
-        !INFLATE_BUFFER_BYTES_OPTIONS.includes(
-            parsed as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
-        )
-    ) {
-        return INFLATE_BUFFER_BYTES_DEFAULT;
-    }
-    return parsed;
-}
-
-function normalizeInflateBufferBytes(value: number) {
-    if (
-        INFLATE_BUFFER_BYTES_OPTIONS.includes(
-            value as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
-        )
-    ) {
-        return value;
-    }
-    return INFLATE_BUFFER_BYTES_DEFAULT;
-}
-
-function parseStartupResumeMode(value: string | null | undefined): StartupResumeMode {
-    return STARTUP_RESUME_MODES.find((mode) => mode === value) ?? "auto";
-}
-
-function parseLogLevel(value: string | null | undefined): SettingLogLevel {
-    return SETTING_LOG_LEVELS.find((level) => level === value) ?? "error";
-}
-
-function normalizeStartupResumeMode(value: StartupResumeMode): StartupResumeMode {
-    return STARTUP_RESUME_MODES.find((mode) => mode === value) ?? "auto";
-}
-
-function normalizeLogLevel(value: SettingLogLevel): SettingLogLevel {
-    return SETTING_LOG_LEVELS.find((level) => level === value) ?? "error";
-}
-
-function parseTheme(value: string | null | undefined): SettingTheme {
-    return SETTING_THEMES.find((theme) => theme === value) ?? "system";
-}
-
-function normalizeTheme(value: SettingTheme): SettingTheme {
-    return SETTING_THEMES.find((theme) => theme === value) ?? "system";
+    return fromOptions(
+        Number.parseInt(value ?? "", 10),
+        INFLATE_BUFFER_BYTES_OPTIONS,
+        INFLATE_BUFFER_BYTES_DEFAULT,
+    );
 }
 
 function normalizeDownloadPath(value: string) {
@@ -246,9 +165,9 @@ export class Setting {
             "general.logLevel": {
                 definition: APP_SETTINGS["general.logLevel"],
                 getDefault: () => "error" as const,
-                fromStored: parseLogLevel,
+                fromStored: (value) => fromOptions(value, SETTING_LOG_LEVELS, "error"),
                 toStored: (value) => value,
-                normalize: normalizeLogLevel,
+                normalize: (value) => fromOptions(value, SETTING_LOG_LEVELS, "error"),
                 afterSet: (level) => {
                     this.kd.logger.setLevel(level);
                 },
@@ -256,9 +175,9 @@ export class Setting {
             "general.theme": {
                 definition: APP_SETTINGS["general.theme"],
                 getDefault: () => "system" as const,
-                fromStored: parseTheme,
+                fromStored: (value) => fromOptions(value, SETTING_THEMES, "system"),
                 toStored: (value) => value,
-                normalize: normalizeTheme,
+                normalize: (value) => fromOptions(value, SETTING_THEMES, "system"),
                 afterSet: (value) => {
                     nativeTheme.themeSource = value;
                 },
@@ -289,7 +208,13 @@ export class Setting {
                         SEGMENT_POOL_SIZE_MAX,
                     ),
                 toStored: (value) => String(value),
-                normalize: normalizeSegmentPoolSize,
+                normalize: (value) =>
+                    clampInteger(
+                        value,
+                        SEGMENT_POOL_SIZE_MIN,
+                        SEGMENT_POOL_SIZE_MAX,
+                        SEGMENT_POOL_SIZE_DEFAULT,
+                    ),
             },
             "transfer.maxChunkRetries": {
                 definition: APP_SETTINGS["transfer.maxChunkRetries"],
@@ -302,7 +227,8 @@ export class Setting {
                         CHUNK_RETRY_MAX,
                     ),
                 toStored: (value) => String(value),
-                normalize: normalizeChunkRetries,
+                normalize: (value) =>
+                    clampInteger(value, CHUNK_RETRY_MIN, CHUNK_RETRY_MAX, CHUNK_RETRY_DEFAULT),
             },
             "transfer.uploadMaxChunkRetries": {
                 definition: APP_SETTINGS["transfer.uploadMaxChunkRetries"],
@@ -315,35 +241,47 @@ export class Setting {
                         UPLOAD_CHUNK_RETRY_MAX,
                     ),
                 toStored: (value) => String(value),
-                normalize: normalizeUploadChunkRetries,
+                normalize: (value) =>
+                    clampInteger(
+                        value,
+                        UPLOAD_CHUNK_RETRY_MIN,
+                        UPLOAD_CHUNK_RETRY_MAX,
+                        UPLOAD_CHUNK_RETRY_DEFAULT,
+                    ),
             },
             "transfer.streamWriteBatchBytes": {
                 definition: APP_SETTINGS["transfer.streamWriteBatchBytes"],
                 getDefault: () => STREAM_WRITE_BATCH_BYTES_DEFAULT,
                 fromStored: parseStreamWriteBatchBytes,
                 toStored: (value) => String(value),
-                normalize: normalizeStreamWriteBatchBytes,
+                normalize: (value) =>
+                    fromOptions(
+                        value,
+                        STREAM_WRITE_BATCH_BYTES_OPTIONS,
+                        STREAM_WRITE_BATCH_BYTES_DEFAULT,
+                    ),
             },
             "transfer.inflateBufferBytes": {
                 definition: APP_SETTINGS["transfer.inflateBufferBytes"],
                 getDefault: () => INFLATE_BUFFER_BYTES_DEFAULT,
                 fromStored: parseInflateBufferBytes,
                 toStored: (value) => String(value),
-                normalize: normalizeInflateBufferBytes,
+                normalize: (value) =>
+                    fromOptions(value, INFLATE_BUFFER_BYTES_OPTIONS, INFLATE_BUFFER_BYTES_DEFAULT),
             },
             "transfer.startupResumeMode": {
                 definition: APP_SETTINGS["transfer.startupResumeMode"],
                 getDefault: () => "auto" as const,
-                fromStored: parseStartupResumeMode,
+                fromStored: (value) => fromOptions(value, STARTUP_RESUME_MODES, "auto"),
                 toStored: (value) => value,
-                normalize: normalizeStartupResumeMode,
+                normalize: (value) => fromOptions(value, STARTUP_RESUME_MODES, "auto"),
             },
             "transfer.uploadStartupResumeMode": {
                 definition: APP_SETTINGS["transfer.uploadStartupResumeMode"],
                 getDefault: () => "auto" as const,
-                fromStored: parseStartupResumeMode,
+                fromStored: (value) => fromOptions(value, STARTUP_RESUME_MODES, "auto"),
                 toStored: (value) => value,
-                normalize: normalizeStartupResumeMode,
+                normalize: (value) => fromOptions(value, STARTUP_RESUME_MODES, "auto"),
             },
             "transfer.downloadBandwidthLimitMibps": {
                 definition: APP_SETTINGS["transfer.downloadBandwidthLimitMibps"],
@@ -356,7 +294,13 @@ export class Setting {
                         BANDWIDTH_LIMIT_MIBPS_MAX,
                     ),
                 toStored: (value) => String(value),
-                normalize: normalizeBandwidthLimitMibps,
+                normalize: (value) =>
+                    clampInteger(
+                        value,
+                        BANDWIDTH_LIMIT_MIBPS_MIN,
+                        BANDWIDTH_LIMIT_MIBPS_MAX,
+                        BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                    ),
                 afterSet: (value) => {
                     this.kd.service.transfer.setDownloadBandwidthLimitMibps(value);
                 },
@@ -372,7 +316,13 @@ export class Setting {
                         BANDWIDTH_LIMIT_MIBPS_MAX,
                     ),
                 toStored: (value) => String(value),
-                normalize: normalizeBandwidthLimitMibps,
+                normalize: (value) =>
+                    clampInteger(
+                        value,
+                        BANDWIDTH_LIMIT_MIBPS_MIN,
+                        BANDWIDTH_LIMIT_MIBPS_MAX,
+                        BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+                    ),
                 afterSet: (value) => {
                     this.kd.service.transfer.setUploadBandwidthLimitMibps(value);
                 },
