@@ -330,7 +330,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
   return (
     <div className="flex h-full">
-      {/* left: input url + meta */}
       <div className="flex w-[320px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="border-b px-4 py-3">
           <h2 className="cn-font-heading text-sm font-medium">새 다운로드</h2>
@@ -341,7 +340,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
         <ScrollArea className="flex-1">
           <div className="flex w-full min-w-0 flex-col gap-4 p-4">
-            {/* URL */}
             <div className="flex flex-col gap-1.5">
               <Field>
                 <FieldLabel htmlFor="url-input">
@@ -408,7 +406,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
               </div>
             )}
 
-            {/* collection meta */}
             {collection && (
               <>
                 <Separator />
@@ -437,7 +434,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           </div>
         </ScrollArea>
 
-        {/* bottom: save path + selected summary + start button */}
         <div className="border-t p-3">
           <div className="mb-3 flex flex-col gap-1.5">
             <Label className="flex items-center gap-1.5 text-xs">
@@ -490,7 +486,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         </div>
       </div>
 
-      {/* right: tree browser */}
       <div className="flex flex-1 flex-col">
         {collection ? (
           <>

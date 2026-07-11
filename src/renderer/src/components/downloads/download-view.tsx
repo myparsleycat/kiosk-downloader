@@ -88,7 +88,6 @@ export function DownloadView({
 
   return (
     <div className="flex h-full">
-      {/* left list */}
       <div className="flex w-[320px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="flex items-center justify-between gap-2 border-b px-3 py-2.5">
           <span className="cn-font-heading text-sm font-medium">다운로드</span>
@@ -224,7 +223,6 @@ export function DownloadView({
         </ScrollArea>
       </div>
 
-      {/* right detail */}
       <div className="flex-1">
         <DownloadDetail item={selected} onRemove={remove} removing={removing} />
       </div>

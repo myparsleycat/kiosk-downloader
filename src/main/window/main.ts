@@ -28,23 +28,6 @@ export class MainWindow {
         }
     }
 
-    // public async focusAndNavigate(path: string) {
-    //     let window = this.window;
-    //     if (!window || window.isDestroyed()) {
-    //         window = await this.createMainWindow(path);
-    //     }
-
-    //     if (!window || window.isDestroyed()) {
-    //         return null;
-    //     }
-
-    //     focus(window);
-    //     if (!window.webContents.isLoadingMainFrame()) {
-    //         this.kd.ipc.postMessageToWindow(window, "fn:navi", path);
-    //     }
-    //     return window;
-    // }
-
     async createMainWindow(initialRoute?: string) {
         if (this.window?.isDestroyed()) {
             this.window = null;
@@ -100,7 +83,6 @@ export class MainWindow {
                 : { titleBarOverlay: createTitleBarOverlay() }),
             show: false,
             backgroundColor: useDarkColors ? "#1c1c1c" : "#ffffff",
-            // frame: false,
             autoHideMenuBar: true,
             webPreferences: {
                 ...getDefaultWebPreferences(),
@@ -170,10 +152,6 @@ export class MainWindow {
             const routeUrl = initialRoute ? `${baseUrl}/#${initialRoute}` : baseUrl;
             void this.window.loadURL(routeUrl);
         } else {
-            // cjs
-            // this.window.loadFile(path.join(__dirname, "../renderer/index.html"));
-
-            // esm
             void this.window.loadFile(
                 fileURLToPath(new URL("../renderer/index.html", import.meta.url)),
                 {
@@ -192,7 +170,6 @@ export class MainWindow {
             this.kd.ipc.postMessageToWindow(this.window, "window:focus");
         });
 
-        // this.window.webContents.openDevTools();
         return this.window;
     }
 }

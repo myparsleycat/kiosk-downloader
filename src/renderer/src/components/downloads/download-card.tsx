@@ -45,7 +45,6 @@ export function DownloadCard({
           : "border-border hover:bg-muted/50",
       )}
     >
-      {/* title + status pin */}
       <div className="flex min-w-0 items-start justify-between gap-2">
         <div className="min-w-0 flex-1 overflow-hidden">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
@@ -64,7 +63,6 @@ export function DownloadCard({
         <StatusBadge status={status} />
       </div>
 
-      {/* progress bar */}
       <div className="mt-2.5 flex flex-col gap-1">
         <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-muted">
           <div
@@ -98,7 +96,6 @@ export function DownloadCard({
         </div>
       </div>
 
-      {/* meta */}
       <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
         <span className="flex items-center gap-0.5">
           <ClockIcon className="size-2.5" />
