@@ -87,7 +87,7 @@ export class KioskDownloader {
         }
 
         try {
-            const runOnStartup = await this.setting.general.getRunOnStartup();
+            const runOnStartup = await this.setting.get("general.runOnStartup");
             const autoLaunch = new AutoLaunch({
                 name: "Kiosk Downloader",
                 path: app.getPath("exe"),
@@ -130,7 +130,7 @@ export class KioskDownloader {
 
         this.initialized = true;
 
-        const logLevel = await this.setting.general.getLogLevel();
+        const logLevel = await this.setting.get("general.logLevel");
         this.logger.setLevel(logLevel);
 
         await this.window.main.createMainWindow();
@@ -182,7 +182,7 @@ void app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", async () => {
-    const runInBackground = await kd.setting.general.getRunInBackground();
+    const runInBackground = await kd.setting.get("general.runInBackground");
     if (!runInBackground) {
         app.quit();
     }

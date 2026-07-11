@@ -239,10 +239,15 @@ function createMetrics() {
 function createKioskDownloader() {
     return {
         setting: {
-            transfer: {
-                getSegmentPoolSize: vi.fn(async () => 8),
-                getUploadMaxChunkRetries: vi.fn(async () => 2),
-            },
+            get: vi.fn(async (key: string) => {
+                if (key === "transfer.segmentPoolSize") {
+                    return 8;
+                }
+                if (key === "transfer.uploadMaxChunkRetries") {
+                    return 2;
+                }
+                throw new Error(`Unexpected setting get: ${key}`);
+            }),
         },
         service: {
             transfer: {

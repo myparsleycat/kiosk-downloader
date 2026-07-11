@@ -80,7 +80,7 @@ export class DownloadService {
     }
 
     public async restoreStartupState() {
-        const mode = await this.kd.setting.transfer.getStartupResumeMode();
+        const mode = await this.kd.setting.get("transfer.startupResumeMode");
         this.repository.restoreStartupState(mode);
         this.repository.syncExpiredCollections();
         await this.emitUpdate();

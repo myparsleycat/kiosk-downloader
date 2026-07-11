@@ -26,10 +26,10 @@ export class TransferService {
 
     public async applyBandwidthLimitsFromSettings() {
         this.setDownloadBandwidthLimitMibps(
-            await this.kd.setting.transfer.getDownloadBandwidthLimitMibps(),
+            await this.kd.setting.get("transfer.downloadBandwidthLimitMibps"),
         );
         this.setUploadBandwidthLimitMibps(
-            await this.kd.setting.transfer.getUploadBandwidthLimitMibps(),
+            await this.kd.setting.get("transfer.uploadBandwidthLimitMibps"),
         );
     }
 
@@ -45,7 +45,7 @@ export class TransferService {
         const shouldBlock =
             (this.kd.service.download.hasActiveTransfers() ||
                 this.kd.service.upload.hasActiveTransfers()) &&
-            (await this.kd.setting.general.getPowerSaveBlockInTransfer());
+            (await this.kd.setting.get("general.powerSaveBlockInTransfer"));
 
         this.syncMainWindowProgressBar();
 
@@ -73,7 +73,7 @@ export class TransferService {
         if (this.shutdownRequested || this.shutdownScheduling) {
             return;
         }
-        if (!(await this.kd.setting.general.getShutdownAfterTransfer())) {
+        if (!(await this.kd.setting.get("general.shutdownAfterTransfer"))) {
             return;
         }
         if (this.shutdownRequested || this.shutdownScheduling) {
@@ -88,7 +88,7 @@ export class TransferService {
 
         this.shutdownScheduling = true;
         try {
-            await this.kd.setting.general.setShutdownAfterTransfer(false);
+            await this.kd.setting.set("general.shutdownAfterTransfer", false);
             this.kd.logger.info("TransferService:maybeShutdownAfterTransfer:shutdown");
             if (shutdownSystem()) {
                 this.shutdownRequested = true;

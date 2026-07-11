@@ -850,9 +850,9 @@ export class UploadScheduler {
         return {
             maxWorkers: Math.min(
                 MAX_UPLOAD_IN_FLIGHT_SEGMENTS,
-                await this.kd.setting.transfer.getSegmentPoolSize(),
+                await this.kd.setting.get("transfer.segmentPoolSize"),
             ),
-            maxChunkRetries: await this.kd.setting.transfer.getUploadMaxChunkRetries(),
+            maxChunkRetries: await this.kd.setting.get("transfer.uploadMaxChunkRetries"),
         };
     }
 }

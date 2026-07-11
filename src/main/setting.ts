@@ -17,9 +17,7 @@ import {
     SETTING_THEMES,
     type SettingDefinition,
     type SettingKey,
-    type SettingLogLevel,
     STARTUP_RESUME_MODES,
-    type StartupResumeMode,
     STREAM_WRITE_BATCH_BYTES_DEFAULT,
     STREAM_WRITE_BATCH_BYTES_OPTIONS,
     INFLATE_BUFFER_BYTES_DEFAULT,
@@ -448,55 +446,6 @@ export class Setting {
     public async setSettingBounds(bounds: Bounds) {
         await this.setStoredBounds("settingBounds", bounds);
     }
-
-    general = {
-        getRunOnStartup: async () => await this.get("general.runOnStartup"),
-        setRunOnStartup: async (enabled: boolean) =>
-            await this.set("general.runOnStartup", enabled),
-        getPowerSaveBlockInTransfer: async () => await this.get("general.powerSaveBlockInTransfer"),
-        setPowerSaveBlockInTransfer: async (enabled: boolean) =>
-            await this.set("general.powerSaveBlockInTransfer", enabled),
-        getShutdownAfterTransfer: async () => await this.get("general.shutdownAfterTransfer"),
-        setShutdownAfterTransfer: async (enabled: boolean) =>
-            await this.set("general.shutdownAfterTransfer", enabled),
-        getRunInBackground: async () => await this.get("general.runInBackground"),
-        setRunInBackground: async (enabled: boolean) =>
-            await this.set("general.runInBackground", enabled),
-        getLogLevel: async () => await this.get("general.logLevel"),
-        setLogLevel: async (level: SettingLogLevel) => await this.set("general.logLevel", level),
-    };
-
-    transfer = {
-        getSegmentPoolSize: async () => await this.get("transfer.segmentPoolSize"),
-        setSegmentPoolSize: async (value: number) =>
-            await this.set("transfer.segmentPoolSize", value),
-        getMaxChunkRetries: async () => await this.get("transfer.maxChunkRetries"),
-        setMaxChunkRetries: async (value: number) =>
-            await this.set("transfer.maxChunkRetries", value),
-        getUploadMaxChunkRetries: async () => await this.get("transfer.uploadMaxChunkRetries"),
-        setUploadMaxChunkRetries: async (value: number) =>
-            await this.set("transfer.uploadMaxChunkRetries", value),
-        getStreamWriteBatchBytes: async () => await this.get("transfer.streamWriteBatchBytes"),
-        setStreamWriteBatchBytes: async (value: number) =>
-            await this.set("transfer.streamWriteBatchBytes", value),
-        getInflateBufferBytes: async () => await this.get("transfer.inflateBufferBytes"),
-        setInflateBufferBytes: async (value: number) =>
-            await this.set("transfer.inflateBufferBytes", value),
-        getStartupResumeMode: async () => await this.get("transfer.startupResumeMode"),
-        setStartupResumeMode: async (value: StartupResumeMode) =>
-            await this.set("transfer.startupResumeMode", value),
-        getUploadStartupResumeMode: async () => await this.get("transfer.uploadStartupResumeMode"),
-        setUploadStartupResumeMode: async (value: StartupResumeMode) =>
-            await this.set("transfer.uploadStartupResumeMode", value),
-        getDownloadBandwidthLimitMibps: async () =>
-            await this.get("transfer.downloadBandwidthLimitMibps"),
-        setDownloadBandwidthLimitMibps: async (value: number) =>
-            await this.set("transfer.downloadBandwidthLimitMibps", value),
-        getUploadBandwidthLimitMibps: async () =>
-            await this.get("transfer.uploadBandwidthLimitMibps"),
-        setUploadBandwidthLimitMibps: async (value: number) =>
-            await this.set("transfer.uploadBandwidthLimitMibps", value),
-    };
 }
 
 export default Setting;

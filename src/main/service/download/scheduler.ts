@@ -301,10 +301,10 @@ export class DownloadScheduler {
 
     private async getSettings(): Promise<SchedulerSettings> {
         return {
-            segmentPoolSize: await this.kd.setting.transfer.getSegmentPoolSize(),
-            maxChunkRetries: await this.kd.setting.transfer.getMaxChunkRetries(),
-            streamWriteBatchBytes: await this.kd.setting.transfer.getStreamWriteBatchBytes(),
-            inflateBufferBytes: await this.kd.setting.transfer.getInflateBufferBytes(),
+            segmentPoolSize: await this.kd.setting.get("transfer.segmentPoolSize"),
+            maxChunkRetries: await this.kd.setting.get("transfer.maxChunkRetries"),
+            streamWriteBatchBytes: await this.kd.setting.get("transfer.streamWriteBatchBytes"),
+            inflateBufferBytes: await this.kd.setting.get("transfer.inflateBufferBytes"),
         };
     }
 

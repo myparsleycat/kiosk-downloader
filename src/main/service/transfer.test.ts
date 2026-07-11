@@ -130,11 +130,22 @@ function createService(options: {
     });
     const kd = {
         setting: {
-            general: {
-                getShutdownAfterTransfer,
-                setShutdownAfterTransfer,
-                getPowerSaveBlockInTransfer: vi.fn(async () => false),
-            },
+            get: vi.fn(async (key: string) => {
+                if (key === "general.shutdownAfterTransfer") {
+                    return getShutdownAfterTransfer();
+                }
+                if (key === "general.powerSaveBlockInTransfer") {
+                    return false;
+                }
+                throw new Error(`Unexpected setting get: ${key}`);
+            }),
+            set: vi.fn(async (key: string, value: unknown) => {
+                if (key === "general.shutdownAfterTransfer") {
+                    await setShutdownAfterTransfer(value as boolean);
+                    return;
+                }
+                throw new Error(`Unexpected setting set: ${key}`);
+            }),
         },
         service: {
             download: {
