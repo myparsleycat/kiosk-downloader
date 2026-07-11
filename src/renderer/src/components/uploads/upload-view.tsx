@@ -92,21 +92,15 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const [countOverflowOpen, setCountOverflowOpen] = React.useState(false);
   const countOverflowResolverRef = React.useRef<((confirmed: boolean) => void) | null>(null);
 
-  const expiryDate = React.useMemo(() => new Date(expiresAt), [expiresAt]);
-  const expiryTime = React.useMemo(() => format(expiryDate, "HH:mm:ss"), [expiryDate]);
+  const expiryDate = new Date(expiresAt);
+  const expiryTime = format(expiryDate, "HH:mm:ss");
 
-  const minExpiryMonth = React.useMemo(() => new Date(new Date().setDate(1)), []);
-  const maxExpiryDate = React.useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + MAX_EXPIRY_DAYS);
-    return d;
-  }, []);
-  const maxExpiryMonth = React.useMemo(
-    () => new Date(maxExpiryDate.getFullYear(), maxExpiryDate.getMonth(), 1),
-    [maxExpiryDate],
-  );
+  const minExpiryMonth = new Date(new Date().setDate(1));
+  const maxExpiryDate = new Date();
+  maxExpiryDate.setDate(maxExpiryDate.getDate() + MAX_EXPIRY_DAYS);
+  const maxExpiryMonth = new Date(maxExpiryDate.getFullYear(), maxExpiryDate.getMonth(), 1);
 
-  const mergeDateAndTime = React.useCallback((date: Date, time: string): number => {
+  const mergeDateAndTime = (date: Date, time: string): number => {
     const [h, m, s] = time.split(":").map((n) => {
       const v = Number(n);
       return Number.isNaN(v) ? 0 : v;
@@ -114,27 +108,21 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     const merged = new Date(date);
     merged.setHours(h, m, s, 0);
     return clampExpiry(merged.getTime());
-  }, []);
+  };
 
-  const handleExpiryDateSelect = React.useCallback(
-    (date: Date | undefined) => {
-      if (!date) return;
-      setExpiresAt(mergeDateAndTime(date, expiryTime));
-      setExpiryOpen(false);
-    },
-    [expiryTime, mergeDateAndTime, setExpiresAt],
-  );
+  const handleExpiryDateSelect = (date: Date | undefined) => {
+    if (!date) return;
+    setExpiresAt(mergeDateAndTime(date, expiryTime));
+    setExpiryOpen(false);
+  };
 
-  const handleExpiryTimeChange = React.useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setExpiresAt(mergeDateAndTime(expiryDate, e.target.value || "00:00:00"));
-    },
-    [expiryDate, mergeDateAndTime, setExpiresAt],
-  );
+  const handleExpiryTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setExpiresAt(mergeDateAndTime(expiryDate, e.target.value || "00:00:00"));
+  };
 
   const tree = React.useMemo(() => buildDirTreeFromFiles(files), [files]);
   const totalFiles = files.length;
-  const totalBytes = React.useMemo(() => files.reduce((a, f) => a + f.size, 0), [files]);
+  const totalBytes = files.reduce((a, f) => a + f.size, 0);
 
   const canUpload = totalFiles > 0 && name.trim().length > 0 && !starting;
 
