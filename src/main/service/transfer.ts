@@ -9,6 +9,7 @@ const MIB = 1024 * 1024;
 export class TransferService {
     private isPowerSaveBlockerActive = false;
     private shutdownRequested = false;
+    private shutdownScheduling = false;
 
     public readonly downloadBandwidth = new BandwidthLimiter();
     public readonly uploadBandwidth = new BandwidthLimiter();
@@ -69,10 +70,13 @@ export class TransferService {
     }
 
     public async maybeShutdownAfterTransfer() {
-        if (this.shutdownRequested) {
+        if (this.shutdownRequested || this.shutdownScheduling) {
             return;
         }
         if (!(await this.kd.setting.general.getShutdownAfterTransfer())) {
+            return;
+        }
+        if (this.shutdownRequested || this.shutdownScheduling) {
             return;
         }
         if (
@@ -82,9 +86,15 @@ export class TransferService {
             return;
         }
 
-        this.kd.logger.info("TransferService:maybeShutdownAfterTransfer:shutdown");
-        if (shutdownSystem()) {
-            this.shutdownRequested = true;
+        this.shutdownScheduling = true;
+        try {
+            await this.kd.setting.general.setShutdownAfterTransfer(false);
+            this.kd.logger.info("TransferService:maybeShutdownAfterTransfer:shutdown");
+            if (shutdownSystem()) {
+                this.shutdownRequested = true;
+            }
+        } finally {
+            this.shutdownScheduling = false;
         }
     }
 }

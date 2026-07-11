@@ -66,6 +66,45 @@ describe("TransferService.maybeShutdownAfterTransfer", () => {
     });
 
     it("shuts down once when both sides are idle", async () => {
+        const { service, setShutdownAfterTransfer } = createService({
+            enabled: true,
+            downloadTransfers: [],
+            uploadTransfers: [],
+        });
+
+        await service.maybeShutdownAfterTransfer();
+        await service.maybeShutdownAfterTransfer();
+
+        expect(shutdownSystem).toHaveBeenCalledTimes(1);
+        expect(setShutdownAfterTransfer).toHaveBeenCalledWith(false);
+        expect(setShutdownAfterTransfer.mock.invocationCallOrder[0]).toBeLessThan(
+            shutdownSystem.mock.invocationCallOrder[0],
+        );
+    });
+
+    it("does not schedule shutdown twice while disabling the setting", async () => {
+        const { service, setShutdownAfterTransfer } = createService({
+            enabled: true,
+            downloadTransfers: [],
+            uploadTransfers: [],
+        });
+        let releaseSettingUpdate: () => void;
+        const settingUpdate = new Promise<void>((resolve) => {
+            releaseSettingUpdate = resolve;
+        });
+        setShutdownAfterTransfer.mockImplementation(async () => await settingUpdate);
+
+        const first = service.maybeShutdownAfterTransfer();
+        const second = service.maybeShutdownAfterTransfer();
+        releaseSettingUpdate!();
+        await Promise.all([first, second]);
+
+        expect(setShutdownAfterTransfer).toHaveBeenCalledTimes(1);
+        expect(shutdownSystem).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry when shutdownSystem does not start a shutdown", async () => {
+        shutdownSystem.mockReturnValue(false);
         const { service } = createService({
             enabled: true,
             downloadTransfers: [],
@@ -77,20 +116,6 @@ describe("TransferService.maybeShutdownAfterTransfer", () => {
 
         expect(shutdownSystem).toHaveBeenCalledTimes(1);
     });
-
-    it("retries when shutdownSystem does not start a shutdown", async () => {
-        shutdownSystem.mockReturnValue(false);
-        const { service } = createService({
-            enabled: true,
-            downloadTransfers: [],
-            uploadTransfers: [],
-        });
-
-        await service.maybeShutdownAfterTransfer();
-        await service.maybeShutdownAfterTransfer();
-
-        expect(shutdownSystem).toHaveBeenCalledTimes(2);
-    });
 });
 
 function createService(options: {
@@ -98,11 +123,16 @@ function createService(options: {
     downloadTransfers: unknown[];
     uploadTransfers: unknown[];
 }) {
-    const getShutdownAfterTransfer = vi.fn(async () => options.enabled);
+    let shutdownAfterTransfer = options.enabled;
+    const getShutdownAfterTransfer = vi.fn(async () => shutdownAfterTransfer);
+    const setShutdownAfterTransfer = vi.fn(async (enabled: boolean) => {
+        shutdownAfterTransfer = enabled;
+    });
     const kd = {
         setting: {
             general: {
                 getShutdownAfterTransfer,
+                setShutdownAfterTransfer,
                 getPowerSaveBlockInTransfer: vi.fn(async () => false),
             },
         },
@@ -135,5 +165,6 @@ function createService(options: {
     return {
         service: new TransferService(kd),
         getShutdownAfterTransfer,
+        setShutdownAfterTransfer,
     };
 }
