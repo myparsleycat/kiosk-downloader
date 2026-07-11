@@ -1,3 +1,10 @@
+## [1.4.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.4.0...v1.4.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* **transfer:** disable shutdown setting before shutdown ([f51858f](https://github.com/myparsleycat/kiosk-downloader/commit/f51858f57ae000738d2c0a318157e828af576368))
+
 # [1.4.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.3.0...v1.4.0) (2026-07-10)
 
 
