@@ -1,11 +1,10 @@
 import path from "node:path";
 import type { Readable } from "node:stream";
 
+import { buildDirTreeFromFiles } from "@shared/dir-tree";
 import type {
     CreateUploadPayload,
-    DirNode,
     ExpandPathsResult,
-    FileNode,
     UploadFileProgress,
     UploadItem,
     UploadProgressPatch,
@@ -28,52 +27,6 @@ import { UploadRepository } from "./repository";
 import { UploadScheduler } from "./scheduler";
 import { TurnstileSolver } from "./turnstile";
 import { UPLOAD_SEGMENT_SIZE } from "./types";
-
-function buildDisplayTree(files: { path: string; name: string; size: number }[]): DirNode {
-    const root: DirNode = {
-        type: "dir",
-        id: "root",
-        name: "",
-        entries: [],
-    };
-
-    type MutableDir = DirNode;
-    const dirsByPath = new Map<string, MutableDir>();
-    dirsByPath.set("", root);
-
-    const ensureDir = (segments: string[]): MutableDir => {
-        const dirPath = segments.join("/");
-        const existing = dirsByPath.get(dirPath);
-        if (existing) {
-            return existing;
-        }
-
-        const parent = ensureDir(segments.slice(0, -1));
-        const dir: MutableDir = {
-            type: "dir",
-            id: dirPath,
-            name: segments[segments.length - 1],
-            entries: [],
-        };
-        dirsByPath.set(dirPath, dir);
-        parent.entries.push({ kind: "dir", node: dir });
-        return dir;
-    };
-
-    for (const file of files) {
-        const segments = file.path.split("/").filter(Boolean);
-        const dir = ensureDir(segments.slice(0, -1));
-        const node: FileNode = {
-            type: "file",
-            id: file.path,
-            name: segments[segments.length - 1] ?? file.name,
-            size: file.size,
-        };
-        dir.entries.push({ kind: "file", node });
-    }
-
-    return root;
-}
 
 function toDisplayFile(file: UploadSourceFile): UploadTreeFile {
     return {
@@ -160,7 +113,7 @@ export class UploadService {
     public async create(payload: CreateUploadPayload): Promise<UploadItem | null> {
         try {
             const files = await this.resolveCreateFiles(payload.tree);
-            const tree = buildDisplayTree(files);
+            const tree = buildDirTreeFromFiles(files);
 
             const created = await this.api.createCollection(
                 files,

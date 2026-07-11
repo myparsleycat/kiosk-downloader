@@ -19,7 +19,8 @@ import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Separator } from "@renderer/components/ui/separator";
 import { cn } from "@renderer/lib/utils";
 import { clampExpiry, useUploadDraft } from "@renderer/stores/upload-draft";
-import type { DirNode, ExpandPathsResult, UploadTreeFile } from "@shared/types";
+import { buildDirTreeFromFiles } from "@shared/dir-tree";
+import type { ExpandPathsResult, UploadTreeFile } from "@shared/types";
 import { MAX_UPLOAD_FILES } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import { format, isSameDay } from "date-fns";
@@ -46,47 +47,6 @@ const MAX_DESCRIPTION = 2500;
 const MAX_PASSWORD = 100;
 const MAX_EXPIRY_DAYS = 30;
 const MAX_UPLOAD_BYTES = 50 * 1024 ** 3;
-
-function buildTreeFromFiles(files: UploadTreeFile[]): DirNode {
-  const root: DirNode = { type: "dir", id: "root", name: "", entries: [] };
-
-  type MutableDir = DirNode;
-  const dirsByPath = new Map<string, MutableDir>();
-  dirsByPath.set("", root);
-
-  const ensureDir = (segments: string[]): MutableDir => {
-    const dirPath = segments.join("/");
-    const existing = dirsByPath.get(dirPath);
-    if (existing) return existing;
-
-    const parent = ensureDir(segments.slice(0, -1));
-    const dir: MutableDir = {
-      type: "dir",
-      id: dirPath,
-      name: segments[segments.length - 1],
-      entries: [],
-    };
-    dirsByPath.set(dirPath, dir);
-    parent.entries.push({ kind: "dir", node: dir });
-    return dir;
-  };
-
-  for (const file of files) {
-    const segments = file.path.split("/").filter(Boolean);
-    const dir = ensureDir(segments.slice(0, -1));
-    dir.entries.push({
-      kind: "file",
-      node: {
-        type: "file",
-        id: file.path,
-        name: segments[segments.length - 1] ?? file.name,
-        size: file.size,
-      },
-    });
-  }
-
-  return root;
-}
 
 function mergeUploadFiles(
   existing: UploadTreeFile[],
@@ -172,7 +132,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     [expiryDate, mergeDateAndTime, setExpiresAt],
   );
 
-  const tree = React.useMemo(() => buildTreeFromFiles(files), [files]);
+  const tree = React.useMemo(() => buildDirTreeFromFiles(files), [files]);
   const totalFiles = files.length;
   const totalBytes = React.useMemo(() => files.reduce((a, f) => a + f.size, 0), [files]);
 
