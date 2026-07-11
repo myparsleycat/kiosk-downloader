@@ -79,11 +79,5 @@
     "vitest": "4.1.10",
     "zustand": "^5.0.14"
   },
-  "packageManager": "pnpm@11.10.0",
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "esbuild"
-    ]
-  }
+  "packageManager": "pnpm@11.10.0"
 }
