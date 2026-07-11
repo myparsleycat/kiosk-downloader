@@ -1,13 +1,5 @@
 import { performance } from "node:perf_hooks";
 
-import {
-    SEGMENT_POOL_SIZE_DEFAULT,
-    SEGMENT_POOL_SIZE_MAX,
-    SEGMENT_POOL_SIZE_MIN,
-    UPLOAD_CHUNK_RETRY_DEFAULT,
-    UPLOAD_CHUNK_RETRY_MAX,
-    UPLOAD_CHUNK_RETRY_MIN,
-} from "@shared/settings";
 import { toErrorMessage } from "@shared/utils";
 
 import type { KioskDownloader } from "../..";
@@ -61,28 +53,6 @@ type CollectionWorkState = {
     failed: boolean;
     completing: boolean;
 };
-
-function clampChunkRetries(value: number) {
-    return Math.min(
-        UPLOAD_CHUNK_RETRY_MAX,
-        Math.max(UPLOAD_CHUNK_RETRY_MIN, ensurePositiveInteger(value, UPLOAD_CHUNK_RETRY_DEFAULT)),
-    );
-}
-
-function clampSegmentPoolSize(value: number) {
-    return Math.min(
-        MAX_UPLOAD_IN_FLIGHT_SEGMENTS,
-        SEGMENT_POOL_SIZE_MAX,
-        Math.max(SEGMENT_POOL_SIZE_MIN, ensurePositiveInteger(value, SEGMENT_POOL_SIZE_DEFAULT)),
-    );
-}
-
-function ensurePositiveInteger(value: number, fallback: number) {
-    if (!Number.isFinite(value) || value < 1) {
-        return fallback;
-    }
-    return Math.max(1, Math.floor(value));
-}
 
 function chunkBackoffMs(attempt: number) {
     return 1000 * 2 ** (attempt - 1);
@@ -878,10 +848,11 @@ export class UploadScheduler {
 
     private async getSettings(): Promise<SchedulerSettings> {
         return {
-            maxWorkers: clampSegmentPoolSize(await this.kd.setting.transfer.getSegmentPoolSize()),
-            maxChunkRetries: clampChunkRetries(
-                await this.kd.setting.transfer.getUploadMaxChunkRetries(),
+            maxWorkers: Math.min(
+                MAX_UPLOAD_IN_FLIGHT_SEGMENTS,
+                await this.kd.setting.transfer.getSegmentPoolSize(),
             ),
+            maxChunkRetries: await this.kd.setting.transfer.getUploadMaxChunkRetries(),
         };
     }
 }
