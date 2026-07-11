@@ -9,6 +9,7 @@ import {
     openPath,
     showModal,
     showOpenDialog,
+    showSaveDialog,
     trash,
 } from "@main/service/util";
 import type { MessageBoxOptions, OpenExternalOptions } from "electron";
@@ -30,4 +31,5 @@ export function registerUtilHandlers() {
     rh("util:getClipboardFiles", getClipboardFiles);
     rh("util:fs:metadata", getPathMetadata);
     rh("util:showOpenDialog", showOpenDialog);
+    rh("util:showSaveDialog", showSaveDialog);
 }

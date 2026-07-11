@@ -13,9 +13,11 @@ import {
   DownloadIcon,
   FilterIcon,
   FolderOpenIcon,
+  ImportIcon,
   PauseIcon,
   PlayIcon,
   PlusIcon,
+  ShareIcon,
   Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
@@ -90,10 +92,28 @@ export function DownloadView({
       <div className="flex w-[320px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="flex items-center justify-between gap-2 border-b px-3 py-2.5">
           <span className="cn-font-heading text-sm font-medium">다운로드</span>
-          <Button size="xs" variant="default" onClick={onNewDownload}>
-            <PlusIcon className="size-3" />
-            추가
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() =>
+                runAction(async () => {
+                  const item = await window.api.invoke("download:importCollection");
+                  if (item) {
+                    setSelectedId(item.id);
+                    toast.success("컬렉션을 가져왔습니다");
+                  }
+                })
+              }
+            >
+              <ImportIcon className="size-3" />
+              가져오기
+            </Button>
+            <Button size="xs" variant="default" onClick={onNewDownload}>
+              <PlusIcon className="size-3" />
+              추가
+            </Button>
+          </div>
         </div>
         <div className="flex items-center gap-1 border-b px-3 py-1.5">
           <FilterIcon className="size-3 text-muted-foreground" />
@@ -170,6 +190,22 @@ export function DownloadView({
                     >
                       <FolderOpenIcon />
                       폴더 열기
+                    </ContextMenuItem>
+                    <ContextMenuItem
+                      onClick={() =>
+                        runAction(async () => {
+                          const result = await window.api.invoke(
+                            "download:exportCollection",
+                            item.id,
+                          );
+                          if (result) {
+                            toast.success("컬렉션을 내보냈습니다");
+                          }
+                        })
+                      }
+                    >
+                      <ShareIcon />
+                      내보내기
                     </ContextMenuItem>
                     <ContextMenuSeparator />
                     <ContextMenuItem

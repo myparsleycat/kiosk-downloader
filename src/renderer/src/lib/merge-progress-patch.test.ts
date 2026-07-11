@@ -107,4 +107,33 @@ describe("mergeProgressPatch", () => {
 
         expect(result).toEqual([added, replacement]);
     });
+
+    it("변경된 파일만 교체하고 나머지 파일의 completedElsewhere를 보존한다", () => {
+        const elsewhere: FileProgress = {
+            ...unchanged,
+            status: "completed",
+            downloaded: 10,
+            completedElsewhere: true,
+        };
+        const base = {
+            ...item,
+            progress: { "a.txt": elsewhere, "b.txt": changed },
+        } satisfies DownloadItem;
+        const replacement = { ...changed, downloaded: 10, status: "completed" as const };
+        const patch: DownloadProgressPatch = {
+            id: item.id,
+            progress: { "b.txt": replacement },
+            summary: { transferredBytes: 20, totalBytes: 20, completedFiles: 2, totalFiles: 2 },
+            status: "downloading",
+            speedBps: 20,
+            elapsedMs: 200,
+            updatedAt: 2,
+        };
+
+        const result = mergeProgressPatch(base, patch);
+
+        expect(result.progress["a.txt"]).toBe(elsewhere);
+        expect(result.progress["a.txt"].completedElsewhere).toBe(true);
+        expect(result.progress["b.txt"]).toBe(replacement);
+    });
 });

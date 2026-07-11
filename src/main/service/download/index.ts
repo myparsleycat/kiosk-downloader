@@ -28,15 +28,22 @@ import type {
 } from "./types";
 
 import { toOsProgressTransfer } from "../os-progress-bar";
+import { showOpenDialog, showSaveDialog } from "../util";
 import { KioApiClient } from "./kio-api-client";
 import { DownloadTransferMetrics } from "./metrics";
 import { PartFileWriter, getStagingPartPath } from "./part-file";
 import { DownloadRepository } from "./repository";
 import { DownloadScheduler } from "./scheduler";
+import {
+    MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES,
+    decodeDownloadTransfer,
+    encodeDownloadTransfer,
+} from "./transfer-format";
 import { TransferItApiClient } from "./transfer-it-api-client";
 import { indexZipFromSegments } from "./zip-index";
 
 const CAT_CACHE_TTL_MS = 10 * 60 * 1000;
+const KDX_FILTERS = [{ name: "Kiosk Download Transfer", extensions: ["kdx"] }];
 
 export class DownloadService {
     private readonly api: KioApiClient;
@@ -434,6 +441,151 @@ export class DownloadService {
         }
     }
 
+    public async exportCollection(collectionId: string) {
+        const collection = this.repository.getCollection(collectionId);
+        if (!collection) {
+            throw new Error("Download item not found.");
+        }
+
+        let payload;
+        try {
+            payload = this.repository.buildTransferPayload(collectionId);
+        } catch (error) {
+            this.kd.logger.error(
+                {
+                    channel: "download:exportCollection",
+                    stage: "build",
+                    collectionId,
+                    collectionName: collection.name,
+                    message: toErrorMessage(error),
+                },
+                "DownloadService:exportCollection",
+            );
+            throw error;
+        }
+
+        const saveResult = await showSaveDialog({
+            title: "컬렉션 내보내기",
+            defaultPath: `${collection.name || "collection"}.kdx`,
+            filters: KDX_FILTERS,
+        });
+        if (saveResult.canceled || !saveResult.filePath) {
+            return null;
+        }
+
+        const filePath = saveResult.filePath.endsWith(".kdx")
+            ? saveResult.filePath
+            : `${saveResult.filePath}.kdx`;
+
+        try {
+            await fse.writeFile(filePath, encodeDownloadTransfer(payload));
+        } catch (error) {
+            this.kd.logger.error(
+                {
+                    channel: "download:exportCollection",
+                    stage: "write",
+                    collectionId,
+                    collectionName: collection.name,
+                    filePath,
+                    message: toErrorMessage(error),
+                },
+                "DownloadService:exportCollection",
+            );
+            throw error;
+        }
+
+        return { filePath };
+    }
+
+    public async importCollection() {
+        const openResult = await showOpenDialog({
+            title: "컬렉션 가져오기",
+            properties: ["openFile"],
+            filters: KDX_FILTERS,
+        });
+        if (openResult.canceled || openResult.filePaths.length === 0) {
+            return null;
+        }
+        const transferPath = openResult.filePaths[0];
+
+        let payload;
+        try {
+            if ((await fse.stat(transferPath)).size > MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES) {
+                throw new Error("Transfer file is too large.");
+            }
+            payload = decodeDownloadTransfer(await fse.readFile(transferPath));
+        } catch (error) {
+            this.kd.logger.error(
+                {
+                    channel: "download:importCollection",
+                    stage: "decode",
+                    transferPath,
+                    message: toErrorMessage(error),
+                },
+                "DownloadService:importCollection",
+            );
+            throw error;
+        }
+
+        const lastDownloadPath = await this.kd.setting.get("general.lastDownloadPath");
+        const folderResult = await showOpenDialog({
+            title: "저장 폴더 선택",
+            properties: ["openDirectory", "createDirectory"],
+            defaultPath: lastDownloadPath || undefined,
+        });
+        if (folderResult.canceled || folderResult.filePaths.length === 0) {
+            return null;
+        }
+        const basePath = folderResult.filePaths[0];
+
+        const createCollectionSubfolder = await this.kd.setting.get(
+            "general.createCollectionSubfolder",
+        );
+        const asciiFilenames = payload.collection.asciiFilenames;
+        const savePath = shouldCreateCollectionSubfolder(
+            payload.collection.tree,
+            payload.collection.name,
+            createCollectionSubfolder,
+        )
+            ? path.join(
+                  basePath,
+                  this.kd.lib.fs.sanitizeDownloadPathSegment(payload.collection.name, {
+                      asciiFilenames,
+                      sanitizeString: " ",
+                  }),
+              )
+            : basePath;
+
+        let collectionId: string;
+        try {
+            collectionId = this.repository.insertImportedDownload(payload, savePath);
+            this.repository.ensureCollectionNotExpired(collectionId);
+        } catch (error) {
+            this.kd.logger.error(
+                {
+                    channel: "download:importCollection",
+                    stage: "insert",
+                    transferPath,
+                    savePath,
+                    collectionName: payload.collection.name,
+                    shareId: payload.collection.shareId,
+                    message: toErrorMessage(error),
+                },
+                "DownloadService:importCollection",
+            );
+            throw error;
+        }
+
+        await this.emitUpdate(collectionId);
+        const imported = this.repository.getCollection(collectionId);
+        if (imported?.status === "queued") {
+            void this.scheduler.schedule();
+        }
+        void this.kd.setting.set("general.lastDownloadPath", basePath);
+        const item = this.repository.getItem(collectionId);
+        return item ? this.enrichItem(item) : null;
+    }
+
     private async cleanupOrphanPartFiles() {
         const collections = this.kd.lib.db.all<DownloadCollectionRow>(
             `SELECT "id",
@@ -575,6 +727,7 @@ export class DownloadService {
                 downloaded,
                 size: file.size,
                 selected: file.selected === 1,
+                completedElsewhere: file.completedElsewhere === 1 ? true : undefined,
                 speedBps:
                     file.status === "downloading" &&
                     liveDownloaded < file.size &&

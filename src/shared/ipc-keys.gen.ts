@@ -2,6 +2,8 @@
 
 export const IPC_HANDLER_CHANNELS = [
     "download:create",
+    "download:exportCollection",
+    "download:importCollection",
     "download:includeFile",
     "download:includeFolder",
     "download:list",
@@ -41,6 +43,7 @@ export const IPC_HANDLER_CHANNELS = [
     "util:openPath",
     "util:showModal",
     "util:showOpenDialog",
+    "util:showSaveDialog",
     "window:syncTitleBarOverlay"
 ] as const;
 

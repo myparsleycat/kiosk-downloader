@@ -22,6 +22,7 @@ import {
   LockIcon,
   PauseIcon,
   PlayIcon,
+  ShareIcon,
   Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
@@ -167,6 +168,22 @@ export function DownloadDetail({
             >
               <FolderOpenIcon className="size-3.5" />
               폴더
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              isLoading={pendingAction === "export"}
+              onClick={() =>
+                runAction("export", async () => {
+                  const result = await window.api.invoke("download:exportCollection", item.id);
+                  if (result) {
+                    toast.success("컬렉션을 내보냈습니다");
+                  }
+                })
+              }
+            >
+              <ShareIcon className="size-3.5" />
+              내보내기
             </Button>
             <Button
               variant="ghost"

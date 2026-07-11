@@ -276,7 +276,9 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
         ) : null,
         <div key="status" className="flex justify-end">
           <StatusPill
-            status={selected ? status : "skipped"}
+            status={
+              selected ? (prog?.completedElsewhere ? "completed_elsewhere" : status) : "skipped"
+            }
             pct={pct}
             onClick={errors.length > 0 ? () => onError?.(errors) : undefined}
           />
@@ -950,21 +952,23 @@ function StatusPill({
   onClick?: () => void;
 }) {
   const label =
-    status === "completed"
-      ? "완료"
-      : status === "inflating"
-        ? "해제 중"
-        : status === "downloading"
-          ? `${pct.toFixed(0)}%`
-          : status === "paused"
-            ? "일시정지"
-            : status === "error"
-              ? "오류"
-              : status === "skipped"
-                ? "제외"
-                : "대기";
+    status === "completed_elsewhere"
+      ? "이전완료"
+      : status === "completed"
+        ? "완료"
+        : status === "inflating"
+          ? "해제 중"
+          : status === "downloading"
+            ? `${pct.toFixed(0)}%`
+            : status === "paused"
+              ? "일시정지"
+              : status === "error"
+                ? "오류"
+                : status === "skipped"
+                  ? "제외"
+                  : "대기";
   const cls =
-    status === "completed"
+    status === "completed" || status === "completed_elsewhere"
       ? "text-emerald-600 dark:text-emerald-400"
       : status === "downloading" || status === "inflating"
         ? "text-primary"
@@ -972,11 +976,19 @@ function StatusPill({
           ? "text-destructive"
           : "text-muted-foreground";
   const className = cn(
-    "inline-block w-12 shrink-0 text-right text-xs font-medium tabular-nums",
+    "inline-block shrink-0 text-right text-xs font-medium tabular-nums",
+    status === "completed_elsewhere" ? "min-w-12 w-auto" : "w-12",
     cls,
     onClick && "cursor-pointer underline decoration-dotted underline-offset-2",
   );
-  const title = status === "inflating" ? "압축 해제 중" : onClick ? "오류 상세 보기" : undefined;
+  const title =
+    status === "completed_elsewhere"
+      ? "이전 PC에서 완료됨"
+      : status === "inflating"
+        ? "압축 해제 중"
+        : onClick
+          ? "오류 상세 보기"
+          : undefined;
 
   if (onClick) {
     return (

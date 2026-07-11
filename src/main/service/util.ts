@@ -5,6 +5,7 @@ import path from "node:path";
 import isDev from "@main/lib/isDev";
 import { isPortable } from "@main/lib/isPortable";
 import type { AppStatus, PathMetadata } from "@shared/types";
+import type { SaveDialogOptions } from "electron";
 import {
     BrowserWindow,
     clipboard,
@@ -176,6 +177,10 @@ export async function getPathMetadata(path: string): Promise<PathMetadata> {
 
 export async function showOpenDialog(options: OpenDialogOptions) {
     return dialog.showOpenDialog(options);
+}
+
+export async function showSaveDialog(options: SaveDialogOptions) {
+    return dialog.showSaveDialog(options);
 }
 
 export async function processChunked<T>(
