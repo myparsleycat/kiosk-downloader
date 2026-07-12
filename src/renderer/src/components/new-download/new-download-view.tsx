@@ -23,6 +23,7 @@ import {
 import { cn } from "@renderer/lib/utils";
 import { useNewDownloadDraft } from "@renderer/stores/new-download-draft";
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
+import { applyRenames } from "@shared/dir-tree";
 import {
   getIpcErrorCause,
   isCollectionExpiresNever,
@@ -85,6 +86,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const clearProbeState = useNewDownloadDraft((state) => state.clearProbeState);
   const resetDraft = useNewDownloadDraft((state) => state.resetDraft);
   const hydrateSettings = useNewDownloadDraft((state) => state.hydrateSettings);
+  const renames = useNewDownloadDraft((state) => state.renames);
+  const renameNode = useNewDownloadDraft((state) => state.renameNode);
   const zipPasswords = useNewDownloadDraft((state) => state.zipPasswords);
   const zipLoadingPaths = useNewDownloadDraft((state) => state.zipLoadingPaths);
   const setZipPassword = useNewDownloadDraft((state) => state.setZipPassword);
@@ -263,14 +266,19 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const totalFiles = collection ? countFiles(collection.tree) : 0;
   const totalBytes = collection ? dirTotalSize(collection.tree) : 0;
 
+  const displayTree = React.useMemo(
+    () => (collection ? applyRenames(collection.tree, renames) : undefined),
+    [collection, renames],
+  );
+
   const sortedTree = React.useMemo(
     () =>
-      collection
+      displayTree
         ? sortDir !== "none"
-          ? sortTree(collection.tree, sortField, sortDir)
-          : collection.tree
+          ? sortTree(displayTree, sortField, sortDir)
+          : displayTree
         : undefined,
-    [collection, sortField, sortDir],
+    [displayTree, sortField, sortDir],
   );
 
   const handleSortClick = (field: SortField) => {
@@ -310,6 +318,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         savePath: savePath.trim(),
         selectedPaths: [...selected],
         zipPasswords: Object.keys(zipPasswords).length > 0 ? zipPasswords : undefined,
+        renames: Object.keys(renames).length > 0 ? renames : undefined,
       });
       if (!created) {
         throw new Error("다운로드 항목을 만들지 못했습니다.");
@@ -502,11 +511,16 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
               <div className="p-2">
                 <FileTree
                   mode="selection"
-                  root={sortedTree ?? collection.tree}
+                  root={sortedTree ?? displayTree ?? collection.tree}
                   selected={selected}
                   onToggle={handleToggle}
                   onExpandZip={handleExpandZip}
                   zipLoadingPaths={zipLoadingPaths}
+                  renames={renames}
+                  onRename={(oldPath, newName) => {
+                    const error = renameNode(oldPath, newName);
+                    if (error) toast.error(error);
+                  }}
                 />
               </div>
             </ScrollArea>

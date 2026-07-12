@@ -1,3 +1,4 @@
+import { validateRenameName } from "@shared/name-validation";
 import type { UploadTreeFile } from "@shared/types";
 import { create } from "zustand";
 
@@ -22,6 +23,7 @@ type UploadDraftActions = {
     addFiles: (files: UploadTreeFile[]) => void;
     removeFile: (path: string) => void;
     clearFiles: () => void;
+    renameFile: (oldPath: string, newName: string) => string | null;
     setName: (name: string) => void;
     setDescription: (description: string) => void;
     setPassword: (password: string) => void;
@@ -60,6 +62,34 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
         const files = get().files.filter((f) => f.path !== path && !f.path.startsWith(prefix));
         void window.api.invoke("upload:removeDraftSources", [path]);
         set({ files });
+    },
+
+    renameFile: (oldPath, newName) => {
+        const error = validateRenameName(newName);
+        if (error) return error;
+
+        const slashIndex = oldPath.lastIndexOf("/");
+        const parent = slashIndex === -1 ? "" : oldPath.slice(0, slashIndex);
+        const newPath = parent ? `${parent}/${newName}` : newName;
+
+        const files = get().files;
+        const prefix = `${oldPath}/`;
+        const conflict = files.some((f) => f.path === newPath || f.path.startsWith(`${newPath}/`));
+        if (conflict) return "같은 위치에 이미 존재하는 이름입니다.";
+
+        const updated = files.map((f) => {
+            if (f.path === oldPath) {
+                return { ...f, path: newPath, name: newName };
+            }
+            if (f.path.startsWith(prefix)) {
+                return { ...f, path: `${newPath}${f.path.slice(oldPath.length)}` };
+            }
+            return f;
+        });
+
+        void window.api.invoke("upload:renameDraftSource", oldPath, newPath);
+        set({ files: updated });
+        return null;
     },
 
     clearFiles: () => {

@@ -78,6 +78,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const addFiles = useUploadDraft((s) => s.addFiles);
   const removeFile = useUploadDraft((s) => s.removeFile);
   const clearFiles = useUploadDraft((s) => s.clearFiles);
+  const renameFile = useUploadDraft((s) => s.renameFile);
   const setName = useUploadDraft((s) => s.setName);
   const setDescription = useUploadDraft((s) => s.setDescription);
   const setPassword = useUploadDraft((s) => s.setPassword);
@@ -455,7 +456,15 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
             </div>
             <ScrollArea className="flex-1">
               <div className="p-2">
-                <FileTree mode="selection" root={tree} onDelete={(key) => removeFile(key)} />
+                <FileTree
+                  mode="selection"
+                  root={tree}
+                  onDelete={(key) => removeFile(key)}
+                  onRename={(oldPath, newName) => {
+                    const error = renameFile(oldPath, newName);
+                    if (error) toast.error(error);
+                  }}
+                />
               </div>
             </ScrollArea>
           </>

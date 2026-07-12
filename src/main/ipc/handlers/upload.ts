@@ -47,4 +47,7 @@ export function registerUploadHandlers(kd: KioskDownloader) {
     rh("upload:removeDraftSources", (paths: string[]) =>
         kd.service.upload.removeDraftSources(paths),
     );
+    rh("upload:renameDraftSource", (oldPath: string, newPath: string) =>
+        kd.service.upload.renameDraftSource(oldPath, newPath),
+    );
 }

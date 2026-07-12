@@ -30,6 +30,8 @@ export interface FileTreeSelectionProps {
   selected?: Set<string>;
   onToggle?: (key: string) => void;
   onDelete?: (key: string) => void;
+  onRename?: (oldPath: string, newName: string) => void;
+  renames?: Record<string, string>;
   onExpandZip?: (key: string, zipId: string) => void | Promise<void>;
   zipLoadingPaths?: Set<string>;
 }
@@ -167,14 +169,19 @@ function FileRow({
   const selectionKey = [...pathStack, node.name].join("/");
 
   if (props.mode === "selection") {
+    const renamed = props.renames?.[selectionKey];
+    const label = renamed ?? node.name;
     return (
       <TreeRow
         indent={indent}
         checked={props.selected?.has(selectionKey)}
         onToggle={props.onToggle ? () => props.onToggle?.(selectionKey) : undefined}
         icon={<FileIcon className="size-4 text-muted-foreground" />}
-        label={node.name}
+        label={label}
         rightCols={rightCols}
+        selectionKey={selectionKey}
+        editable={Boolean(props.onRename)}
+        onRename={props.onRename ? (newName) => props.onRename?.(selectionKey, newName) : undefined}
         right={[
           <span key="size" className="text-right text-xs text-muted-foreground">
             {formatSize(node.size)}
@@ -425,8 +432,15 @@ function DirRow({
               className={cn("size-4 text-muted-foreground", expanded && "text-primary")}
             />
           }
-          label={`${node.name}/`}
+          label={`${props.mode === "selection" ? (props.renames?.[dirKey] ?? node.name) : node.name}/`}
           rightCols={rightCols}
+          selectionKey={dirKey}
+          editable={props.mode === "selection" && Boolean(props.onRename)}
+          onRename={
+            props.mode === "selection" && props.onRename
+              ? (newName) => props.onRename?.(dirKey, newName)
+              : undefined
+          }
           right={
             props.mode === "progress"
               ? showDirExcluded
@@ -605,8 +619,15 @@ function ZipRow({
             />
           )
         }
-        label={node.name}
+        label={props.mode === "selection" ? (props.renames?.[zipKey] ?? node.name) : node.name}
         rightCols={rightCols}
+        selectionKey={zipKey}
+        editable={props.mode === "selection" && Boolean(props.onRename)}
+        onRename={
+          props.mode === "selection" && props.onRename
+            ? (newName) => props.onRename?.(zipKey, newName)
+            : undefined
+        }
         right={
           props.mode === "progress"
             ? dirSummary
@@ -640,7 +661,7 @@ function ZipRow({
             depth={depth + 1}
             pathStack={childPathStack}
             rootKey={childRootKey}
-            props={props}
+            props={props.mode === "selection" ? { ...props, onRename: undefined } : props}
             dirSummaries={dirSummaries}
           />
         ))}
@@ -841,6 +862,9 @@ interface TreeRowProps {
   label: string;
   right?: React.ReactNode[];
   rightCols: string[];
+  selectionKey?: string;
+  onRename?: (newName: string) => void;
+  editable?: boolean;
 }
 
 function TreeRow({
@@ -854,22 +878,81 @@ function TreeRow({
   label,
   right,
   rightCols,
+  selectionKey,
+  onRename,
+  editable,
 }: TreeRowProps) {
   const isIndeterminate = checked === "indeterminate";
   const isChecked = checked === true;
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState(label);
+  const expandTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  const clearExpandTimer = () => {
+    if (expandTimerRef.current) {
+      clearTimeout(expandTimerRef.current);
+      expandTimerRef.current = null;
+    }
+  };
+
+  const startEditing = () => {
+    clearExpandTimer();
+    setDraft(label);
+    setEditing(true);
+  };
+
+  const commit = () => {
+    const trimmed = draft.trim();
+    setEditing(false);
+    if (trimmed === label || trimmed === "") return;
+    onRename?.(trimmed);
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setDraft(label);
+  };
+
+  React.useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  React.useEffect(() => clearExpandTimer, []);
+
+  const handleLabelClick = () => {
+    if (!editable || !onRename) {
+      onExpand?.();
+      return;
+    }
+    clearExpandTimer();
+    expandTimerRef.current = setTimeout(() => {
+      expandTimerRef.current = null;
+      onExpand?.();
+    }, 220);
+  };
+
+  const handleLabelDoubleClick = () => {
+    if (!editable || !onRename) return;
+    clearExpandTimer();
+    startEditing();
+  };
 
   return (
     <div
       className={cn(
         "grid h-7 items-center gap-x-1 rounded-md pr-2 hover:bg-muted/50",
         "data-[hovered]:bg-muted",
-        expandable && "cursor-pointer",
+        expandable && !editing && "cursor-pointer",
       )}
       style={{
         paddingLeft: indent,
         gridTemplateColumns: fileTreeGridTemplateColumns(rightCols),
       }}
-      onClick={expandable ? onExpand : undefined}
+      onClick={expandable && !editing ? onExpand : undefined}
     >
       <div className="flex items-center gap-1">
         <span
@@ -899,7 +982,35 @@ function TreeRow({
         {icon}
       </div>
 
-      <span className="truncate">{label}</span>
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="h-5 w-full rounded border bg-background px-1 text-sm outline-none ring-1 ring-ring"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+          onBlur={commit}
+        />
+      ) : (
+        <span
+          className="truncate"
+          data-selection-key={selectionKey}
+          onClick={handleLabelClick}
+          onDoubleClick={handleLabelDoubleClick}
+        >
+          {label}
+        </span>
+      )}
 
       {right &&
         right.map((cell, i) => (

@@ -1,4 +1,5 @@
 import type { Collection } from "@renderer/lib/types";
+import { validateRenameName } from "@shared/name-validation";
 import { create } from "zustand";
 
 type NewDownloadDraftState = {
@@ -10,6 +11,7 @@ type NewDownloadDraftState = {
     passwordInvalid: boolean;
     collection: Collection | null;
     selected: Set<string>;
+    renames: Record<string, string>;
     probedShareId: string | null;
     settingsHydrated: boolean;
     zipPasswords: Record<string, string>;
@@ -26,6 +28,7 @@ type NewDownloadDraftActions = {
     setCollection: (collection: Collection | null) => void;
     setSelected: (selected: Set<string>) => void;
     updateSelected: (updater: (selected: Set<string>) => Set<string>) => void;
+    renameNode: (oldPath: string, newName: string) => string | null;
     setProbedShareId: (probedShareId: string | null) => void;
     setZipPassword: (fileId: string, password: string) => void;
     setZipLoading: (path: string, loading: boolean) => void;
@@ -45,6 +48,7 @@ const draftDefaults = {
     passwordInvalid: false,
     collection: null,
     selected: new Set<string>(),
+    renames: {} as Record<string, string>,
     probedShareId: null,
     settingsHydrated: false,
     zipPasswords: {},
@@ -72,6 +76,43 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
 
     updateSelected: (updater) => set({ selected: updater(get().selected) }),
 
+    renameNode: (oldPath, newName) => {
+        const error = validateRenameName(newName);
+        if (error) return error;
+
+        const slashIndex = oldPath.lastIndexOf("/");
+        const parent = slashIndex === -1 ? "" : oldPath.slice(0, slashIndex);
+        const newPath = parent ? `${parent}/${newName}` : newName;
+
+        const { renames, selected } = get();
+
+        const nextRenames: Record<string, string> = {};
+        for (const [key, value] of Object.entries(renames)) {
+            const resolvedKey =
+                key === oldPath
+                    ? newPath
+                    : key.startsWith(`${oldPath}/`)
+                      ? `${newPath}${key.slice(oldPath.length)}`
+                      : key;
+            nextRenames[resolvedKey] = value;
+        }
+        nextRenames[newPath] = newName;
+
+        const nextSelected = new Set<string>();
+        for (const path of selected) {
+            if (path === oldPath) {
+                nextSelected.add(newPath);
+            } else if (path.startsWith(`${oldPath}/`)) {
+                nextSelected.add(`${newPath}${path.slice(oldPath.length)}`);
+            } else {
+                nextSelected.add(path);
+            }
+        }
+
+        set({ renames: nextRenames, selected: nextSelected });
+        return null;
+    },
+
     setProbedShareId: (probedShareId) => set({ probedShareId }),
 
     setZipPassword: (fileId, password) =>
@@ -94,6 +135,7 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
             passwordInvalid: false,
             collection: null,
             selected: new Set(),
+            renames: {},
             probedShareId: null,
             zipPasswords: {},
             zipLoadingPaths: new Set(),
@@ -107,6 +149,7 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
             passwordInvalid: false,
             collection: null,
             selected: new Set(),
+            renames: {},
             probedShareId: null,
             zipPasswords: {},
             zipLoadingPaths: new Set(),

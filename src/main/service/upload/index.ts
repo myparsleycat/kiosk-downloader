@@ -2,6 +2,7 @@ import path from "node:path";
 import type { Readable } from "node:stream";
 
 import { buildDirTreeFromFiles } from "@shared/dir-tree";
+import { validateRenameName } from "@shared/name-validation";
 import type {
     CreateUploadPayload,
     ExpandPathsResult,
@@ -106,6 +107,37 @@ export class UploadService {
                     this.draftSources.delete(key);
                 }
             }
+        }
+    }
+
+    public renameDraftSource(oldPath: string, newPath: string) {
+        const slashIndex = oldPath.lastIndexOf("/");
+        const newName = slashIndex === -1 ? newPath : newPath.slice(slashIndex + 1);
+        const nameError = validateRenameName(newName);
+        if (nameError) {
+            throw new Error(nameError);
+        }
+
+        const prefix = `${oldPath}/`;
+        const keysToMove: string[] = [];
+        for (const key of this.draftSources.keys()) {
+            if (key === oldPath || key.startsWith(prefix)) {
+                keysToMove.push(key);
+            }
+        }
+
+        for (const key of keysToMove) {
+            const source = this.draftSources.get(key);
+            if (!source) continue;
+            const childPath = key === oldPath ? newPath : `${newPath}${key.slice(oldPath.length)}`;
+            this.draftSources.delete(key);
+            this.draftSources.set(childPath, {
+                ...source,
+                path: childPath,
+                name: childPath.includes("/")
+                    ? childPath.slice(childPath.lastIndexOf("/") + 1)
+                    : childPath,
+            });
         }
     }
 

@@ -1,6 +1,8 @@
 import path from "node:path";
 
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
+import { applyRenames } from "@shared/dir-tree";
+import { validateRenameName } from "@shared/name-validation";
 import { tryParseDownloadUrl } from "@shared/share-url";
 import type {
     CreateDownloadPayload,
@@ -193,11 +195,20 @@ export class DownloadService {
             }
         }
 
+        const renames = payload.renames ?? {};
+        for (const newName of Object.values(renames)) {
+            const error = validateRenameName(newName);
+            if (error) {
+                throw new Error(`download:create rename validation failed: ${error}`);
+            }
+        }
+        const renamedTree = applyRenames(tree, renames);
+
         const enriched: LoadedCollection = {
             ...loaded,
             collection: {
                 ...loaded.collection,
-                tree,
+                tree: renamedTree,
             },
         };
 

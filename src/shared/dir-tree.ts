@@ -1,4 +1,4 @@
-import type { DirNode, FileNode } from "./types";
+import type { DirNode, FileNode, TreeEntry, ZipNode } from "./types";
 
 export function buildDirTreeFromFiles(
     files: { path: string; name: string; size: number }[],
@@ -46,4 +46,61 @@ export function buildDirTreeFromFiles(
     }
 
     return root;
+}
+
+/**
+ * Returns a new tree with node names replaced according to `renames`.
+ *
+ * Keys are tree paths built from the ORIGINAL names (e.g. "folder/file.txt").
+ * Only the leaf segment of a matching path is renamed; descendants inherit the
+ * new prefix automatically through the recursive pathStack. ZIP entry subtrees
+ * (the inner files of a .zip) are left untouched because those names come from
+ * the server-side archive structure and must not be altered by the client.
+ *
+ * The original `root` is never mutated; a fresh `DirNode` is returned.
+ * When `renames` is empty the original `root` is returned as-is.
+ */
+export function applyRenames(root: DirNode, renames: Record<string, string>): DirNode {
+    if (Object.keys(renames).length === 0) return root;
+    return renameDir(root, [], renames);
+}
+
+function renameDir(dir: DirNode, prefix: string[], renames: Record<string, string>): DirNode {
+    const entries: TreeEntry[] = [];
+    for (const entry of dir.entries) {
+        if (entry.kind === "file") {
+            const node = entry.node as FileNode;
+            const path = [...prefix, node.name].join("/");
+            const renamed = renames[path];
+            entries.push({
+                kind: "file",
+                node: renamed ? { ...node, name: renamed } : node,
+            });
+            continue;
+        }
+        if (entry.kind === "zip") {
+            const zip = entry.node as ZipNode;
+            const path = [...prefix, zip.name].join("/");
+            const renamed = renames[path];
+            entries.push({
+                kind: "zip",
+                node: renamed ? { ...zip, name: renamed } : zip,
+            });
+            continue;
+        }
+        const child = entry.node as DirNode;
+        if (child.name === "") {
+            entries.push({ kind: "dir", node: renameDir(child, prefix, renames) });
+            continue;
+        }
+        const path = [...prefix, child.name].join("/");
+        const renamed = renames[path];
+        const newName = renamed ?? child.name;
+        const renamedChild = renameDir(child, [...prefix, newName], renames);
+        entries.push({
+            kind: "dir",
+            node: renamed ? { ...renamedChild, name: renamed } : renamedChild,
+        });
+    }
+    return { ...dir, entries };
 }

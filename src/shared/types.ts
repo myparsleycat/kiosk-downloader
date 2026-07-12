@@ -237,6 +237,7 @@ export interface CreateDownloadPayload {
     savePath: string;
     selectedPaths: string[];
     zipPasswords?: Record<string, string>;
+    renames?: Record<string, string>;
 }
 
 export interface ListZipEntriesPayload {
