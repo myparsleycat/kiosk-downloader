@@ -9,3 +9,5 @@ thumbs.db
 .pnpm-store
 # semantic-release
 .next-version
+# generated
+*.gen.ts
