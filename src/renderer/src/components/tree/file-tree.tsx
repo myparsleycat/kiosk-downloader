@@ -19,6 +19,7 @@ import {
   FolderIcon,
   Loader2Icon,
   PauseIcon,
+  PencilIcon,
   PlayIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -886,18 +887,9 @@ function TreeRow({
   const isChecked = checked === true;
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(label);
-  const expandTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
-  const clearExpandTimer = () => {
-    if (expandTimerRef.current) {
-      clearTimeout(expandTimerRef.current);
-      expandTimerRef.current = null;
-    }
-  };
-
   const startEditing = () => {
-    clearExpandTimer();
     setDraft(label);
     setEditing(true);
   };
@@ -921,30 +913,10 @@ function TreeRow({
     }
   }, [editing]);
 
-  React.useEffect(() => clearExpandTimer, []);
-
-  const handleLabelClick = () => {
-    if (!editable || !onRename) {
-      onExpand?.();
-      return;
-    }
-    clearExpandTimer();
-    expandTimerRef.current = setTimeout(() => {
-      expandTimerRef.current = null;
-      onExpand?.();
-    }, 220);
-  };
-
-  const handleLabelDoubleClick = () => {
-    if (!editable || !onRename) return;
-    clearExpandTimer();
-    startEditing();
-  };
-
   return (
     <div
       className={cn(
-        "grid h-7 items-center gap-x-1 rounded-md pr-2 hover:bg-muted/50",
+        "group/grid grid h-7 items-center gap-x-1 rounded-md pr-2 hover:bg-muted/50",
         "data-[hovered]:bg-muted",
         expandable && !editing && "cursor-pointer",
       )}
@@ -1002,14 +974,31 @@ function TreeRow({
           onBlur={commit}
         />
       ) : (
-        <span
-          className="truncate"
-          data-selection-key={selectionKey}
-          onClick={handleLabelClick}
-          onDoubleClick={handleLabelDoubleClick}
-        >
-          {label}
-        </span>
+        <div className="flex min-w-0 items-center justify-between gap-1">
+          <span
+            className="truncate"
+            data-selection-key={selectionKey}
+            onClick={(e) => {
+              e.stopPropagation();
+              onExpand?.();
+            }}
+          >
+            {label}
+          </span>
+          {editable && onRename && (
+            <button
+              type="button"
+              className="invisible flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground group-hover/grid:visible hover:bg-muted hover:text-foreground"
+              onClick={(e) => {
+                e.stopPropagation();
+                startEditing();
+              }}
+              title="이름 변경"
+            >
+              <PencilIcon className="size-3" />
+            </button>
+          )}
+        </div>
       )}
 
       {right &&
