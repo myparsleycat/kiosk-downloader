@@ -1,4 +1,16 @@
 import { Checkbox } from "@renderer/components/ui/checkbox";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@renderer/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@renderer/components/ui/dropdown-menu";
 import type {
   DirNode,
   DownloadStatus,
@@ -18,11 +30,14 @@ import {
   FileIcon,
   FolderIcon,
   Loader2Icon,
+  MoreHorizontalIcon,
   PauseIcon,
   PlayIcon,
   Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
+
+export type FileTreeRenameKind = "file" | "dir" | "zip";
 
 export interface FileTreeSelectionProps {
   mode: "selection";
@@ -30,6 +45,7 @@ export interface FileTreeSelectionProps {
   selected?: Set<string>;
   onToggle?: (key: string) => void;
   onDelete?: (key: string) => void;
+  onRename?: (key: string, kind: FileTreeRenameKind) => void;
   onExpandZip?: (key: string, zipId: string) => void | Promise<void>;
   zipLoadingPaths?: Set<string>;
 }
@@ -55,7 +71,7 @@ export interface FileTreeError {
 export type FileTreeProps = FileTreeSelectionProps | FileTreeProgressProps;
 
 export const FILE_TREE_RIGHT_COLS: Record<FileTreeProps["mode"], string[]> = {
-  selection: ["4rem", "1.5rem"],
+  selection: ["4rem", "1.5rem", "1.5rem"],
   progress: ["5.5rem", "10rem", "5rem", "2.5rem"],
 };
 
@@ -168,33 +184,16 @@ function FileRow({
 
   if (props.mode === "selection") {
     return (
-      <TreeRow
+      <SelectionTreeRow
         indent={indent}
         checked={props.selected?.has(selectionKey)}
         onToggle={props.onToggle ? () => props.onToggle?.(selectionKey) : undefined}
         icon={<FileIcon className="size-4 text-muted-foreground" />}
         label={node.name}
         rightCols={rightCols}
-        right={[
-          <span key="size" className="text-right text-xs text-muted-foreground">
-            {formatSize(node.size)}
-          </span>,
-          props.onDelete ? (
-            <div key="delete" className="flex items-center justify-end">
-              <button
-                type="button"
-                className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  props.onDelete?.(selectionKey);
-                }}
-                title="삭제"
-              >
-                <Trash2Icon className="size-3" />
-              </button>
-            </div>
-          ) : null,
-        ]}
+        onRename={props.onRename ? () => props.onRename?.(selectionKey, "file") : undefined}
+        onDelete={props.onDelete ? () => props.onDelete?.(selectionKey) : undefined}
+        size={node.size}
       />
     );
   }
@@ -400,36 +399,51 @@ function DirRow({
       ? Math.min(100, (dirSummary.downloaded / dirSummary.totalSize) * 100)
       : 0;
 
+  const handleExpand = () => {
+    if (props.mode === "progress" && progressDownloadId) {
+      toggleStoredExpanded(progressDownloadId, dirKey);
+      return;
+    }
+    setSelectionExpanded((value) => !value);
+  };
+
   return (
     <>
-      {!isRoot && (
-        <TreeRow
-          indent={indent}
-          expandable
-          expanded={expanded}
-          onExpand={() => {
-            if (props.mode === "progress" && progressDownloadId) {
-              toggleStoredExpanded(progressDownloadId, dirKey);
-              return;
+      {!isRoot &&
+        (props.mode === "selection" ? (
+          <SelectionTreeRow
+            indent={indent}
+            expandable
+            expanded={expanded}
+            onExpand={handleExpand}
+            checked={checked}
+            onToggle={dirKey !== "" && props.onToggle ? () => props.onToggle?.(dirKey) : undefined}
+            icon={
+              <FolderIcon
+                className={cn("size-4 text-muted-foreground", expanded && "text-primary")}
+              />
             }
-            setSelectionExpanded((value) => !value);
-          }}
-          checked={checked}
-          onToggle={
-            props.mode === "selection" && dirKey !== "" && props.onToggle
-              ? () => props.onToggle?.(dirKey)
-              : undefined
-          }
-          icon={
-            <FolderIcon
-              className={cn("size-4 text-muted-foreground", expanded && "text-primary")}
-            />
-          }
-          label={`${node.name}/`}
-          rightCols={rightCols}
-          right={
-            props.mode === "progress"
-              ? showDirExcluded
+            label={`${node.name}/`}
+            rightCols={rightCols}
+            onRename={props.onRename ? () => props.onRename?.(dirKey, "dir") : undefined}
+            onDelete={props.onDelete ? () => props.onDelete?.(dirKey) : undefined}
+            size={total}
+          />
+        ) : (
+          <TreeRow
+            indent={indent}
+            expandable
+            expanded={expanded}
+            onExpand={handleExpand}
+            icon={
+              <FolderIcon
+                className={cn("size-4 text-muted-foreground", expanded && "text-primary")}
+              />
+            }
+            label={`${node.name}/`}
+            rightCols={rightCols}
+            right={
+              showDirExcluded
                 ? [
                     <span key="speed" className="invisible text-right text-xs tabular-nums">
                       0 B/s
@@ -486,32 +500,9 @@ function DirRow({
                       null,
                     ]
                   : [null, null, null, null]
-              : [
-                  <span
-                    key="size"
-                    className="text-right text-xs text-muted-foreground tabular-nums"
-                  >
-                    {formatSize(total)}
-                  </span>,
-                  props.onDelete ? (
-                    <div key="delete" className="flex items-center justify-end">
-                      <button
-                        type="button"
-                        className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          props.onDelete?.(dirKey);
-                        }}
-                        title="삭제"
-                      >
-                        <Trash2Icon className="size-3" />
-                      </button>
-                    </div>
-                  ) : null,
-                ]
-          }
-        />
-      )}
+            }
+          />
+        ))}
       {expanded &&
         node.entries.map((e, i) => (
           <TreeNode
@@ -582,34 +573,42 @@ function ZipRow({
     setSelectionExpanded((value) => !value);
   };
 
+  const zipIcon = loading ? (
+    <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+  ) : (
+    <ArchiveIcon
+      className={cn("size-4 text-muted-foreground", expanded && hasEntries && "text-primary")}
+    />
+  );
+
   return (
     <>
-      <TreeRow
-        indent={indent}
-        expandable
-        expanded={expanded && hasEntries}
-        onExpand={handleExpand}
-        checked={checked}
-        onToggle={
-          props.mode === "selection" && props.onToggle ? () => props.onToggle?.(zipKey) : undefined
-        }
-        icon={
-          loading ? (
-            <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
-          ) : (
-            <ArchiveIcon
-              className={cn(
-                "size-4 text-muted-foreground",
-                expanded && hasEntries && "text-primary",
-              )}
-            />
-          )
-        }
-        label={node.name}
-        rightCols={rightCols}
-        right={
-          props.mode === "progress"
-            ? dirSummary
+      {props.mode === "selection" ? (
+        <SelectionTreeRow
+          indent={indent}
+          expandable
+          expanded={expanded && hasEntries}
+          onExpand={handleExpand}
+          checked={checked}
+          onToggle={props.onToggle ? () => props.onToggle?.(zipKey) : undefined}
+          icon={zipIcon}
+          label={node.name}
+          rightCols={rightCols}
+          onRename={props.onRename ? () => props.onRename?.(zipKey, "zip") : undefined}
+          onDelete={props.onDelete ? () => props.onDelete?.(zipKey) : undefined}
+          size={node.size}
+        />
+      ) : (
+        <TreeRow
+          indent={indent}
+          expandable
+          expanded={expanded && hasEntries}
+          onExpand={handleExpand}
+          icon={zipIcon}
+          label={node.name}
+          rightCols={rightCols}
+          right={
+            dirSummary
               ? [
                   null,
                   <span
@@ -624,14 +623,9 @@ function ZipRow({
                   null,
                 ]
               : [null, null, null, null]
-            : [
-                <span key="size" className="text-right text-xs text-muted-foreground tabular-nums">
-                  {formatSize(node.size)}
-                </span>,
-                null,
-              ]
-        }
-      />
+          }
+        />
+      )}
       {expanded &&
         node.entries?.map((e, i) => (
           <TreeNode
@@ -841,6 +835,100 @@ interface TreeRowProps {
   label: string;
   right?: React.ReactNode[];
   rightCols: string[];
+}
+
+function SelectionTreeRow({
+  indent,
+  expandable,
+  expanded,
+  onExpand,
+  checked,
+  onToggle,
+  icon,
+  label,
+  rightCols,
+  size,
+  onRename,
+  onDelete,
+}: {
+  indent: number;
+  expandable?: boolean;
+  expanded?: boolean;
+  onExpand?: () => void;
+  checked?: boolean | "indeterminate";
+  onToggle?: () => void;
+  icon: React.ReactNode;
+  label: string;
+  rightCols: string[];
+  size: number;
+  onRename?: () => void;
+  onDelete?: () => void;
+}) {
+  const row = (
+    <TreeRow
+      indent={indent}
+      expandable={expandable}
+      expanded={expanded}
+      onExpand={onExpand}
+      checked={checked}
+      onToggle={onToggle}
+      icon={icon}
+      label={label}
+      rightCols={rightCols}
+      right={[
+        <span key="size" className="text-right text-xs text-muted-foreground tabular-nums">
+          {formatSize(size)}
+        </span>,
+        onDelete ? (
+          <div key="delete" className="flex items-center justify-end">
+            <button
+              type="button"
+              className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete();
+              }}
+              title="삭제"
+            >
+              <Trash2Icon className="size-3" />
+            </button>
+          </div>
+        ) : null,
+        onRename ? (
+          <div
+            key="more"
+            className="flex items-center justify-end"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="더보기"
+              >
+                <MoreHorizontalIcon className="size-3" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent side="right" align="start" className="min-w-32">
+                <DropdownMenuItem onClick={onRename}>이름 변경</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        ) : null,
+      ]}
+    />
+  );
+
+  if (!onRename) {
+    return row;
+  }
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger className="block w-full">{row}</ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onClick={onRename}>이름 변경</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 }
 
 function TreeRow({

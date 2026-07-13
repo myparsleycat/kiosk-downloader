@@ -109,6 +109,37 @@ export class UploadService {
         }
     }
 
+    public renameDraftSources(from: string, to: string) {
+        if (from === to) {
+            return;
+        }
+        const prefix = `${from}/`;
+        const next = new Map<string, UploadSourceFile>();
+        for (const [key, source] of this.draftSources) {
+            if (key === from) {
+                const name = to.includes("/") ? to.slice(to.lastIndexOf("/") + 1) : to;
+                next.set(to, { ...source, path: to, name });
+                continue;
+            }
+            if (key.startsWith(prefix)) {
+                const nextPath = `${to}/${key.slice(prefix.length)}`;
+                const name = nextPath.includes("/")
+                    ? nextPath.slice(nextPath.lastIndexOf("/") + 1)
+                    : nextPath;
+                next.set(nextPath, { ...source, path: nextPath, name });
+                continue;
+            }
+            next.set(key, source);
+        }
+        if (next.size !== this.draftSources.size) {
+            throw new Error("A file with the same path already exists in the upload draft.");
+        }
+        this.draftSources.clear();
+        for (const [key, source] of next) {
+            this.draftSources.set(key, source);
+        }
+    }
+
     public async create(payload: CreateUploadPayload): Promise<UploadItem | null> {
         return withLoggedError(
             this.kd.logger,

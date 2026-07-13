@@ -1,4 +1,5 @@
 import { FileTree } from "@renderer/components/tree/file-tree";
+import { RenameDialog, type RenameTarget } from "@renderer/components/tree/rename-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,6 +21,7 @@ import { Separator } from "@renderer/components/ui/separator";
 import { cn } from "@renderer/lib/utils";
 import { clampExpiry, mergeDateAndTime, useUploadDraft } from "@renderer/stores/upload-draft";
 import { buildDirTreeFromFiles, validateDirTreeFilePaths } from "@shared/dir-tree";
+import { basename } from "@shared/tree-rename";
 import type { ExpandPathsResult, UploadTreeFile } from "@shared/types";
 import { MAX_UPLOAD_FILES } from "@shared/types";
 import { formatSize } from "@shared/utils";
@@ -77,6 +79,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const expiresAt = useUploadDraft((s) => s.expiresAt);
   const addFiles = useUploadDraft((s) => s.addFiles);
   const removeFile = useUploadDraft((s) => s.removeFile);
+  const renameFile = useUploadDraft((s) => s.renameFile);
   const clearFiles = useUploadDraft((s) => s.clearFiles);
   const setName = useUploadDraft((s) => s.setName);
   const setDescription = useUploadDraft((s) => s.setDescription);
@@ -90,6 +93,8 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const [dragOver, setDragOver] = React.useState(false);
   const [expiryOpen, setExpiryOpen] = React.useState(false);
   const [countOverflowOpen, setCountOverflowOpen] = React.useState(false);
+  const [renameTarget, setRenameTarget] = React.useState<RenameTarget | null>(null);
+  const [renameError, setRenameError] = React.useState<string | null>(null);
   const countOverflowResolverRef = React.useRef<((confirmed: boolean) => void) | null>(null);
 
   const expiryDate = new Date(expiresAt);
@@ -449,12 +454,45 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
             </div>
             <ScrollArea className="flex-1">
               <div className="p-2">
-                <FileTree mode="selection" root={tree} onDelete={(key) => removeFile(key)} />
+                <FileTree
+                  mode="selection"
+                  root={tree}
+                  onDelete={(key) => removeFile(key)}
+                  onRename={(key, kind) => {
+                    setRenameError(null);
+                    setRenameTarget({ path: key, name: basename(key), kind });
+                  }}
+                />
               </div>
             </ScrollArea>
           </>
         )}
       </div>
+
+      <RenameDialog
+        target={renameTarget}
+        error={renameError}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRenameTarget(null);
+            setRenameError(null);
+          }
+        }}
+        onConfirm={(nextName) => {
+          if (!renameTarget) {
+            return;
+          }
+          void (async () => {
+            const error = await renameFile(renameTarget.path, nextName);
+            if (error) {
+              setRenameError(error);
+              return;
+            }
+            setRenameTarget(null);
+            setRenameError(null);
+          })();
+        }}
+      />
     </div>
   );
 }

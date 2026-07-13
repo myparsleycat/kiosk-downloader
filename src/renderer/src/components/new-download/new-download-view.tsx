@@ -1,4 +1,5 @@
 import { FileTree } from "@renderer/components/tree/file-tree";
+import { RenameDialog, type RenameTarget } from "@renderer/components/tree/rename-dialog";
 import { Button } from "@renderer/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@renderer/components/ui/field";
 import {
@@ -32,6 +33,7 @@ import {
   isZipPasswordRequiredError,
 } from "@shared/download-errors";
 import { tryDecodeShareUrlBase64, tryParseDownloadUrl } from "@shared/share-url";
+import { applyRenamesToTree, basename } from "@shared/tree-rename";
 import { formatSize } from "@shared/utils";
 import { setZipEntries } from "@shared/zip-tree";
 import {
@@ -87,8 +89,10 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const hydrateSettings = useNewDownloadDraft((state) => state.hydrateSettings);
   const zipPasswords = useNewDownloadDraft((state) => state.zipPasswords);
   const zipLoadingPaths = useNewDownloadDraft((state) => state.zipLoadingPaths);
+  const renames = useNewDownloadDraft((state) => state.renames);
   const setZipPassword = useNewDownloadDraft((state) => state.setZipPassword);
   const setZipLoading = useNewDownloadDraft((state) => state.setZipLoading);
+  const renameNode = useNewDownloadDraft((state) => state.renameNode);
 
   const [loading, setLoading] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
@@ -100,6 +104,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     invalid: boolean;
   } | null>(null);
   const [zipPasswordInput, setZipPasswordInput] = React.useState("");
+  const [renameTarget, setRenameTarget] = React.useState<RenameTarget | null>(null);
+  const [renameError, setRenameError] = React.useState<string | null>(null);
 
   const loadSeqRef = React.useRef(0);
   const urlInputRef = React.useRef<HTMLInputElement>(null);
@@ -299,9 +305,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     void loadCollection(trimmedUrl);
   }, [clearProbeState, collection?.shareId, loadCollection, passwordRequired, probedShareId, url]);
 
+  const displayTree = React.useMemo(
+    () => (collection ? applyRenamesToTree(collection.tree, renames) : null),
+    [collection, renames],
+  );
+
   const handleToggle = (key: string) => {
-    if (!collection) return;
-    updateSelected((prev) => toggleTreeSelection(prev, key, collection.tree));
+    if (!displayTree) return;
+    updateSelected((prev) => toggleTreeSelection(prev, key, displayTree));
   };
 
   const expandZip = React.useCallback(
@@ -349,20 +360,18 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     void expandZip(zipPath, fileId, zipPasswords[fileId]);
   };
 
-  const summary = collection
-    ? summarizeSelection(selected, collection.tree)
-    : { count: 0, bytes: 0 };
-  const totalFiles = collection ? countFiles(collection.tree) : 0;
-  const totalBytes = collection ? dirTotalSize(collection.tree) : 0;
+  const summary = displayTree ? summarizeSelection(selected, displayTree) : { count: 0, bytes: 0 };
+  const totalFiles = displayTree ? countFiles(displayTree) : 0;
+  const totalBytes = displayTree ? dirTotalSize(displayTree) : 0;
 
   const sortedTree = React.useMemo(
     () =>
-      collection
+      displayTree
         ? sortDir !== "none"
-          ? sortTree(collection.tree, sortField, sortDir)
-          : collection.tree
+          ? sortTree(displayTree, sortField, sortDir)
+          : displayTree
         : undefined,
-    [collection, sortField, sortDir],
+    [displayTree, sortField, sortDir],
   );
 
   const handleSortClick = (field: SortField) => {
@@ -379,9 +388,10 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const canStart =
     collectionSynced && summary.count > 0 && savePath.trim().length > 0 && passwordInvalid !== true;
   const effectiveSavePath =
+    displayTree &&
     collection &&
     savePath.trim() &&
-    shouldCreateCollectionSubfolder(collection.tree, collection.name, createCollectionSubfolder)
+    shouldCreateCollectionSubfolder(displayTree, collection.name, createCollectionSubfolder)
       ? `${savePath.trim().replace(/[/\\]+$/, "")}/${collection.name}`
       : null;
 
@@ -402,6 +412,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         savePath: savePath.trim(),
         selectedPaths: [...selected],
         zipPasswords: Object.keys(zipPasswords).length > 0 ? zipPasswords : undefined,
+        renames: Object.keys(renames).length > 0 ? renames : undefined,
       });
       if (!created) {
         throw new Error("다운로드 항목을 만들지 못했습니다.");
@@ -594,11 +605,15 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
               <div className="p-2">
                 <FileTree
                   mode="selection"
-                  root={sortedTree ?? collection.tree}
+                  root={sortedTree ?? displayTree ?? collection.tree}
                   selected={selected}
                   onToggle={handleToggle}
                   onExpandZip={handleExpandZip}
                   zipLoadingPaths={zipLoadingPaths}
+                  onRename={(key, kind) => {
+                    setRenameError(null);
+                    setRenameTarget({ path: key, name: basename(key), kind });
+                  }}
                 />
               </div>
             </ScrollArea>
@@ -607,6 +622,29 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           <EmptyState loading={loading} />
         )}
       </div>
+
+      <RenameDialog
+        target={renameTarget}
+        error={renameError}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRenameTarget(null);
+            setRenameError(null);
+          }
+        }}
+        onConfirm={(nextName) => {
+          if (!renameTarget || !displayTree) {
+            return;
+          }
+          const error = renameNode(renameTarget.path, nextName, displayTree);
+          if (error) {
+            setRenameError(error);
+            return;
+          }
+          setRenameTarget(null);
+          setRenameError(null);
+        }}
+      />
 
       <Dialog
         open={zipPasswordPrompt !== null}
