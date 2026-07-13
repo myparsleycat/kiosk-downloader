@@ -8,6 +8,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@renderer/components/ui/alert-dialog";
+import { Button } from "@renderer/components/ui/button";
 import { Input } from "@renderer/components/ui/input";
 import { Label } from "@renderer/components/ui/label";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
@@ -29,6 +30,9 @@ import {
   CHUNK_RETRY_DEFAULT,
   CHUNK_RETRY_MAX,
   CHUNK_RETRY_MIN,
+  COLLECTION_PASSWORD_LIST_MAX,
+  INFLATE_BUFFER_BYTES_DEFAULT,
+  INFLATE_BUFFER_BYTES_OPTIONS,
   SEGMENT_POOL_SIZE_DEFAULT,
   SEGMENT_POOL_SIZE_MAX,
   SEGMENT_POOL_SIZE_MIN,
@@ -40,8 +44,6 @@ import {
   type StartupResumeMode,
   STREAM_WRITE_BATCH_BYTES_DEFAULT,
   STREAM_WRITE_BATCH_BYTES_OPTIONS,
-  INFLATE_BUFFER_BYTES_DEFAULT,
-  INFLATE_BUFFER_BYTES_OPTIONS,
   UPLOAD_CHUNK_RETRY_DEFAULT,
   UPLOAD_CHUNK_RETRY_MAX,
   UPLOAD_CHUNK_RETRY_MIN,
@@ -52,10 +54,13 @@ import {
   CpuIcon,
   DownloadIcon,
   FolderOpenIcon,
+  LockIcon,
   MoonIcon,
+  PlusIcon,
   PowerIcon,
   SettingsIcon,
   UploadIcon,
+  XIcon,
   ZapIcon,
 } from "lucide-react";
 import * as React from "react";
@@ -68,6 +73,8 @@ const SETTING_KEYS = [
   "general.asciiFilenames",
   "general.powerSaveBlockInTransfer",
   "general.shutdownAfterTransfer",
+  "general.autoTryCollectionPasswords",
+  "general.collectionPasswordList",
   "general.logLevel",
   "general.theme",
   "transfer.segmentPoolSize",
@@ -92,6 +99,8 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.asciiFilenames": false,
   "general.powerSaveBlockInTransfer": true,
   "general.shutdownAfterTransfer": false,
+  "general.autoTryCollectionPasswords": false,
+  "general.collectionPasswordList": [],
   "general.logLevel": "error",
   "general.theme": "system",
   "transfer.segmentPoolSize": SEGMENT_POOL_SIZE_DEFAULT,
@@ -309,6 +318,25 @@ export function SettingsView() {
                 onCheckedChange={(value) => void setSetting("general.asciiFilenames", value)}
               />
             }
+          />
+        </Section>
+
+        <Section icon={<LockIcon className="size-3.5" />} title="컬렉션 비밀번호">
+          <SettingRow
+            title="비밀번호 자동 시도"
+            description="보호된 컬렉션 로드 시 등록된 비밀번호를 병렬로 시도합니다."
+            control={
+              <Switch
+                checked={settings["general.autoTryCollectionPasswords"]}
+                onCheckedChange={(value) =>
+                  void setSetting("general.autoTryCollectionPasswords", value)
+                }
+              />
+            }
+          />
+          <CollectionPasswordListSetting
+            value={settings["general.collectionPasswordList"]}
+            onChange={(value) => void setSetting("general.collectionPasswordList", value)}
           />
         </Section>
 
@@ -631,6 +659,122 @@ function SettingRow({
         <span className="text-xs text-muted-foreground">{description}</span>
       </div>
       <div className="shrink-0">{control}</div>
+    </div>
+  );
+}
+
+type PasswordRow = { id: string; value: string };
+
+function createPasswordRow(value = ""): PasswordRow {
+  return { id: crypto.randomUUID(), value };
+}
+
+function CollectionPasswordListSetting({
+  value,
+  onChange,
+}: {
+  value: string[];
+  onChange: (value: string[]) => void;
+}) {
+  const [items, setItems] = React.useState<PasswordRow[]>(() =>
+    value.map((entry) => createPasswordRow(entry)),
+  );
+  const itemsRef = React.useRef(items);
+  const focusedCountRef = React.useRef(0);
+  itemsRef.current = items;
+
+  React.useEffect(() => {
+    if (focusedCountRef.current > 0) {
+      return;
+    }
+
+    setItems((prev) => {
+      if (
+        prev.length === value.length &&
+        prev.every((item, index) => item.value === value[index])
+      ) {
+        return prev;
+      }
+
+      return value.map((entry, index) =>
+        prev[index]?.value === entry
+          ? prev[index]
+          : { id: prev[index]?.id ?? crypto.randomUUID(), value: entry },
+      );
+    });
+  }, [value]);
+
+  const commit = (next: PasswordRow[]) => {
+    itemsRef.current = next;
+    setItems(next);
+    onChange(next.map((item) => item.value));
+  };
+
+  return (
+    <div className="flex flex-col gap-2 p-3.5">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <Label className="text-sm">자동 시도 비밀번호</Label>
+        <span className="text-xs text-muted-foreground">
+          최대 {COLLECTION_PASSWORD_LIST_MAX}개까지 저장·표시됩니다.
+        </span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {items.map((item) => (
+          <div key={item.id} className="flex items-center gap-1.5">
+            <Input
+              value={item.value}
+              placeholder="비밀번호"
+              className="h-8"
+              onFocus={() => {
+                focusedCountRef.current += 1;
+              }}
+              onChange={(event) => {
+                commit(
+                  itemsRef.current.map((row) =>
+                    row.id === item.id ? { ...row, value: event.target.value } : row,
+                  ),
+                );
+              }}
+              onBlur={() => {
+                focusedCountRef.current = Math.max(0, focusedCountRef.current - 1);
+                if (focusedCountRef.current === 0) {
+                  onChange(itemsRef.current.map((row) => row.value));
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              onClick={() => commit(itemsRef.current.filter((row) => row.id !== item.id))}
+            >
+              <XIcon className="size-3.5" />
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-fit"
+          disabled={items.length >= COLLECTION_PASSWORD_LIST_MAX}
+          onClick={() => {
+            if (itemsRef.current.length >= COLLECTION_PASSWORD_LIST_MAX) {
+              return;
+            }
+            setItems([...itemsRef.current, createPasswordRow()]);
+          }}
+        >
+          <PlusIcon className="size-3.5" />
+          추가
+        </Button>
+      </div>
     </div>
   );
 }

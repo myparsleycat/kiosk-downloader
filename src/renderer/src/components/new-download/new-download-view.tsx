@@ -113,6 +113,85 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     requestAnimationFrame(() => urlInputRef.current?.focus());
   }, []);
 
+  const tryAutoCollectionPasswords = React.useCallback(
+    async (trimmedUrl: string, shareId: string, seq: number) => {
+      try {
+        const settings = await window.api.invoke("setting:getMany", [
+          "general.autoTryCollectionPasswords",
+          "general.collectionPasswordList",
+        ]);
+
+        if (seq !== loadSeqRef.current) {
+          return true;
+        }
+
+        if (!settings["general.autoTryCollectionPasswords"]) {
+          return false;
+        }
+
+        const candidates = settings["general.collectionPasswordList"].filter(Boolean);
+        if (candidates.length === 0) {
+          return false;
+        }
+
+        const winner = await new Promise<{
+          loaded: Awaited<ReturnType<typeof window.api.invoke<"download:loadCollection">>>;
+          password: string;
+        } | null>((resolve) => {
+          let pending = candidates.length;
+          let settled = false;
+
+          for (const candidate of candidates) {
+            void window.api
+              .invoke("download:loadCollection", {
+                url: trimmedUrl,
+                password: candidate,
+              })
+              .then((loaded) => {
+                if (settled) {
+                  return;
+                }
+                settled = true;
+                resolve({ loaded, password: candidate });
+              })
+              .catch(() => {
+                pending -= 1;
+                if (!settled && pending === 0) {
+                  resolve(null);
+                }
+              });
+          }
+        });
+
+        if (seq !== loadSeqRef.current) {
+          return true;
+        }
+
+        if (!winner) {
+          return false;
+        }
+
+        setPassword(winner.password);
+        setCollection(winner.loaded);
+        setSelected(collectAllPaths(winner.loaded.tree));
+        setPasswordRequired(false);
+        setPasswordInvalid(false);
+        setProbedShareId(shareId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [
+      setCollection,
+      setPassword,
+      setPasswordInvalid,
+      setPasswordRequired,
+      setProbedShareId,
+      setSelected,
+    ],
+  );
+
   const loadCollection = React.useCallback(
     async (trimmedUrl: string, loadPassword?: string) => {
       const parsed = tryParseDownloadUrl(trimmedUrl);
@@ -155,6 +234,12 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           setProbedShareId(parsed.id);
           setCollection(null);
           setSelected(new Set());
+
+          const autoTried = await tryAutoCollectionPasswords(trimmedUrl, parsed.id, seq);
+          if (autoTried || seq !== loadSeqRef.current) {
+            return;
+          }
+
           requestAnimationFrame(() => passwordInputRef.current?.focus());
           return;
         }
@@ -172,7 +257,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         }
       }
     },
-    [setCollection, setPasswordInvalid, setPasswordRequired, setProbedShareId, setSelected],
+    [
+      setCollection,
+      setPasswordInvalid,
+      setPasswordRequired,
+      setProbedShareId,
+      setSelected,
+      tryAutoCollectionPasswords,
+    ],
   );
 
   const verifyPassword = React.useCallback(() => {

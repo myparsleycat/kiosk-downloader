@@ -17,6 +17,8 @@ export interface AppSettings {
     "general.theme": SettingTheme;
     "general.powerSaveBlockInTransfer": boolean;
     "general.shutdownAfterTransfer": boolean;
+    "general.autoTryCollectionPasswords": boolean;
+    "general.collectionPasswordList": string[];
     "transfer.segmentPoolSize": number;
     "transfer.maxChunkRetries": number;
     "transfer.uploadMaxChunkRetries": number;
@@ -62,6 +64,8 @@ export const INFLATE_BUFFER_BYTES_DEFAULT = 8 * 1024 * 1024;
 export const BANDWIDTH_LIMIT_MIBPS_MIN = 0;
 export const BANDWIDTH_LIMIT_MIBPS_MAX = 1024;
 export const BANDWIDTH_LIMIT_MIBPS_DEFAULT = 0;
+
+export const COLLECTION_PASSWORD_LIST_MAX = 10;
 
 export type SettingKey = keyof AppSettings;
 
@@ -119,6 +123,16 @@ export const APP_SETTINGS = {
         publicKey: "general.shutdownAfterTransfer",
         scope: "general",
         storageKey: "shutdownAfterTransfer",
+    },
+    "general.autoTryCollectionPasswords": {
+        publicKey: "general.autoTryCollectionPasswords",
+        scope: "general",
+        storageKey: "autoTryCollectionPasswords",
+    },
+    "general.collectionPasswordList": {
+        publicKey: "general.collectionPasswordList",
+        scope: "general",
+        storageKey: "collectionPasswordList",
     },
     "transfer.segmentPoolSize": {
         publicKey: "transfer.segmentPoolSize",

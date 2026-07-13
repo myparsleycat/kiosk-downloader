@@ -7,6 +7,7 @@ import {
     CHUNK_RETRY_DEFAULT,
     CHUNK_RETRY_MAX,
     CHUNK_RETRY_MIN,
+    COLLECTION_PASSWORD_LIST_MAX,
     UPLOAD_CHUNK_RETRY_DEFAULT,
     UPLOAD_CHUNK_RETRY_MAX,
     UPLOAD_CHUNK_RETRY_MIN,
@@ -95,6 +96,41 @@ function parseInflateBufferBytes(value: string | null | undefined) {
 
 function normalizeDownloadPath(value: string) {
     return value.trim();
+}
+
+function parseCollectionPasswordList(value: string | null | undefined): string[] {
+    if (value == null || value === "") {
+        return [];
+    }
+
+    try {
+        const parsed: unknown = JSON.parse(value);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+        return normalizeCollectionPasswordList(parsed.filter((item) => typeof item === "string"));
+    } catch {
+        return [];
+    }
+}
+
+function normalizeCollectionPasswordList(value: string[]) {
+    const seen = new Set<string>();
+    const result: string[] = [];
+
+    for (const item of value) {
+        const trimmed = item.trim();
+        if (!trimmed || seen.has(trimmed)) {
+            continue;
+        }
+        seen.add(trimmed);
+        result.push(trimmed);
+        if (result.length >= COLLECTION_PASSWORD_LIST_MAX) {
+            break;
+        }
+    }
+
+    return result;
 }
 
 export class Setting {
@@ -194,6 +230,19 @@ export class Setting {
                 getDefault: () => false,
                 fromStored: (value) => parseBooleanSetting(value, false),
                 toStored: (value) => String(value),
+            },
+            "general.autoTryCollectionPasswords": {
+                definition: APP_SETTINGS["general.autoTryCollectionPasswords"],
+                getDefault: () => false,
+                fromStored: (value) => parseBooleanSetting(value, false),
+                toStored: (value) => String(value),
+            },
+            "general.collectionPasswordList": {
+                definition: APP_SETTINGS["general.collectionPasswordList"],
+                getDefault: () => [],
+                fromStored: parseCollectionPasswordList,
+                toStored: (value) => JSON.stringify(value),
+                normalize: normalizeCollectionPasswordList,
             },
             "transfer.segmentPoolSize": {
                 definition: APP_SETTINGS["transfer.segmentPoolSize"],
