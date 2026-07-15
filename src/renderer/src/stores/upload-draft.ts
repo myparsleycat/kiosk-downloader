@@ -95,7 +95,6 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
             return "같은 위치에 동일한 이름이 이미 있습니다.";
         }
         const toPath = joinPath(parentPath(path), trimmed);
-        const nextFiles = renameUploadFiles(files, path, trimmed);
 
         try {
             await window.api.invoke("upload:renameDraftSources", { from: path, to: toPath });
@@ -103,6 +102,7 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
             return error instanceof Error ? error.message : "이름 변경에 실패했습니다.";
         }
 
+        const nextFiles = renameUploadFiles(get().files, path, trimmed);
         const currentName = get().name;
         const topSegment = path.split("/")[0] ?? "";
         const isRootRename = parentPath(path) === "";

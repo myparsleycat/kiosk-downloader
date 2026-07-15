@@ -95,6 +95,8 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const [countOverflowOpen, setCountOverflowOpen] = React.useState(false);
   const [renameTarget, setRenameTarget] = React.useState<RenameTarget | null>(null);
   const [renameError, setRenameError] = React.useState<string | null>(null);
+  const renameTargetRef = React.useRef(renameTarget);
+  renameTargetRef.current = renameTarget;
   const countOverflowResolverRef = React.useRef<((confirmed: boolean) => void) | null>(null);
 
   const expiryDate = new Date(expiresAt);
@@ -482,8 +484,12 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
           if (!renameTarget) {
             return;
           }
+          const submittedPath = renameTarget.path;
           void (async () => {
-            const error = await renameFile(renameTarget.path, nextName);
+            const error = await renameFile(submittedPath, nextName);
+            if (renameTargetRef.current?.path !== submittedPath) {
+              return;
+            }
             if (error) {
               setRenameError(error);
               return;

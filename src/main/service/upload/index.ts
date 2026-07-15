@@ -132,7 +132,7 @@ export class UploadService {
             next.set(key, source);
         }
         if (next.size !== this.draftSources.size) {
-            throw new Error("A file with the same path already exists in the upload draft.");
+            throw new Error("같은 위치에 동일한 이름의 파일이 이미 존재합니다.");
         }
         this.draftSources.clear();
         for (const [key, source] of next) {
