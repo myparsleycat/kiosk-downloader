@@ -1,3 +1,19 @@
+# [1.7.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.6.0...v1.7.0) (2026-07-15)
+
+
+### Bug Fixes
+
+* **downloads:** hide export for completed items ([f0e0794](https://github.com/myparsleycat/kiosk-downloader/commit/f0e0794969e7dfaf09a90aa7ff5c98c3c9ad8384))
+* **ipc:** add upload:renameDraftSources contract channel ([810d996](https://github.com/myparsleycat/kiosk-downloader/commit/810d9963141ed088eb9388f298d716d5caf5daf1))
+* **updater:** prevent release notes overflow in update dialog ([c099abe](https://github.com/myparsleycat/kiosk-downloader/commit/c099abeea63b487da047af4e7ca657a33067daba))
+* **upload:** harden draft rename error handling ([464e704](https://github.com/myparsleycat/kiosk-downloader/commit/464e704f607d83b8a4e40719ed8fd1f5a2fcdb7c))
+
+
+### Features
+
+* add clear completed transfers button ([a47c070](https://github.com/myparsleycat/kiosk-downloader/commit/a47c070d9150f6c29e02102f47da87851302d724))
+* **tree:** rename files and folders before download or upload ([611d445](https://github.com/myparsleycat/kiosk-downloader/commit/611d445942da914c5ccfbd59ce72f4454fdc1da3))
+
 # [1.6.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.5.0...v1.6.0) (2026-07-15)
 
 
