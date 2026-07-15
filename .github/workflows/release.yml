@@ -175,3 +175,26 @@ jobs:
                     exit 1
                   fi
                   gh release upload "v${VERSION}" "${assets[@]}" --clobber
+
+    back-merge:
+        name: Back-merge main into dev
+        needs: [version, release]
+        if: needs.version.outputs.should_release == 'true'
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Merge main into dev
+              shell: bash
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git fetch origin main dev
+                  git checkout dev
+                  git merge --no-ff origin/main -m "chore: back-merge main into dev [skip ci]"
+                  git push origin dev
