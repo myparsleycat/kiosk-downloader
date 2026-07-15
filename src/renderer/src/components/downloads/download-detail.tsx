@@ -22,6 +22,7 @@ import {
   LockIcon,
   PauseIcon,
   PlayIcon,
+  ShareIcon,
   Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
@@ -101,7 +102,6 @@ export function DownloadDetail({
 
   return (
     <div className="flex h-full flex-col">
-      {/* header */}
       <div className="flex flex-col gap-3 border-b p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -169,6 +169,22 @@ export function DownloadDetail({
               폴더
             </Button>
             <Button
+              variant="outline"
+              size="sm"
+              isLoading={pendingAction === "export"}
+              onClick={() =>
+                runAction("export", async () => {
+                  const result = await window.api.invoke("download:exportCollection", item.id);
+                  if (result) {
+                    toast.success("컬렉션을 내보냈습니다");
+                  }
+                })
+              }
+            >
+              <ShareIcon className="size-3.5" />
+              내보내기
+            </Button>
+            <Button
               variant="ghost"
               size="icon-sm"
               isLoading={removing}
@@ -180,7 +196,6 @@ export function DownloadDetail({
           </div>
         </div>
 
-        {/* total progress */}
         <div className="flex flex-col gap-1">
           <Progress value={pct}>
             <ProgressLabel>{statusLabel(status)}</ProgressLabel>
@@ -207,7 +222,6 @@ export function DownloadDetail({
         </div>
       </div>
 
-      {/* file tree */}
       <ProgressSortHeader field={sortField} dir={sortDir} onSort={handleSortClick} />
       <ScrollArea className="flex-1">
         <div className="p-2">
@@ -243,7 +257,6 @@ export function DownloadDetail({
         </div>
       </ScrollArea>
 
-      {/* save path */}
       <div className="border-t p-3">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <FolderOpenIcon className="size-3.5" />

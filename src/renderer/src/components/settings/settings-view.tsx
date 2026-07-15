@@ -8,6 +8,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@renderer/components/ui/alert-dialog";
+import { Button } from "@renderer/components/ui/button";
 import { Input } from "@renderer/components/ui/input";
 import { Label } from "@renderer/components/ui/label";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
@@ -21,14 +22,20 @@ import {
 } from "@renderer/components/ui/select";
 import { Separator } from "@renderer/components/ui/separator";
 import { Switch } from "@renderer/components/ui/switch";
+import { useUpdaterStore } from "@renderer/stores/updater";
 import {
   type AppSettings,
+  AUTO_UPDATE_MODES,
+  type AutoUpdateMode,
   BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   BANDWIDTH_LIMIT_MIBPS_MAX,
   BANDWIDTH_LIMIT_MIBPS_MIN,
   CHUNK_RETRY_DEFAULT,
   CHUNK_RETRY_MAX,
   CHUNK_RETRY_MIN,
+  COLLECTION_PASSWORD_LIST_MAX,
+  INFLATE_BUFFER_BYTES_DEFAULT,
+  INFLATE_BUFFER_BYTES_OPTIONS,
   SEGMENT_POOL_SIZE_DEFAULT,
   SEGMENT_POOL_SIZE_MAX,
   SEGMENT_POOL_SIZE_MIN,
@@ -40,8 +47,6 @@ import {
   type StartupResumeMode,
   STREAM_WRITE_BATCH_BYTES_DEFAULT,
   STREAM_WRITE_BATCH_BYTES_OPTIONS,
-  INFLATE_BUFFER_BYTES_DEFAULT,
-  INFLATE_BUFFER_BYTES_OPTIONS,
   UPLOAD_CHUNK_RETRY_DEFAULT,
   UPLOAD_CHUNK_RETRY_MAX,
   UPLOAD_CHUNK_RETRY_MIN,
@@ -49,13 +54,17 @@ import {
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import {
+  ArrowUpCircleIcon,
   CpuIcon,
   DownloadIcon,
   FolderOpenIcon,
+  LockIcon,
   MoonIcon,
+  PlusIcon,
   PowerIcon,
   SettingsIcon,
   UploadIcon,
+  XIcon,
   ZapIcon,
 } from "lucide-react";
 import * as React from "react";
@@ -68,6 +77,9 @@ const SETTING_KEYS = [
   "general.asciiFilenames",
   "general.powerSaveBlockInTransfer",
   "general.shutdownAfterTransfer",
+  "general.autoUpdateMode",
+  "general.autoTryCollectionPasswords",
+  "general.collectionPasswordList",
   "general.logLevel",
   "general.theme",
   "transfer.segmentPoolSize",
@@ -92,6 +104,9 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.asciiFilenames": false,
   "general.powerSaveBlockInTransfer": true,
   "general.shutdownAfterTransfer": false,
+  "general.autoUpdateMode": "auto",
+  "general.autoTryCollectionPasswords": false,
+  "general.collectionPasswordList": [],
   "general.logLevel": "error",
   "general.theme": "system",
   "transfer.segmentPoolSize": SEGMENT_POOL_SIZE_DEFAULT,
@@ -157,10 +172,70 @@ const themeOptions = SETTING_THEMES.map((value) => ({
   label: themeLabels[value],
 }));
 
+const autoUpdateModeLabels: Record<AutoUpdateMode, string> = {
+  auto: "자동",
+  notify: "알림만",
+  off: "끔",
+};
+
+const autoUpdateModeDescriptions: Record<AutoUpdateMode, string> = {
+  auto: "업데이트를 자동으로 확인하고 다운로드합니다. 설치는 확인 후 진행됩니다.",
+  notify: "업데이트가 있으면 알림만 표시하고, 다운로드는 직접 시작합니다.",
+  off: "자동 확인을 하지 않습니다. 수동으로 확인할 수 있습니다.",
+};
+
+const autoUpdateModeOptions = AUTO_UPDATE_MODES.map((value) => ({
+  value,
+  label: autoUpdateModeLabels[value],
+}));
+
+function getUpdaterStatusText(options: {
+  strategy: string;
+  mode: AutoUpdateMode;
+  isChecking: boolean;
+  isDownloading: boolean;
+  updateDownloaded: boolean;
+  updateAvailable: boolean;
+  releaseVersion: string | null;
+}) {
+  if (options.strategy === "unsupported") {
+    return "이 빌드에서는 자동 업데이트를 지원하지 않습니다.";
+  }
+  if (options.mode === "off") {
+    return "자동 업데이트가 꺼져 있습니다.";
+  }
+  if (options.isChecking) {
+    return "업데이트 확인 중…";
+  }
+  if (options.isDownloading) {
+    return "업데이트 다운로드 중…";
+  }
+  if (options.updateDownloaded && options.releaseVersion) {
+    return `v${options.releaseVersion} 설치 준비 완료`;
+  }
+  if (options.updateAvailable && options.releaseVersion) {
+    return options.strategy === "manual"
+      ? `v${options.releaseVersion} 사용 가능 (수동 다운로드)`
+      : `v${options.releaseVersion} 사용 가능`;
+  }
+  return "최신 버전입니다.";
+}
+
 export function SettingsView() {
   const [settings, setSettings] = React.useState<SettingsState>(DEFAULT_SETTINGS);
   const [appStatus, setAppStatus] = React.useState<AppStatus | null>(null);
   const [shutdownConfirmOpen, setShutdownConfirmOpen] = React.useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = React.useState(false);
+  const [isUpdateActionPending, setIsUpdateActionPending] = React.useState(false);
+
+  const updaterStrategy = useUpdaterStore((state) => state.strategy);
+  const updaterMode = useUpdaterStore((state) => state.mode);
+  const updateAvailable = useUpdaterStore((state) => state.updateAvailable);
+  const updateDownloaded = useUpdaterStore((state) => state.updateDownloaded);
+  const releaseVersion = useUpdaterStore((state) => state.releaseVersion);
+  const isChecking = useUpdaterStore((state) => state.isChecking);
+  const isDownloading = useUpdaterStore((state) => state.isDownloading);
+  const setShouldPromptForUpdate = useUpdaterStore((state) => state.setShouldPromptForUpdate);
 
   React.useEffect(() => {
     void window.api
@@ -256,6 +331,130 @@ export function SettingsView() {
           />
         </Section>
 
+        <Section icon={<ArrowUpCircleIcon className="size-3.5" />} title="업데이트">
+          <SettingRow
+            title="현재 버전"
+            description={
+              appStatus
+                ? `v${appStatus.version}${appStatus.isPortable ? " (portable)" : ""}${appStatus.isDev ? " · dev" : ""}`
+                : "버전 정보를 불러오는 중…"
+            }
+            control={
+              updaterStrategy !== "unsupported" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  isLoading={isCheckingUpdate || isChecking}
+                  onClick={() => {
+                    setIsCheckingUpdate(true);
+                    void window.api
+                      .invoke("updater:checkForUpdates")
+                      .then(async () => {
+                        const status = await window.api.invoke("updater:getStatus");
+                        if (!status.updateAvailable && !status.updateDownloaded) {
+                          toast.success("최신 버전입니다");
+                        }
+                      })
+                      .catch((error) => {
+                        toast.error("업데이트를 확인하지 못했습니다", {
+                          description: error instanceof Error ? error.message : String(error),
+                        });
+                      })
+                      .finally(() => setIsCheckingUpdate(false));
+                  }}
+                >
+                  지금 확인
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void window.api.invoke("updater:openDownloadPage")}
+                >
+                  릴리스 열기
+                </Button>
+              )
+            }
+          />
+          {updaterStrategy !== "unsupported" && (
+            <SettingRow
+              title="자동 업데이트"
+              description={autoUpdateModeDescriptions[settings["general.autoUpdateMode"]]}
+              control={
+                <Select
+                  items={autoUpdateModeOptions}
+                  value={settings["general.autoUpdateMode"]}
+                  onValueChange={(value) => {
+                    if (value === null) return;
+                    void setSetting("general.autoUpdateMode", value);
+                  }}
+                >
+                  <SelectTrigger className="w-34">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent finalFocus={false}>
+                    <SelectGroup>
+                      {autoUpdateModeOptions.map((mode) => (
+                        <SelectItem key={mode.value} value={mode.value}>
+                          {mode.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              }
+            />
+          )}
+          <SettingRow
+            title="상태"
+            description={getUpdaterStatusText({
+              strategy: updaterStrategy,
+              mode: settings["general.autoUpdateMode"],
+              isChecking,
+              isDownloading,
+              updateDownloaded,
+              updateAvailable,
+              releaseVersion,
+            })}
+            control={
+              updaterStrategy === "nsis" &&
+              updateAvailable &&
+              !updateDownloaded &&
+              (updaterMode === "notify" || settings["general.autoUpdateMode"] === "notify") ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  isLoading={isUpdateActionPending || isDownloading}
+                  onClick={() => {
+                    setIsUpdateActionPending(true);
+                    void window.api
+                      .invoke("updater:downloadUpdate")
+                      .catch((error) => {
+                        toast.error("업데이트를 다운로드하지 못했습니다", {
+                          description: error instanceof Error ? error.message : String(error),
+                        });
+                      })
+                      .finally(() => setIsUpdateActionPending(false));
+                  }}
+                >
+                  다운로드
+                </Button>
+              ) : updaterStrategy === "nsis" && updateDownloaded ? (
+                <Button type="button" size="sm" onClick={() => setShouldPromptForUpdate(true)}>
+                  설치
+                </Button>
+              ) : updaterStrategy === "manual" && updateAvailable ? (
+                <Button type="button" size="sm" onClick={() => setShouldPromptForUpdate(true)}>
+                  확인
+                </Button>
+              ) : null
+            }
+          />
+        </Section>
+
         <Section icon={<ZapIcon className="size-3.5" />} title="전송">
           <SettingRow
             title="전송 중 절전 방지"
@@ -309,6 +508,25 @@ export function SettingsView() {
                 onCheckedChange={(value) => void setSetting("general.asciiFilenames", value)}
               />
             }
+          />
+        </Section>
+
+        <Section icon={<LockIcon className="size-3.5" />} title="컬렉션 비밀번호">
+          <SettingRow
+            title="비밀번호 자동 시도"
+            description="보호된 컬렉션 로드 시 등록된 비밀번호를 병렬로 시도합니다."
+            control={
+              <Switch
+                checked={settings["general.autoTryCollectionPasswords"]}
+                onCheckedChange={(value) =>
+                  void setSetting("general.autoTryCollectionPasswords", value)
+                }
+              />
+            }
+          />
+          <CollectionPasswordListSetting
+            value={settings["general.collectionPasswordList"]}
+            onChange={(value) => void setSetting("general.collectionPasswordList", value)}
           />
         </Section>
 
@@ -631,6 +849,135 @@ function SettingRow({
         <span className="text-xs text-muted-foreground">{description}</span>
       </div>
       <div className="shrink-0">{control}</div>
+    </div>
+  );
+}
+
+type PasswordRow = { id: string; value: string };
+
+function createPasswordRow(value = ""): PasswordRow {
+  return { id: crypto.randomUUID(), value };
+}
+
+function CollectionPasswordListSetting({
+  value,
+  onChange,
+}: {
+  value: string[];
+  onChange: (value: string[]) => void;
+}) {
+  const [items, setItems] = React.useState<PasswordRow[]>(() =>
+    value.map((entry) => createPasswordRow(entry)),
+  );
+  const itemsRef = React.useRef(items);
+  const isFocusedRef = React.useRef(false);
+
+  React.useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  React.useEffect(() => {
+    if (isFocusedRef.current) {
+      return;
+    }
+
+    setItems((prev) => {
+      if (
+        prev.length === value.length &&
+        prev.every((item, index) => item.value === value[index])
+      ) {
+        return prev;
+      }
+
+      return value.map((entry, index) =>
+        prev[index]?.value === entry
+          ? prev[index]
+          : { id: prev[index]?.id ?? crypto.randomUUID(), value: entry },
+      );
+    });
+  }, [value]);
+
+  const updateItems = (next: PasswordRow[]) => {
+    itemsRef.current = next;
+    setItems(next);
+  };
+
+  const commit = (next: PasswordRow[]) => {
+    updateItems(next);
+    onChange(next.map((item) => item.value));
+  };
+
+  return (
+    <div className="flex flex-col gap-2 p-3.5">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <Label className="text-sm">자동 시도 비밀번호</Label>
+        <span className="text-xs text-muted-foreground">
+          최대 {COLLECTION_PASSWORD_LIST_MAX}개까지 저장·표시됩니다.
+        </span>
+      </div>
+      <div
+        className="flex flex-col gap-1.5"
+        onFocus={() => {
+          isFocusedRef.current = true;
+        }}
+        onBlur={(event) => {
+          if (
+            event.relatedTarget instanceof Node &&
+            event.currentTarget.contains(event.relatedTarget)
+          ) {
+            return;
+          }
+          isFocusedRef.current = false;
+          onChange(itemsRef.current.map((row) => row.value));
+        }}
+      >
+        {items.map((item) => (
+          <div key={item.id} className="flex items-center gap-1.5">
+            <Input
+              value={item.value}
+              placeholder="비밀번호"
+              className="h-8"
+              onChange={(event) => {
+                updateItems(
+                  itemsRef.current.map((row) =>
+                    row.id === item.id ? { ...row, value: event.target.value } : row,
+                  ),
+                );
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              onClick={() => commit(itemsRef.current.filter((row) => row.id !== item.id))}
+            >
+              <XIcon className="size-3.5" />
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-fit"
+          disabled={items.length >= COLLECTION_PASSWORD_LIST_MAX}
+          onClick={() => {
+            if (itemsRef.current.length >= COLLECTION_PASSWORD_LIST_MAX) {
+              return;
+            }
+            updateItems([...itemsRef.current, createPasswordRow()]);
+          }}
+        >
+          <PlusIcon className="size-3.5" />
+          추가
+        </Button>
+      </div>
     </div>
   );
 }

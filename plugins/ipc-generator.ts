@@ -1,236 +1,151 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { join, resolve } from "node:path";
+
 import type { Plugin } from "vite";
 
-interface IpcGeneratorOptions {
+export interface IpcGeneratorOptions {
     handlerDir: string;
+    contractFile: string;
     typesFile: string;
     sharedTypesFile: string;
     runtimeFile: string;
 }
 
-function getEol(content: string) {
-    return content.includes("\r\n") ? "\r\n" : "\n";
-}
-
-function extractTypeSection(content: string, typeName: string) {
+function extractTypeKeys(file: string, typeName: string) {
+    const content = readFileSync(file, "utf8");
     const marker = `export type ${typeName} = {`;
     const start = content.indexOf(marker);
-    if (start === -1) {
-        return null;
+    const end = content.indexOf("\n};", start + marker.length);
+    if (start === -1 || end === -1) {
+        throw new Error(`[IPC Gen] Expected ${typeName} to be a type literal in ${file}.`);
     }
 
-    const bodyStart = start + marker.length;
-    const end = content.indexOf("\n};", bodyStart);
-    if (end === -1) {
-        return null;
-    }
-
-    return content.slice(bodyStart, end);
-}
-
-function extractTypeKeys(content: string, typeName: string) {
-    const section = extractTypeSection(content, typeName);
-    if (!section) {
-        return [];
-    }
-
-    const keys = new Set<string>();
-    const lines = section.split(/\r?\n/);
-    let depth = 0;
-
-    for (const line of lines) {
-        if (depth === 0) {
-            const match = line.match(/^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_$]+))\s*:/);
-            const key = match?.[1] ?? match?.[2] ?? match?.[3];
-            if (key) {
-                keys.add(key);
+    const keys: string[] = [];
+    let braceDepth = 0;
+    let parenthesisDepth = 0;
+    for (const line of content.slice(start + marker.length, end).split(/\r?\n/)) {
+        if (braceDepth === 0 && parenthesisDepth === 0) {
+            const match = line.match(/^\s*"([^"]+)"\s*:/);
+            if (match) {
+                keys.push(match[1]);
+            } else if (line.trim()) {
+                throw new Error(
+                    `[IPC Gen] ${typeName} may only contain quoted property signatures.`,
+                );
             }
         }
 
-        for (const char of line) {
-            if (char === "{") {
-                depth += 1;
-            } else if (char === "}") {
-                depth = Math.max(0, depth - 1);
-            }
+        for (const character of line) {
+            if (character === "{") braceDepth += 1;
+            if (character === "}") braceDepth -= 1;
+            if (character === "(") parenthesisDepth += 1;
+            if (character === ")") parenthesisDepth -= 1;
         }
     }
 
-    return Array.from(keys).sort();
+    const duplicateKeys = keys.filter((key, index) => keys.indexOf(key) !== index);
+    if (duplicateKeys.length > 0) {
+        throw new Error(
+            `[IPC Gen] ${typeName} contains duplicate channels: ${[...new Set(duplicateKeys)].sort((a, b) => a.localeCompare(b)).join(", ")}`,
+        );
+    }
+
+    return keys.sort((a, b) => a.localeCompare(b));
 }
 
-function toConstLiteral(values: string[], eol: string) {
-    return `[${eol}${values.map((value) => `    ${JSON.stringify(value)}`).join(`,${eol}`)}${eol}] as const;`;
-}
-
-function generateIpc(options: IpcGeneratorOptions) {
-    const { handlerDir, typesFile, sharedTypesFile, runtimeFile } = options;
-    const channels = new Map<string, string>(); // channel -> type definition
+function discoverChannels(handlerDir: string) {
+    const handlerChannels = new Set<string>();
     const sendChannels = new Set<string>();
 
-    let currentTypesContent = "";
-    try {
-        currentTypesContent = readFileSync(typesFile, "utf-8");
-    } catch {
-        return;
-    }
-
-    const typesSectionMatch = currentTypesContent.match(
-        /\/\/ IPC_HANDLERS_START(.*?)\/\/ IPC_HANDLERS_END/s,
-    );
-    const typeMap = new Map<string, string>();
-    if (typesSectionMatch) {
-        const section = typesSectionMatch[1];
-        const entryRegex =
-            /^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_$]+))\s*:\s*([\s\S]*?);/gm;
-        let typeEntryMatch;
-
-        while ((typeEntryMatch = entryRegex.exec(section)) !== null) {
-            const key = typeEntryMatch[1] ?? typeEntryMatch[2] ?? typeEntryMatch[3];
-            const type = typeEntryMatch[4]?.trim();
-            if (key && type) {
-                typeMap.set(key, type);
-            }
-        }
-    }
-
-    const files = readdirSync(handlerDir);
-    for (const file of files) {
+    for (const file of readdirSync(handlerDir).sort((a, b) => a.localeCompare(b))) {
         if (!file.endsWith(".ts")) continue;
-        const content = readFileSync(join(handlerDir, file), "utf-8");
+        const content = readFileSync(join(handlerDir, file), "utf8");
+        const handlerRegex = /\b(?:rh|ipcMain\.handle)\s*\(\s*["']([^"']+)["']/g;
+        const sendRegex = /\bipcMain\.on\s*\(\s*["']([^"']+)["']/g;
 
-        const importMap = new Map<string, string>();
-        const importRegex = /import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+["']([^"']+)["']/g;
-        let importMatch;
-        while ((importMatch = importRegex.exec(content)) !== null) {
-            const imports = importMatch[1].split(",");
-            const source = importMatch[2];
-            for (const imp of imports) {
-                const parts = imp.trim().split(/\s+as\s+/);
-                const importedName = parts[0].trim();
-                const localName = parts[1]?.trim() || importedName;
-                if (localName) {
-                    importMap.set(localName, `import("${source}").${importedName}`);
-                }
-            }
-        }
-
-        const rhRegex =
-            /(?:rh|ipcMain\.handle)\s*\(\s*["']([^"']+)["']\s*,\s*(.*?)(?:\)\s*;|\)\s*\n)/gs;
-        let match;
-        while ((match = rhRegex.exec(content)) !== null) {
+        for (const match of content.matchAll(handlerRegex)) {
             const channel = match[1];
-            const impl = match[2];
-
-            if (typeMap.has(channel)) {
-                channels.set(channel, typeMap.get(channel)!);
-            } else {
-                // infer type from implementation
-                // direct function reference: rh("channel", myFunc)
-                const simpleIdentifierMatch = impl.match(/^[a-zA-Z0-9_$]+$/);
-                if (simpleIdentifierMatch && importMap.has(simpleIdentifierMatch[0])) {
-                    const importRef = importMap.get(simpleIdentifierMatch[0]);
-                    channels.set(
-                        channel,
-                        `(...args: Parameters<typeof ${importRef}>) => ReturnType<typeof ${importRef}>`,
-                    );
-                    continue;
-                }
-
-                // function call in arrow/return: => d.foo.bar(...) or return d.foo.bar(...)
-                const returnMatch = impl.match(
-                    /(?:return|=>)\s*(?:await\s+)?(?:desktop|d)\.([a-zA-Z0-9_$.]+)\(/,
-                );
-
-                if (returnMatch) {
-                    const methodPath = returnMatch[1];
-                    channels.set(
-                        channel,
-                        `(...args: Parameters<typeof desktop.${methodPath}>) => ReturnType<typeof desktop.${methodPath}>`,
-                    );
-                } else {
-                    //simple imported function call: => myFunc(...)
-                    const bareReturnMatch = impl.match(
-                        /(?:return|=>)\s*(?:await\s+)?([a-zA-Z0-9_$]+)\(/,
-                    );
-                    if (bareReturnMatch && importMap.has(bareReturnMatch[1])) {
-                        const importRef = importMap.get(bareReturnMatch[1]);
-                        channels.set(
-                            channel,
-                            `(...args: Parameters<typeof ${importRef}>) => ReturnType<typeof ${importRef}>`,
-                        );
-                    } else {
-                        channels.set(channel, `(...args: any[]) => any`);
-                    }
-                }
+            if (handlerChannels.has(channel)) {
+                throw new Error(`[IPC Gen] Duplicate handler channel: ${channel}`);
             }
+            handlerChannels.add(channel);
         }
-
-        const onRegex = /ipcMain\.on\s*\(\s*["']([^"']+)["']/g;
-        let onMatch;
-        while ((onMatch = onRegex.exec(content)) !== null) {
-            sendChannels.add(onMatch[1]);
+        for (const match of content.matchAll(sendRegex)) {
+            sendChannels.add(match[1]);
         }
     }
 
-    const sortedChannelNames = Array.from(channels.keys()).sort();
-    const sortedSendChannelNames = Array.from(sendChannels).sort();
-    const sharedTypesContent = readFileSync(sharedTypesFile, "utf-8");
-    const eventChannelNames = extractTypeKeys(sharedTypesContent, "IpcEvents");
+    return {
+        handlerChannels: [...handlerChannels].sort((a, b) => a.localeCompare(b)),
+        sendChannels: [...sendChannels].sort((a, b) => a.localeCompare(b)),
+    };
+}
 
-    // update types.ts
-    const typesContent = readFileSync(typesFile, "utf-8");
-    const typesEol = getEol(typesContent);
-    const typesReplacement = sortedChannelNames
-        .map((c) => {
-            const type = channels.get(c);
-            const quote = c.includes(":") ? '"' : "";
-            return `    ${quote}${c}${quote}: ${type};`;
-        })
-        .join(typesEol);
-    const newTypesContent = typesContent.replace(
-        /(\/\/ IPC_HANDLERS_START).*?(\/\/ IPC_HANDLERS_END)/s,
-        `$1${typesEol}${typesReplacement}${typesEol}    $2`,
+function toConstLiteral(values: string[]) {
+    return `[\n${values.map((value) => `    ${JSON.stringify(value)}`).join(",\n")}\n] as const;`;
+}
+
+export function generateIpc(options: IpcGeneratorOptions) {
+    const contractChannels = extractTypeKeys(options.contractFile, "IpcHandlers");
+    const { handlerChannels, sendChannels } = discoverChannels(options.handlerDir);
+    const missingHandlers = contractChannels.filter(
+        (channel) => !handlerChannels.includes(channel),
     );
+    const extraHandlers = handlerChannels.filter((channel) => !contractChannels.includes(channel));
 
-    if (newTypesContent !== typesContent) {
-        writeFileSync(typesFile, newTypesContent);
-        console.log(`[IPC Gen] Updated ${typesFile}`);
+    if (missingHandlers.length > 0 || extraHandlers.length > 0) {
+        const details = [
+            missingHandlers.length > 0
+                ? `Missing handler channels: ${missingHandlers.join(", ")}`
+                : null,
+            extraHandlers.length > 0 ? `Extra handler channels: ${extraHandlers.join(", ")}` : null,
+        ].filter((detail): detail is string => detail !== null);
+        throw new Error(`[IPC Gen] Handler/contract channel mismatch.\n${details.join("\n")}`);
     }
 
-    const runtimeEol = getEol(currentTypesContent);
+    const typesContent = [
+        "// This file is automatically generated by ipcGeneratorPlugin; do not edit it.",
+        "",
+        'export type { IpcHandlers } from "./ipc-contract";',
+        "",
+    ].join("\n");
+    const eventChannels = extractTypeKeys(options.sharedTypesFile, "IpcEvents");
     const runtimeContent = [
         "// This file is automatically generated by ipcGeneratorPlugin; do not edit it.",
         "",
-        `export const IPC_HANDLER_CHANNELS = ${toConstLiteral(sortedChannelNames, runtimeEol)}`,
+        `export const IPC_HANDLER_CHANNELS = ${toConstLiteral(handlerChannels)}`,
         "",
-        `export const IPC_SEND_CHANNELS = ${toConstLiteral(sortedSendChannelNames, runtimeEol)}`,
+        `export const IPC_SEND_CHANNELS = ${toConstLiteral(sendChannels)}`,
         "",
-        `export const IPC_EVENT_CHANNELS = ${toConstLiteral(eventChannelNames, runtimeEol)}`,
+        `export const IPC_EVENT_CHANNELS = ${toConstLiteral(eventChannels)}`,
         "",
         "export type IpcHandlerChannel = (typeof IPC_HANDLER_CHANNELS)[number];",
         "export type IpcSendChannel = (typeof IPC_SEND_CHANNELS)[number];",
         "export type IpcEventChannel = (typeof IPC_EVENT_CHANNELS)[number];",
         "",
-    ].join(runtimeEol);
+    ].join("\n");
 
-    let currentRuntimeContent = "";
+    writeIfChanged(options.typesFile, typesContent);
+    writeIfChanged(options.runtimeFile, runtimeContent);
+}
+
+function writeIfChanged(file: string, content: string) {
+    let currentContent: string | null = null;
     try {
-        currentRuntimeContent = readFileSync(runtimeFile, "utf-8");
+        currentContent = readFileSync(file, "utf8");
     } catch {
-        // ignore missing file
+        // The generated files do not exist on a fresh clone.
     }
 
-    if (runtimeContent !== currentRuntimeContent) {
-        writeFileSync(runtimeFile, runtimeContent);
-        console.log(`[IPC Gen] Updated ${runtimeFile}`);
-    }
+    if (content === currentContent) return;
+    writeFileSync(file, content);
+    console.log(`[IPC Gen] Updated ${file}`);
 }
 
 export const ipcGeneratorPlugin = (): Plugin => {
     const options = {
         handlerDir: resolve("src/main/ipc/handlers"),
+        contractFile: resolve("src/shared/ipc-contract.ts"),
         typesFile: resolve("src/shared/types.gen.ts"),
         sharedTypesFile: resolve("src/shared/types.ts"),
         runtimeFile: resolve("src/shared/ipc-keys.gen.ts"),
@@ -245,7 +160,7 @@ export const ipcGeneratorPlugin = (): Plugin => {
             server.watcher.on("change", (file) => {
                 if (
                     file.includes(join("src", "main", "ipc", "handlers")) ||
-                    file === options.typesFile ||
+                    file === options.contractFile ||
                     file === options.sharedTypesFile
                 ) {
                     generateIpc(options);

@@ -5,11 +5,13 @@ import type {
     DirNode,
     DownloadItem,
     DownloadStatus,
+    DownloadTransferPayload,
     FileDownloadStatus,
     FileNode,
     FileProgress,
     ZipNode,
 } from "@shared/types";
+import { DOWNLOAD_TRANSFER_KIND, DOWNLOAD_TRANSFER_VERSION } from "@shared/types";
 import { normalizePath } from "@shared/utils";
 import { isZipExtractMode, listZipNodes } from "@shared/zip-tree";
 
@@ -62,7 +64,8 @@ const FILE_SELECT = `"id",
                     "error",
                     COALESCE("source_kind", 'file') AS "sourceKind",
                     "zip_entry_json" AS "zipEntryJson",
-                    "source_meta_json" AS "sourceMetaJson"`;
+                    "source_meta_json" AS "sourceMetaJson",
+                    COALESCE("completed_elsewhere", 0) AS "completedElsewhere"`;
 
 function tryParseZipEntryMeta(raw: string | null): ZipEntryStoredMeta | null {
     if (!raw) {
@@ -80,11 +83,11 @@ function isCollectionExpired(expires: number) {
 }
 
 function requireSegmentSize(value: number) {
-    if (!Number.isFinite(value) || value < 1) {
+    if (!Number.isSafeInteger(value) || value < 1) {
         throw new Error(`Invalid collection segment size: ${value}.`);
     }
 
-    return Math.floor(value);
+    return value;
 }
 
 function getChunkCount(fileSize: number, segmentSize: number) {
@@ -128,6 +131,50 @@ function transferSourceMetaJson(
     }
     const meta: TransferFileSourceMeta = { nodeKey };
     return JSON.stringify(meta);
+}
+
+function normalizeTransferFile(file: DownloadFileRow) {
+    const selected = file.selected === 1;
+    if (!selected) {
+        return {
+            remoteId: file.remoteId,
+            path: file.path,
+            name: file.name,
+            size: file.size,
+            selected: false,
+            status: "pending" as const,
+            completedElsewhere: false,
+            sourceKind: file.sourceKind,
+            zipEntryJson: file.zipEntryJson,
+            sourceMetaJson: file.sourceMetaJson,
+        };
+    }
+    if (file.status === "completed") {
+        return {
+            remoteId: file.remoteId,
+            path: file.path,
+            name: file.name,
+            size: file.size,
+            selected: true,
+            status: "completed" as const,
+            completedElsewhere: true,
+            sourceKind: file.sourceKind,
+            zipEntryJson: file.zipEntryJson,
+            sourceMetaJson: file.sourceMetaJson,
+        };
+    }
+    return {
+        remoteId: file.remoteId,
+        path: file.path,
+        name: file.name,
+        size: file.size,
+        selected: true,
+        status: "pending" as const,
+        completedElsewhere: false,
+        sourceKind: file.sourceKind,
+        zipEntryJson: file.zipEntryJson,
+        sourceMetaJson: file.sourceMetaJson,
+    };
 }
 
 export function flattenDownloadTree(
@@ -378,6 +425,108 @@ export class DownloadRepository {
                         file.sourceKind,
                         file.zipEntryJson,
                         file.sourceMetaJson ?? transferSourceMetaJson(record.loaded, file.remoteId),
+                    ],
+                );
+            }
+        });
+
+        return collectionId;
+    }
+
+    public buildTransferPayload(collectionId: string): DownloadTransferPayload {
+        const collection = this.getCollection(collectionId);
+        if (!collection) {
+            throw new Error("Collection not found.");
+        }
+        const files = this.listFiles(collectionId).map((file) => normalizeTransferFile(file));
+        return {
+            version: DOWNLOAD_TRANSFER_VERSION,
+            kind: DOWNLOAD_TRANSFER_KIND,
+            exportedAt: Date.now(),
+            collection: {
+                shareId: collection.shareId,
+                sourceUrl: collection.sourceUrl,
+                passwordPlain: collection.passwordPlain,
+                name: collection.name,
+                rootId: collection.rootId,
+                segmentSize: collection.segmentSize,
+                expires: collection.expires,
+                tree: parseTree(collection.treeJson),
+                asciiFilenames: collection.asciiFilenames === 1,
+                provider: collection.provider ?? "kiosk",
+            },
+            files,
+        };
+    }
+
+    public insertImportedDownload(payload: DownloadTransferPayload, savePath: string) {
+        if (!payload.files.some((file) => file.selected)) {
+            throw new Error("No files selected.");
+        }
+
+        const collectionId = randomUUID();
+        const timestamp = nowIso();
+        const segmentSize = requireSegmentSize(payload.collection.segmentSize);
+        const hasPending = payload.files.some((file) => file.selected && file.status === "pending");
+        const expired = hasPending && isCollectionExpired(payload.collection.expires);
+        const status: DownloadStatus = hasPending ? (expired ? "expired" : "queued") : "completed";
+
+        this.kd.lib.db.transaction((tx) => {
+            tx.run(
+                `INSERT INTO "download_collection"
+                 ("id", "share_id", "source_url", "password_plain", "name", "root_id",
+                  "segment_size", "expires", "tree_json", "save_path", "status",
+                  "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames",
+                  "provider")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+                [
+                    collectionId,
+                    payload.collection.shareId,
+                    payload.collection.sourceUrl,
+                    payload.collection.passwordPlain || null,
+                    payload.collection.name,
+                    payload.collection.rootId,
+                    segmentSize,
+                    payload.collection.expires,
+                    JSON.stringify(payload.collection.tree),
+                    savePath,
+                    status,
+                    timestamp,
+                    timestamp,
+                    expired ? COLLECTION_EXPIRED_ERROR : null,
+                    payload.collection.asciiFilenames ? 1 : 0,
+                    payload.collection.provider,
+                ],
+            );
+
+            for (const file of payload.files) {
+                const completedElsewhere =
+                    file.selected && file.status === "completed" && file.completedElsewhere;
+                const fileStatus: FileDownloadStatus =
+                    file.selected && file.status === "completed" ? "completed" : "pending";
+                tx.run(
+                    `INSERT INTO "download_file"
+                     ("id", "collection_id", "remote_id", "path", "name", "size", "selected",
+                      "status", "downloaded_bytes", "paused_by_user", "created_at", "updated_at",
+                      "error", "source_kind", "zip_entry_json", "source_meta_json",
+                      "completed_elsewhere")
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, ?, ?, ?, ?)`,
+                    [
+                        randomUUID(),
+                        collectionId,
+                        file.remoteId,
+                        normalizePath(file.path),
+                        file.name,
+                        file.size,
+                        file.selected ? 1 : 0,
+                        fileStatus,
+                        fileStatus === "completed" ? file.size : 0,
+                        timestamp,
+                        timestamp,
+                        file.sourceKind,
+                        file.zipEntryJson ?? null,
+                        file.sourceMetaJson ?? null,
+                        completedElsewhere ? 1 : 0,
                     ],
                 );
             }
@@ -882,6 +1031,10 @@ export class DownloadRepository {
     }
 
     public resumeFile(fileId: string, force: boolean) {
+        const file = this.getFile(fileId);
+        if (!file || file.completedElsewhere === 1) {
+            return;
+        }
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(
@@ -907,6 +1060,9 @@ export class DownloadRepository {
         const file = this.getFile(fileId);
         if (!file) {
             throw new Error("File not found.");
+        }
+        if (file.completedElsewhere === 1) {
+            return;
         }
         if (file.selected === 1) {
             return;
@@ -1280,6 +1436,7 @@ export class DownloadRepository {
                 downloaded: file.downloadedBytes,
                 size: file.size,
                 selected: file.selected === 1,
+                completedElsewhere: file.completedElsewhere === 1 ? true : undefined,
                 error: file.error ?? undefined,
             };
             if (file.selected === 1) {

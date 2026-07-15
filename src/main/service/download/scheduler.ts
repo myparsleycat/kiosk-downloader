@@ -1,18 +1,6 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import {
-    CHUNK_RETRY_DEFAULT,
-    CHUNK_RETRY_MAX,
-    CHUNK_RETRY_MIN,
-    SEGMENT_POOL_SIZE_DEFAULT,
-    SEGMENT_POOL_SIZE_MAX,
-    SEGMENT_POOL_SIZE_MIN,
-    STREAM_WRITE_BATCH_BYTES_DEFAULT,
-    STREAM_WRITE_BATCH_BYTES_OPTIONS,
-    INFLATE_BUFFER_BYTES_DEFAULT,
-    INFLATE_BUFFER_BYTES_OPTIONS,
-} from "@shared/settings";
 import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
 import fse from "fs-extra";
@@ -50,49 +38,6 @@ type SessionCacheEntry =
 
 function isActiveFileDownloadStatus(status: FileDownloadStatus | undefined) {
     return status === "downloading" || status === "inflating";
-}
-
-function clampChunkRetries(value: number) {
-    return Math.min(
-        CHUNK_RETRY_MAX,
-        Math.max(CHUNK_RETRY_MIN, ensurePositiveInteger(value, CHUNK_RETRY_DEFAULT)),
-    );
-}
-
-function clampSegmentPoolSize(value: number) {
-    return Math.min(
-        SEGMENT_POOL_SIZE_MAX,
-        Math.max(SEGMENT_POOL_SIZE_MIN, ensurePositiveInteger(value, SEGMENT_POOL_SIZE_DEFAULT)),
-    );
-}
-
-function clampStreamWriteBatchBytes(value: number) {
-    if (
-        STREAM_WRITE_BATCH_BYTES_OPTIONS.includes(
-            value as (typeof STREAM_WRITE_BATCH_BYTES_OPTIONS)[number],
-        )
-    ) {
-        return value;
-    }
-    return STREAM_WRITE_BATCH_BYTES_DEFAULT;
-}
-
-function clampInflateBufferBytes(value: number) {
-    if (
-        INFLATE_BUFFER_BYTES_OPTIONS.includes(
-            value as (typeof INFLATE_BUFFER_BYTES_OPTIONS)[number],
-        )
-    ) {
-        return value;
-    }
-    return INFLATE_BUFFER_BYTES_DEFAULT;
-}
-
-function ensurePositiveInteger(value: number, fallback: number) {
-    if (!Number.isFinite(value) || value < 1) {
-        return fallback;
-    }
-    return Math.max(1, Math.floor(value));
 }
 
 function parseZipEntryMeta(raw: string | null): ZipEntryStoredMeta {
@@ -356,16 +301,10 @@ export class DownloadScheduler {
 
     private async getSettings(): Promise<SchedulerSettings> {
         return {
-            segmentPoolSize: clampSegmentPoolSize(
-                await this.kd.setting.transfer.getSegmentPoolSize(),
-            ),
-            maxChunkRetries: clampChunkRetries(await this.kd.setting.transfer.getMaxChunkRetries()),
-            streamWriteBatchBytes: clampStreamWriteBatchBytes(
-                await this.kd.setting.transfer.getStreamWriteBatchBytes(),
-            ),
-            inflateBufferBytes: clampInflateBufferBytes(
-                await this.kd.setting.transfer.getInflateBufferBytes(),
-            ),
+            segmentPoolSize: await this.kd.setting.get("transfer.segmentPoolSize"),
+            maxChunkRetries: await this.kd.setting.get("transfer.maxChunkRetries"),
+            streamWriteBatchBytes: await this.kd.setting.get("transfer.streamWriteBatchBytes"),
+            inflateBufferBytes: await this.kd.setting.get("transfer.inflateBufferBytes"),
         };
     }
 

@@ -1,7 +1,7 @@
-// oxlint-disable typescript/no-explicit-any
 export type { IpcHandlers } from "./types.gen";
 
 import type { AppSettings, SettingKey } from "./settings";
+import type { UpdaterStatus } from "./updater";
 
 export interface AppStatus {
     version: string;
@@ -114,6 +114,7 @@ export interface FileProgress {
     downloaded: number;
     size: number;
     selected: boolean;
+    completedElsewhere?: boolean;
     speedBps?: number;
     error?: string;
 }
@@ -253,6 +254,45 @@ export interface ResumePayload {
     force?: boolean;
 }
 
+export const DOWNLOAD_TRANSFER_KIND = "kiosk-download-collection" as const;
+export const DOWNLOAD_TRANSFER_VERSION = 1;
+
+export type DownloadTransferFileStatus = "completed" | "pending";
+
+export interface DownloadTransferFile {
+    remoteId: string;
+    path: string;
+    name: string;
+    size: number;
+    selected: boolean;
+    status: DownloadTransferFileStatus;
+    completedElsewhere: boolean;
+    sourceKind: "file" | "zip_entry";
+    zipEntryJson?: string | null;
+    sourceMetaJson?: string | null;
+}
+
+export interface DownloadTransferCollection {
+    shareId: string;
+    sourceUrl: string;
+    passwordPlain?: string | null;
+    name: string;
+    rootId: string;
+    segmentSize: number;
+    expires: number;
+    tree: CollectionTree;
+    asciiFilenames: boolean;
+    provider: DownloadProvider;
+}
+
+export interface DownloadTransferPayload {
+    version: typeof DOWNLOAD_TRANSFER_VERSION;
+    kind: typeof DOWNLOAD_TRANSFER_KIND;
+    exportedAt: number;
+    collection: DownloadTransferCollection;
+    files: DownloadTransferFile[];
+}
+
 export interface SettingUpdatePayload<K extends SettingKey = SettingKey> {
     key: K;
     value: AppSettings[K];
@@ -270,4 +310,7 @@ export type IpcEvents = {
     "upload:item-update": (item: UploadItem) => void;
     "upload:progress-update": (patch: UploadProgressPatch) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;
+    "updater:status-changed": (status: UpdaterStatus) => void;
+    "updater:update-available": () => void;
+    "updater:update-downloaded": () => void;
 };

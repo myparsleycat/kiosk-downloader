@@ -78,6 +78,7 @@ export type DownloadFileRow = {
     sourceKind: "file" | "zip_entry";
     zipEntryJson: string | null;
     sourceMetaJson: string | null;
+    completedElsewhere: number;
 };
 
 export type DownloadChunkRow = {

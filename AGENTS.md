@@ -38,7 +38,7 @@ Do not manually create or edit generated files.
 - Handlers: use `rh("channel:name", handlerFn)` from `src/main/ipc/helper.ts` (typed wrapper around `ipcMain.handle`)
 - Preload exposes `window.api.invoke(channel, ...args)` (typed handler calls), `window.api.send(channel, ...args)`, and `window.api.on(channel, listener)` (typed events)
 - Channel whitelisting is enforced at runtime via the generated `IPC_HANDLER_CHANNELS` / `IPC_SEND_CHANNELS` / `IPC_EVENT_CHANNELS` constant arrays
-- To add a new IPC channel: add a handler file in `src/main/ipc/handlers/` using `rh()`, then restart dev server to regenerate types
+- To add a new IPC channel: add the signature to `src/shared/ipc-contract.ts`, add a handler in `src/main/ipc/handlers/` using `rh()`, then restart the dev server to regenerate the runtime channel lists. Generation fails when the contract and registered handler channels differ.
 
 ## Error Logging
 

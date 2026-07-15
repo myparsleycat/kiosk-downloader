@@ -113,6 +113,85 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     requestAnimationFrame(() => urlInputRef.current?.focus());
   }, []);
 
+  const tryAutoCollectionPasswords = React.useCallback(
+    async (trimmedUrl: string, shareId: string, seq: number) => {
+      try {
+        const settings = await window.api.invoke("setting:getMany", [
+          "general.autoTryCollectionPasswords",
+          "general.collectionPasswordList",
+        ]);
+
+        if (seq !== loadSeqRef.current) {
+          return true;
+        }
+
+        if (!settings["general.autoTryCollectionPasswords"]) {
+          return false;
+        }
+
+        const candidates = settings["general.collectionPasswordList"].filter(Boolean);
+        if (candidates.length === 0) {
+          return false;
+        }
+
+        const winner = await new Promise<{
+          loaded: Awaited<ReturnType<typeof window.api.invoke<"download:loadCollection">>>;
+          password: string;
+        } | null>((resolve) => {
+          let pending = candidates.length;
+          let settled = false;
+
+          for (const candidate of candidates) {
+            void window.api
+              .invoke("download:loadCollection", {
+                url: trimmedUrl,
+                password: candidate,
+              })
+              .then((loaded) => {
+                if (settled) {
+                  return;
+                }
+                settled = true;
+                resolve({ loaded, password: candidate });
+              })
+              .catch(() => {
+                pending -= 1;
+                if (!settled && pending === 0) {
+                  resolve(null);
+                }
+              });
+          }
+        });
+
+        if (seq !== loadSeqRef.current) {
+          return true;
+        }
+
+        if (!winner) {
+          return false;
+        }
+
+        setPassword(winner.password);
+        setCollection(winner.loaded);
+        setSelected(collectAllPaths(winner.loaded.tree));
+        setPasswordRequired(false);
+        setPasswordInvalid(false);
+        setProbedShareId(shareId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [
+      setCollection,
+      setPassword,
+      setPasswordInvalid,
+      setPasswordRequired,
+      setProbedShareId,
+      setSelected,
+    ],
+  );
+
   const loadCollection = React.useCallback(
     async (trimmedUrl: string, loadPassword?: string) => {
       const parsed = tryParseDownloadUrl(trimmedUrl);
@@ -155,6 +234,12 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           setProbedShareId(parsed.id);
           setCollection(null);
           setSelected(new Set());
+
+          const autoTried = await tryAutoCollectionPasswords(trimmedUrl, parsed.id, seq);
+          if (autoTried || seq !== loadSeqRef.current) {
+            return;
+          }
+
           requestAnimationFrame(() => passwordInputRef.current?.focus());
           return;
         }
@@ -172,7 +257,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         }
       }
     },
-    [setCollection, setPasswordInvalid, setPasswordRequired, setProbedShareId, setSelected],
+    [
+      setCollection,
+      setPasswordInvalid,
+      setPasswordRequired,
+      setProbedShareId,
+      setSelected,
+      tryAutoCollectionPasswords,
+    ],
   );
 
   const verifyPassword = React.useCallback(() => {
@@ -330,7 +422,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
   return (
     <div className="flex h-full">
-      {/* left: input url + meta */}
       <div className="flex w-[320px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="border-b px-4 py-3">
           <h2 className="cn-font-heading text-sm font-medium">새 다운로드</h2>
@@ -341,7 +432,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
         <ScrollArea className="flex-1">
           <div className="flex w-full min-w-0 flex-col gap-4 p-4">
-            {/* URL */}
             <div className="flex flex-col gap-1.5">
               <Field>
                 <FieldLabel htmlFor="url-input">
@@ -408,7 +498,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
               </div>
             )}
 
-            {/* collection meta */}
             {collection && (
               <>
                 <Separator />
@@ -437,7 +526,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           </div>
         </ScrollArea>
 
-        {/* bottom: save path + selected summary + start button */}
         <div className="border-t p-3">
           <div className="mb-3 flex flex-col gap-1.5">
             <Label className="flex items-center gap-1.5 text-xs">
@@ -490,7 +578,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         </div>
       </div>
 
-      {/* right: tree browser */}
       <div className="flex flex-1 flex-col">
         {collection ? (
           <>

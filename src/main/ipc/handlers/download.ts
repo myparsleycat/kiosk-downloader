@@ -40,4 +40,6 @@ export function registerDownloadHandlers(kd: KioskDownloader) {
     );
     rh("download:remove", (id: string) => kd.service.download.remove(id));
     rh("download:openFolder", (id: string) => kd.service.download.openFolder(id));
+    rh("download:exportCollection", (id: string) => kd.service.download.exportCollection(id));
+    rh("download:importCollection", () => kd.service.download.importCollection());
 }

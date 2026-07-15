@@ -18,8 +18,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@renderer/components/ui
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Separator } from "@renderer/components/ui/separator";
 import { cn } from "@renderer/lib/utils";
-import { clampExpiry, useUploadDraft } from "@renderer/stores/upload-draft";
-import type { DirNode, ExpandPathsResult, UploadTreeFile } from "@shared/types";
+import { clampExpiry, mergeDateAndTime, useUploadDraft } from "@renderer/stores/upload-draft";
+import { buildDirTreeFromFiles, validateDirTreeFilePaths } from "@shared/dir-tree";
+import type { ExpandPathsResult, UploadTreeFile } from "@shared/types";
 import { MAX_UPLOAD_FILES } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import { format, isSameDay } from "date-fns";
@@ -46,47 +47,6 @@ const MAX_DESCRIPTION = 2500;
 const MAX_PASSWORD = 100;
 const MAX_EXPIRY_DAYS = 30;
 const MAX_UPLOAD_BYTES = 50 * 1024 ** 3;
-
-function buildTreeFromFiles(files: UploadTreeFile[]): DirNode {
-  const root: DirNode = { type: "dir", id: "root", name: "", entries: [] };
-
-  type MutableDir = DirNode;
-  const dirsByPath = new Map<string, MutableDir>();
-  dirsByPath.set("", root);
-
-  const ensureDir = (segments: string[]): MutableDir => {
-    const dirPath = segments.join("/");
-    const existing = dirsByPath.get(dirPath);
-    if (existing) return existing;
-
-    const parent = ensureDir(segments.slice(0, -1));
-    const dir: MutableDir = {
-      type: "dir",
-      id: dirPath,
-      name: segments[segments.length - 1],
-      entries: [],
-    };
-    dirsByPath.set(dirPath, dir);
-    parent.entries.push({ kind: "dir", node: dir });
-    return dir;
-  };
-
-  for (const file of files) {
-    const segments = file.path.split("/").filter(Boolean);
-    const dir = ensureDir(segments.slice(0, -1));
-    dir.entries.push({
-      kind: "file",
-      node: {
-        type: "file",
-        id: file.path,
-        name: segments[segments.length - 1] ?? file.name,
-        size: file.size,
-      },
-    });
-  }
-
-  return root;
-}
 
 function mergeUploadFiles(
   existing: UploadTreeFile[],
@@ -132,49 +92,27 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const [countOverflowOpen, setCountOverflowOpen] = React.useState(false);
   const countOverflowResolverRef = React.useRef<((confirmed: boolean) => void) | null>(null);
 
-  const expiryDate = React.useMemo(() => new Date(expiresAt), [expiresAt]);
-  const expiryTime = React.useMemo(() => format(expiryDate, "HH:mm:ss"), [expiryDate]);
+  const expiryDate = new Date(expiresAt);
+  const expiryTime = format(expiryDate, "HH:mm:ss");
 
-  const minExpiryMonth = React.useMemo(() => new Date(new Date().setDate(1)), []);
-  const maxExpiryDate = React.useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + MAX_EXPIRY_DAYS);
-    return d;
-  }, []);
-  const maxExpiryMonth = React.useMemo(
-    () => new Date(maxExpiryDate.getFullYear(), maxExpiryDate.getMonth(), 1),
-    [maxExpiryDate],
-  );
+  const minExpiryMonth = new Date(new Date().setDate(1));
+  const maxExpiryDate = new Date();
+  maxExpiryDate.setDate(maxExpiryDate.getDate() + MAX_EXPIRY_DAYS);
+  const maxExpiryMonth = new Date(maxExpiryDate.getFullYear(), maxExpiryDate.getMonth(), 1);
 
-  const mergeDateAndTime = React.useCallback((date: Date, time: string): number => {
-    const [h, m, s] = time.split(":").map((n) => {
-      const v = Number(n);
-      return Number.isNaN(v) ? 0 : v;
-    });
-    const merged = new Date(date);
-    merged.setHours(h, m, s, 0);
-    return clampExpiry(merged.getTime());
-  }, []);
+  const handleExpiryDateSelect = (date: Date | undefined) => {
+    if (!date) return;
+    setExpiresAt(mergeDateAndTime(date, expiryTime));
+    setExpiryOpen(false);
+  };
 
-  const handleExpiryDateSelect = React.useCallback(
-    (date: Date | undefined) => {
-      if (!date) return;
-      setExpiresAt(mergeDateAndTime(date, expiryTime));
-      setExpiryOpen(false);
-    },
-    [expiryTime, mergeDateAndTime, setExpiresAt],
-  );
+  const handleExpiryTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setExpiresAt(mergeDateAndTime(expiryDate, e.target.value || "00:00:00"));
+  };
 
-  const handleExpiryTimeChange = React.useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      setExpiresAt(mergeDateAndTime(expiryDate, e.target.value || "00:00:00"));
-    },
-    [expiryDate, mergeDateAndTime, setExpiresAt],
-  );
-
-  const tree = React.useMemo(() => buildTreeFromFiles(files), [files]);
+  const tree = React.useMemo(() => buildDirTreeFromFiles(files), [files]);
   const totalFiles = files.length;
-  const totalBytes = React.useMemo(() => files.reduce((a, f) => a + f.size, 0), [files]);
+  const totalBytes = files.reduce((a, f) => a + f.size, 0);
 
   const canUpload = totalFiles > 0 && name.trim().length > 0 && !starting;
 
@@ -197,6 +135,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     setExpanding(true);
     // Let the loading spinner paint before the heavy IPC / store update.
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    let incomingPaths: string[] = [];
     try {
       const remainingSlots = Math.max(0, MAX_UPLOAD_FILES - files.length);
       if (remainingSlots === 0) {
@@ -207,11 +146,13 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
       const result = await load(remainingSlots);
       if (result.files.length === 0) return;
 
+      incomingPaths = newIncomingPaths(files, result.files);
       const merged = mergeUploadFiles(files, result.files);
+      validateDirTreeFilePaths(merged);
       const mergedBytes = merged.reduce((sum, file) => sum + file.size, 0);
       if (mergedBytes > MAX_UPLOAD_BYTES) {
         toast.warning("최대 50 GiB 까지만 추가할 수 있습니다");
-        removeDraftSources(newIncomingPaths(files, result.files));
+        removeDraftSources(incomingPaths);
         return;
       }
 
@@ -219,13 +160,14 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
         setExpanding(false);
         const confirmed = await askCountOverflow();
         if (!confirmed) {
-          removeDraftSources(newIncomingPaths(files, result.files));
+          removeDraftSources(incomingPaths);
           return;
         }
       }
 
       addFiles(result.files);
     } catch (error) {
+      removeDraftSources(incomingPaths);
       toast.error("파일을 불러오지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
       });

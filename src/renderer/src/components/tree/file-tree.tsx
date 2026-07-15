@@ -7,7 +7,7 @@ import type {
   TreeEntry,
   ZipNode,
 } from "@renderer/lib/types";
-import { getSelectionCheckState } from "@renderer/lib/types";
+import { getSelectionCheckState, dirTotalSize } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { useDownloadTreeExpanded } from "@renderer/stores/download-tree-expanded";
 import { formatSize, formatSpeed } from "@shared/utils";
@@ -276,7 +276,9 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
         ) : null,
         <div key="status" className="flex justify-end">
           <StatusPill
-            status={selected ? status : "skipped"}
+            status={
+              selected ? (prog?.completedElsewhere ? "completed_elsewhere" : status) : "skipped"
+            }
             pct={pct}
             onClick={errors.length > 0 ? () => onError?.(errors) : undefined}
           />
@@ -379,7 +381,7 @@ function DirRow({
       ? getSelectionCheckState(props.selected, dirKey, node)
       : undefined;
 
-  const total = props.mode === "selection" ? dirSize(node) : 0;
+  const total = props.mode === "selection" ? dirTotalSize(node) : 0;
   const dirSummary = props.mode === "progress" ? (dirSummaries?.get(dirKey) ?? null) : null;
   const showDirExcluded = dirSummary?.allExcluded ?? false;
   const showDirProgress =
@@ -645,34 +647,6 @@ function ZipRow({
     </>
   );
 }
-
-function dirSize(dir: DirNode | ZipNode): number {
-  const entries = dir.type === "zip" ? (dir.entries ?? []) : dir.entries;
-  if (dir.type === "zip" && !dir.entries) {
-    return dir.size;
-  }
-  const cached = dirSizeCache.get(dir as DirNode);
-  if (cached !== undefined) return cached;
-
-  let total = 0;
-  for (const e of entries) {
-    if (e.kind === "file") {
-      total += (e.node as FileNode).size;
-      continue;
-    }
-    if (e.kind === "zip") {
-      total += dirSize(e.node as ZipNode);
-      continue;
-    }
-    total += dirSize(e.node as DirNode);
-  }
-  if (dir.type === "dir") {
-    dirSizeCache.set(dir, total);
-  }
-  return total;
-}
-
-const dirSizeCache = new WeakMap<DirNode, number>();
 
 interface DirProgressSummary {
   totalSize: number;
@@ -950,21 +924,23 @@ function StatusPill({
   onClick?: () => void;
 }) {
   const label =
-    status === "completed"
-      ? "완료"
-      : status === "inflating"
-        ? "해제 중"
-        : status === "downloading"
-          ? `${pct.toFixed(0)}%`
-          : status === "paused"
-            ? "일시정지"
-            : status === "error"
-              ? "오류"
-              : status === "skipped"
-                ? "제외"
-                : "대기";
+    status === "completed_elsewhere"
+      ? "이전완료"
+      : status === "completed"
+        ? "완료"
+        : status === "inflating"
+          ? "해제 중"
+          : status === "downloading"
+            ? `${pct.toFixed(0)}%`
+            : status === "paused"
+              ? "일시정지"
+              : status === "error"
+                ? "오류"
+                : status === "skipped"
+                  ? "제외"
+                  : "대기";
   const cls =
-    status === "completed"
+    status === "completed" || status === "completed_elsewhere"
       ? "text-emerald-600 dark:text-emerald-400"
       : status === "downloading" || status === "inflating"
         ? "text-primary"
@@ -972,11 +948,19 @@ function StatusPill({
           ? "text-destructive"
           : "text-muted-foreground";
   const className = cn(
-    "inline-block w-12 shrink-0 text-right text-xs font-medium tabular-nums",
+    "inline-block shrink-0 text-right text-xs font-medium tabular-nums",
+    status === "completed_elsewhere" ? "min-w-12 w-auto" : "w-12",
     cls,
     onClick && "cursor-pointer underline decoration-dotted underline-offset-2",
   );
-  const title = status === "inflating" ? "압축 해제 중" : onClick ? "오류 상세 보기" : undefined;
+  const title =
+    status === "completed_elsewhere"
+      ? "이전 PC에서 완료됨"
+      : status === "inflating"
+        ? "압축 해제 중"
+        : onClick
+          ? "오류 상세 보기"
+          : undefined;
 
   if (onClick) {
     return (

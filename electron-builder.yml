@@ -39,3 +39,7 @@ mac:
 dmg:
     artifactName: ${name}-${version}-${arch}.${ext}
 npmRebuild: false
+publish:
+    provider: github
+    owner: myparsleycat
+    repo: kiosk-downloader
