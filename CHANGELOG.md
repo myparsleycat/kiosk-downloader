@@ -1,3 +1,10 @@
+# [1.6.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.5.0...v1.6.0) (2026-07-15)
+
+
+### Features
+
+* **kdx:** add magic header and SHA-256 integrity check ([1e93a51](https://github.com/myparsleycat/kiosk-downloader/commit/1e93a518ea3cfbca198ca12b80ce4f6e4eda412f))
+
 # [1.5.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.4.1...v1.5.0) (2026-07-15)
 
 
