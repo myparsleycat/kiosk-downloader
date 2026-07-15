@@ -59,7 +59,7 @@ function renderReleaseNoteLine(line: string, lineIndex: number) {
         <button
           key={`link-${lineIndex}-${matchIndex}`}
           type="button"
-          className="inline cursor-pointer text-primary underline underline-offset-4 hover:text-primary/80"
+          className="inline max-w-full cursor-pointer break-all text-primary underline underline-offset-4 hover:text-primary/80"
           onClick={() => void window.api.invoke("util:openExternal", url)}
           title={url}
         >
@@ -73,7 +73,7 @@ function renderReleaseNoteLine(line: string, lineIndex: number) {
         <button
           key={`link-${lineIndex}-${matchIndex}`}
           type="button"
-          className="inline cursor-pointer text-primary underline underline-offset-4 hover:text-primary/80"
+          className="inline max-w-full cursor-pointer break-all text-primary underline underline-offset-4 hover:text-primary/80"
           onClick={() => void window.api.invoke("util:openExternal", url)}
           title={url}
         >
@@ -100,7 +100,7 @@ function renderReleaseNoteLine(line: string, lineIndex: number) {
 
 function ReleaseNotesContent({ text }: { text: string }) {
   return (
-    <div className="px-4 py-3 text-sm break-words whitespace-pre-wrap">
+    <div className="max-w-full px-4 py-3 text-sm break-words whitespace-pre-wrap [overflow-wrap:anywhere]">
       {text.split("\n").map((line, index) => {
         const bulletMatch = line.match(RELEASE_NOTE_BULLET_PATTERN);
         if (bulletMatch) {
@@ -108,7 +108,7 @@ function ReleaseNotesContent({ text }: { text: string }) {
           return (
             <div
               key={`release-note-line-${index}`}
-              className="flex items-start gap-2"
+              className="flex min-w-0 items-start gap-2"
               style={indent ? { paddingLeft: `${indent.length}ch` } : undefined}
             >
               <span className="shrink-0">{marker}</span>
@@ -117,7 +117,11 @@ function ReleaseNotesContent({ text }: { text: string }) {
           );
         }
 
-        return <div key={`release-note-line-${index}`}>{renderReleaseNoteLine(line, index)}</div>;
+        return (
+          <div key={`release-note-line-${index}`} className="min-w-0">
+            {renderReleaseNoteLine(line, index)}
+          </div>
+        );
       })}
     </div>
   );
@@ -171,8 +175,8 @@ export function UpdateAlertDialog() {
 
   return (
     <AlertDialog open={open} onOpenChange={handleOpenChange}>
-      <AlertDialogContent className="sm:max-w-xl">
-        <AlertDialogHeader>
+      <AlertDialogContent className="min-w-0 overflow-hidden data-[size=default]:max-w-xl data-[size=default]:sm:max-w-xl">
+        <AlertDialogHeader className="min-w-0">
           <AlertDialogTitle>업데이트 사용 가능</AlertDialogTitle>
           <AlertDialogDescription>
             {isManual
@@ -183,8 +187,8 @@ export function UpdateAlertDialog() {
           </AlertDialogDescription>
         </AlertDialogHeader>
         {displayedReleaseNotesText && (
-          <section className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
+          <section className="min-w-0 space-y-2">
+            <div className="flex min-w-0 items-center justify-between gap-3">
               <h3 className="text-sm font-medium">릴리스 노트</h3>
               {hasTranslatedReleaseNotes && (
                 <Button
@@ -197,7 +201,7 @@ export function UpdateAlertDialog() {
                 </Button>
               )}
             </div>
-            <ScrollArea className="h-64 rounded-md border">
+            <ScrollArea className="h-64 min-w-0 rounded-md border">
               <ReleaseNotesContent text={displayedReleaseNotesText} />
             </ScrollArea>
           </section>
