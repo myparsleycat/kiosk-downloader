@@ -16,10 +16,12 @@ import {
   DialogTitle,
 } from "@renderer/components/ui/dialog";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@renderer/components/ui/tooltip";
 import { cn } from "@renderer/lib/utils";
 import type { DownloadStatus, FileProgress, UploadFileProgress, UploadItem } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import {
+  BrushCleaningIcon,
   ClockIcon,
   CopyIcon,
   FilterIcon,
@@ -84,7 +86,8 @@ export function UploadList({
   }, [filtered, selectedId]);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
-  const { remove, dialog, removing } = useRemoveUpload();
+  const { remove, removeCompleted, dialog, removing } = useRemoveUpload();
+  const hasCompleted = items.some((item) => item.status === "completed");
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {
     try {
@@ -139,6 +142,22 @@ export function UploadList({
               {f === "all" ? "전체" : f === "active" ? "진행중" : "완료"}
             </button>
           ))}
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={!hasCompleted || removing}
+                  onClick={() => void removeCompleted(items)}
+                  className="ml-auto size-6 text-muted-foreground"
+                >
+                  <BrushCleaningIcon className="size-3.5" />
+                </Button>
+              }
+            />
+            <TooltipContent>완료된 항목 제거</TooltipContent>
+          </Tooltip>
         </div>
         <ScrollArea className="flex-1">
           <div className="flex w-full flex-col gap-2 p-2">

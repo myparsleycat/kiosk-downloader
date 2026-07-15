@@ -42,6 +42,30 @@ export function useRemoveCollection() {
     void executeRemove(item.id);
   };
 
+  const removeCompleted = async (items: DownloadItem[]) => {
+    const completed = items.filter((item) => item.status === "completed");
+    if (completed.length === 0) return;
+
+    setRemoving(true);
+    let firstError: Error | undefined;
+    try {
+      for (const item of completed) {
+        try {
+          await window.api.invoke("download:remove", item.id);
+        } catch (error) {
+          firstError ??= error instanceof Error ? error : new Error(String(error));
+        }
+      }
+      if (firstError) {
+        toast.error("작업을 완료하지 못했습니다", {
+          description: firstError.message,
+        });
+      }
+    } finally {
+      setRemoving(false);
+    }
+  };
+
   const dialog = (
     <AlertDialog
       open={target !== null}
@@ -71,5 +95,5 @@ export function useRemoveCollection() {
     </AlertDialog>
   );
 
-  return { remove, dialog, removing };
+  return { remove, removeCompleted, dialog, removing };
 }

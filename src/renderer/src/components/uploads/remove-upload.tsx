@@ -42,6 +42,30 @@ export function useRemoveUpload() {
     void executeRemove(item.id);
   };
 
+  const removeCompleted = async (items: UploadItem[]) => {
+    const completed = items.filter((item) => item.status === "completed");
+    if (completed.length === 0) return;
+
+    setRemoving(true);
+    let firstError: Error | undefined;
+    try {
+      for (const item of completed) {
+        try {
+          await window.api.invoke("upload:remove", item.id);
+        } catch (error) {
+          firstError ??= error instanceof Error ? error : new Error(String(error));
+        }
+      }
+      if (firstError) {
+        toast.error("삭제하지 못했습니다", {
+          description: firstError.message,
+        });
+      }
+    } finally {
+      setRemoving(false);
+    }
+  };
+
   const dialog = (
     <AlertDialog
       open={target !== null}
@@ -71,5 +95,5 @@ export function useRemoveUpload() {
     </AlertDialog>
   );
 
-  return { remove, dialog, removing };
+  return { remove, removeCompleted, dialog, removing };
 }
