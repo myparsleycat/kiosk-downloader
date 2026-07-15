@@ -469,7 +469,12 @@ export class DownloadService {
                 collectionName: collection.name,
                 filePath,
             },
-            () => fse.writeFile(filePath, encodeDownloadTransfer(payload)),
+            async () => {
+                const bytes = encodeDownloadTransfer(payload);
+                // Reject a bad encode before writing so disk never gets an invalid .kdx.
+                decodeDownloadTransfer(bytes);
+                await fse.writeFile(filePath, bytes);
+            },
         );
 
         return { filePath };

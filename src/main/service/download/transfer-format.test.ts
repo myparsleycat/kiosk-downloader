@@ -1,9 +1,15 @@
+import { createHash } from "node:crypto";
+
 import type { DownloadTransferPayload } from "@shared/types";
 import { DOWNLOAD_TRANSFER_KIND, DOWNLOAD_TRANSFER_VERSION } from "@shared/types";
+import { encode as encodeCbor } from "cbor-x";
 import { describe, expect, it } from "vitest";
 
 import { compressZstdSync } from "../../lib/zstd";
 import {
+    KDX_CHECKSUM_BYTES,
+    KDX_HEADER_SIZE,
+    KDX_MAGIC,
     MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES,
     MAX_DOWNLOAD_TRANSFER_DECOMPRESSED_BYTES,
     decodeDownloadTransfer,
@@ -98,11 +104,51 @@ function createPayload(): DownloadTransferPayload {
     };
 }
 
+function encodeLegacyDownloadTransfer(payload: DownloadTransferPayload): Buffer {
+    return compressZstdSync(Buffer.from(encodeCbor(payload)));
+}
+
 describe("download transfer format", () => {
     it("round trips a valid payload", () => {
         const payload = createPayload();
 
         expect(decodeDownloadTransfer(encodeDownloadTransfer(payload))).toEqual(payload);
+    });
+
+    it("writes a KDX1 header with a matching SHA-256 checksum", () => {
+        const encoded = encodeDownloadTransfer(createPayload());
+        const body = encoded.subarray(KDX_HEADER_SIZE);
+
+        expect(encoded.subarray(0, KDX_MAGIC.length)).toEqual(KDX_MAGIC);
+        expect(encoded.subarray(KDX_MAGIC.length, KDX_HEADER_SIZE)).toEqual(
+            createHash("sha256").update(body).digest(),
+        );
+        expect(encoded.length).toBe(KDX_HEADER_SIZE + body.length);
+        expect(KDX_CHECKSUM_BYTES).toBe(32);
+    });
+
+    it("accepts legacy raw zstd transfer files", () => {
+        const payload = createPayload();
+
+        expect(decodeDownloadTransfer(encodeLegacyDownloadTransfer(payload))).toEqual(payload);
+    });
+
+    it("rejects a corrupted checksum", () => {
+        const encoded = encodeDownloadTransfer(createPayload());
+        const corrupted = Buffer.from(encoded);
+        corrupted[KDX_HEADER_SIZE] ^= 0xff;
+
+        expect(() => decodeDownloadTransfer(corrupted)).toThrow("Transfer file is corrupted.");
+    });
+
+    it("rejects a truncated header", () => {
+        expect(() => decodeDownloadTransfer(Buffer.from("KDX1"))).toThrow("Invalid transfer file.");
+    });
+
+    it("rejects non-kdx binary payloads", () => {
+        expect(() => decodeDownloadTransfer(Buffer.from([0x89, 0x50, 0x4e, 0x47]))).toThrow(
+            "Invalid transfer file.",
+        );
     });
 
     it("rejects compressed input larger than the configured limit", () => {
@@ -112,11 +158,11 @@ describe("download transfer format", () => {
     });
 
     it("rejects decompressed input larger than the configured limit", () => {
-        const compressed = compressZstdSync(
-            Buffer.alloc(MAX_DOWNLOAD_TRANSFER_DECOMPRESSED_BYTES + 1),
-        );
+        const body = compressZstdSync(Buffer.alloc(MAX_DOWNLOAD_TRANSFER_DECOMPRESSED_BYTES + 1));
+        const checksum = createHash("sha256").update(body).digest();
+        const framed = Buffer.concat([KDX_MAGIC, checksum, body]);
 
-        expect(() => decodeDownloadTransfer(compressed)).toThrow("Invalid transfer file.");
+        expect(() => decodeDownloadTransfer(framed)).toThrow("Invalid transfer file.");
     });
 
     it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(

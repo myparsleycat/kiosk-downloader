@@ -1,3 +1,5 @@
+import { createHash, timingSafeEqual } from "node:crypto";
+
 import type {
     CollectionTree,
     DownloadProvider,
@@ -12,8 +14,16 @@ import { compressZstdSync, decompressZstdSync } from "../../lib/zstd";
 export const MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES = 16 * 1024 * 1024;
 export const MAX_DOWNLOAD_TRANSFER_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
 
+export const KDX_MAGIC = Buffer.from("KDX1");
+export const KDX_CHECKSUM_BYTES = 32;
+export const KDX_HEADER_SIZE = KDX_MAGIC.length + KDX_CHECKSUM_BYTES;
+
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+
 export function encodeDownloadTransfer(payload: DownloadTransferPayload): Buffer {
-    return compressZstdSync(Buffer.from(encode(payload)));
+    const body = compressZstdSync(Buffer.from(encode(payload)));
+    const checksum = createHash("sha256").update(body).digest();
+    return Buffer.concat([KDX_MAGIC, checksum, body]);
 }
 
 export function decodeDownloadTransfer(raw: Buffer): DownloadTransferPayload {
@@ -21,9 +31,10 @@ export function decodeDownloadTransfer(raw: Buffer): DownloadTransferPayload {
         throw new Error("Transfer file is too large.");
     }
 
+    const body = unwrapTransferBody(raw);
     let inflated: Buffer;
     try {
-        inflated = decompressZstdSync(raw, {
+        inflated = decompressZstdSync(body, {
             maxOutputLength: MAX_DOWNLOAD_TRANSFER_DECOMPRESSED_BYTES,
         });
     } catch {
@@ -37,6 +48,24 @@ export function decodeDownloadTransfer(raw: Buffer): DownloadTransferPayload {
         throw new Error("Invalid transfer file.");
     }
     return requireDownloadTransferPayload(decoded);
+}
+
+function unwrapTransferBody(raw: Buffer): Buffer {
+    if (raw.length >= KDX_HEADER_SIZE && raw.subarray(0, KDX_MAGIC.length).equals(KDX_MAGIC)) {
+        const expected = raw.subarray(KDX_MAGIC.length, KDX_HEADER_SIZE);
+        const body = raw.subarray(KDX_HEADER_SIZE);
+        const actual = createHash("sha256").update(body).digest();
+        if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+            throw new Error("Transfer file is corrupted.");
+        }
+        return body;
+    }
+
+    if (raw.length >= ZSTD_MAGIC.length && raw.subarray(0, ZSTD_MAGIC.length).equals(ZSTD_MAGIC)) {
+        return raw;
+    }
+
+    throw new Error("Invalid transfer file.");
 }
 
 export function requireDownloadTransferPayload(input: unknown): DownloadTransferPayload {
