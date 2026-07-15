@@ -20,6 +20,7 @@ import { ThemeProvider } from "./components/theme-provider";
 import { Button } from "./components/ui/button";
 import { Toaster } from "./components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip";
+import { UpdateAlertDialog } from "./components/update-alert-dialog";
 import { UploadList } from "./components/uploads/upload-list";
 import { UploadView } from "./components/uploads/upload-view";
 import { useTitleBarOverlay } from "./hooks/use-title-bar-overlay";
@@ -30,13 +31,17 @@ import {
 } from "./lib/merge-progress-patch";
 import { useDownloadTreeExpanded } from "./stores/download-tree-expanded";
 import { useNewDownloadDraft } from "./stores/new-download-draft";
+import { useUpdaterStore } from "./stores/updater";
 
 export function RootProvider({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider>
       <ThemeBridge />
       <Toaster position="bottom-right" richColors closeButton />
-      <TooltipProvider>{children}</TooltipProvider>
+      <TooltipProvider>
+        <UpdateAlertDialog />
+        {children}
+      </TooltipProvider>
     </ThemeProvider>
   );
 }
@@ -72,6 +77,60 @@ function MainComponent() {
   );
 
   useTitleBarOverlay();
+
+  const updateAvailable = useUpdaterStore((state) => state.updateAvailable);
+  const updateDownloaded = useUpdaterStore((state) => state.updateDownloaded);
+  const shouldPromptForUpdate = useUpdaterStore((state) => state.shouldPromptForUpdate);
+  const setShouldPromptForUpdate = useUpdaterStore((state) => state.setShouldPromptForUpdate);
+  const updaterMode = useUpdaterStore((state) => state.mode);
+  const updaterStrategy = useUpdaterStore((state) => state.strategy);
+  const updaterDownloading = useUpdaterStore((state) => state.isDownloading);
+  const [isUpdateActionPending, setIsUpdateActionPending] = React.useState(false);
+
+  const shouldOfferManualDownload =
+    updateAvailable &&
+    !updateDownloaded &&
+    updaterStrategy === "nsis" &&
+    (shouldPromptForUpdate || updaterMode === "notify");
+  const shouldOfferManualPage =
+    updateAvailable && updaterStrategy === "manual" && !shouldPromptForUpdate;
+  const shouldShowUpdateButton =
+    shouldOfferManualDownload || updateDownloaded || shouldOfferManualPage || shouldPromptForUpdate;
+
+  React.useEffect(() => {
+    const setUpdaterStatus = useUpdaterStore.getState().setUpdaterStatus;
+    const setAppVersion = useUpdaterStore.getState().setAppVersion;
+
+    void window.api
+      .invoke("util:getAppStatus")
+      .then((status) => setAppVersion(status.version))
+      .catch(() => {});
+
+    void window.api
+      .invoke("updater:getStatus")
+      .then(setUpdaterStatus)
+      .catch(() => {});
+
+    const offStatus = window.api.on("updater:status-changed", setUpdaterStatus);
+    const offAvailable = window.api.on("updater:update-available", () => {
+      void window.api.invoke("updater:getStatus").then(setUpdaterStatus);
+    });
+    const offDownloaded = window.api.on("updater:update-downloaded", () => {
+      void window.api.invoke("updater:getStatus").then(setUpdaterStatus);
+    });
+
+    const onFocus = () => {
+      void window.api.invoke("updater:getStatus").then(setUpdaterStatus);
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      offStatus();
+      offAvailable();
+      offDownloaded();
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   React.useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
@@ -318,6 +377,39 @@ function MainComponent() {
           <SettingsIcon className="size-3.5" />
           설정
         </Button>
+
+        {shouldShowUpdateButton && (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="ml-auto h-6 px-2 text-[11.5px]"
+            isLoading={isUpdateActionPending || updaterDownloading}
+            onClick={() => {
+              if (updateDownloaded || (updaterStrategy === "manual" && updateAvailable)) {
+                setShouldPromptForUpdate(true);
+                return;
+              }
+              if (shouldOfferManualDownload) {
+                setIsUpdateActionPending(true);
+                void window.api
+                  .invoke("updater:downloadUpdate")
+                  .catch((error) => {
+                    toast.error("업데이트를 다운로드하지 못했습니다", {
+                      description: error instanceof Error ? error.message : String(error),
+                    });
+                  })
+                  .finally(() => setIsUpdateActionPending(false));
+              }
+            }}
+          >
+            {updateDownloaded
+              ? "업데이트 확인"
+              : updaterStrategy === "manual"
+                ? "업데이트 확인"
+                : "업데이트 다운로드"}
+          </Button>
+        )}
       </div>
       <div className="shrink-0 border-b" />
 

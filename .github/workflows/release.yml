@@ -98,6 +98,17 @@ jobs:
               if: runner.os == 'macOS'
               run: pnpm build:mac
 
+            # electron-builder generates latest.yml when publish config is set,
+            # even with --publish never. electron-updater requires this file.
+            - name: Verify Windows update metadata
+              if: runner.os == 'Windows'
+              shell: bash
+              run: |
+                  ls -la dist
+                  test -f dist/latest.yml
+                  echo "--- latest.yml ---"
+                  cat dist/latest.yml
+
             - name: Upload dist artifacts
               uses: actions/upload-artifact@v4
               with:
@@ -107,6 +118,7 @@ jobs:
                       dist/*.dmg
                       dist/*.zip
                       dist/*.blockmap
+                      dist/*.yml
                   if-no-files-found: error
 
     release:
@@ -154,6 +166,12 @@ jobs:
                   assets=(release-artifacts/*)
                   if [ ${#assets[@]} -eq 0 ]; then
                     echo "No release artifacts found"
+                    exit 1
+                  fi
+                  printf 'Assets to upload:\n'
+                  printf '  %s\n' "${assets[@]}"
+                  if [[ ! -f release-artifacts/latest.yml ]]; then
+                    echo "latest.yml missing from release artifacts (required for electron-updater)"
                     exit 1
                   fi
                   gh release upload "v${VERSION}" "${assets[@]}" --clobber

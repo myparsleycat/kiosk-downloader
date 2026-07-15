@@ -27,7 +27,7 @@ export function getAppStatus(): AppStatus {
         isPackaged: app.isPackaged,
         isPortable: isPortable(),
         isDev: isDev,
-        platform: "win32",
+        platform: process.platform,
     };
 }
 

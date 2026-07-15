@@ -22,8 +22,11 @@ import {
 } from "@renderer/components/ui/select";
 import { Separator } from "@renderer/components/ui/separator";
 import { Switch } from "@renderer/components/ui/switch";
+import { useUpdaterStore } from "@renderer/stores/updater";
 import {
   type AppSettings,
+  AUTO_UPDATE_MODES,
+  type AutoUpdateMode,
   BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   BANDWIDTH_LIMIT_MIBPS_MAX,
   BANDWIDTH_LIMIT_MIBPS_MIN,
@@ -51,6 +54,7 @@ import {
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import {
+  ArrowUpCircleIcon,
   CpuIcon,
   DownloadIcon,
   FolderOpenIcon,
@@ -73,6 +77,7 @@ const SETTING_KEYS = [
   "general.asciiFilenames",
   "general.powerSaveBlockInTransfer",
   "general.shutdownAfterTransfer",
+  "general.autoUpdateMode",
   "general.autoTryCollectionPasswords",
   "general.collectionPasswordList",
   "general.logLevel",
@@ -99,6 +104,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.asciiFilenames": false,
   "general.powerSaveBlockInTransfer": true,
   "general.shutdownAfterTransfer": false,
+  "general.autoUpdateMode": "auto",
   "general.autoTryCollectionPasswords": false,
   "general.collectionPasswordList": [],
   "general.logLevel": "error",
@@ -166,10 +172,70 @@ const themeOptions = SETTING_THEMES.map((value) => ({
   label: themeLabels[value],
 }));
 
+const autoUpdateModeLabels: Record<AutoUpdateMode, string> = {
+  auto: "자동",
+  notify: "알림만",
+  off: "끔",
+};
+
+const autoUpdateModeDescriptions: Record<AutoUpdateMode, string> = {
+  auto: "업데이트를 자동으로 확인하고 다운로드합니다. 설치는 확인 후 진행됩니다.",
+  notify: "업데이트가 있으면 알림만 표시하고, 다운로드는 직접 시작합니다.",
+  off: "자동 확인을 하지 않습니다. 수동으로 확인할 수 있습니다.",
+};
+
+const autoUpdateModeOptions = AUTO_UPDATE_MODES.map((value) => ({
+  value,
+  label: autoUpdateModeLabels[value],
+}));
+
+function getUpdaterStatusText(options: {
+  strategy: string;
+  mode: AutoUpdateMode;
+  isChecking: boolean;
+  isDownloading: boolean;
+  updateDownloaded: boolean;
+  updateAvailable: boolean;
+  releaseVersion: string | null;
+}) {
+  if (options.strategy === "unsupported") {
+    return "이 빌드에서는 자동 업데이트를 지원하지 않습니다.";
+  }
+  if (options.mode === "off") {
+    return "자동 업데이트가 꺼져 있습니다.";
+  }
+  if (options.isChecking) {
+    return "업데이트 확인 중…";
+  }
+  if (options.isDownloading) {
+    return "업데이트 다운로드 중…";
+  }
+  if (options.updateDownloaded && options.releaseVersion) {
+    return `v${options.releaseVersion} 설치 준비 완료`;
+  }
+  if (options.updateAvailable && options.releaseVersion) {
+    return options.strategy === "manual"
+      ? `v${options.releaseVersion} 사용 가능 (수동 다운로드)`
+      : `v${options.releaseVersion} 사용 가능`;
+  }
+  return "최신 버전입니다.";
+}
+
 export function SettingsView() {
   const [settings, setSettings] = React.useState<SettingsState>(DEFAULT_SETTINGS);
   const [appStatus, setAppStatus] = React.useState<AppStatus | null>(null);
   const [shutdownConfirmOpen, setShutdownConfirmOpen] = React.useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = React.useState(false);
+  const [isUpdateActionPending, setIsUpdateActionPending] = React.useState(false);
+
+  const updaterStrategy = useUpdaterStore((state) => state.strategy);
+  const updaterMode = useUpdaterStore((state) => state.mode);
+  const updateAvailable = useUpdaterStore((state) => state.updateAvailable);
+  const updateDownloaded = useUpdaterStore((state) => state.updateDownloaded);
+  const releaseVersion = useUpdaterStore((state) => state.releaseVersion);
+  const isChecking = useUpdaterStore((state) => state.isChecking);
+  const isDownloading = useUpdaterStore((state) => state.isDownloading);
+  const setShouldPromptForUpdate = useUpdaterStore((state) => state.setShouldPromptForUpdate);
 
   React.useEffect(() => {
     void window.api
@@ -261,6 +327,130 @@ export function SettingsView() {
                 checked={settings["general.runInBackground"]}
                 onCheckedChange={(value) => void setSetting("general.runInBackground", value)}
               />
+            }
+          />
+        </Section>
+
+        <Section icon={<ArrowUpCircleIcon className="size-3.5" />} title="업데이트">
+          <SettingRow
+            title="현재 버전"
+            description={
+              appStatus
+                ? `v${appStatus.version}${appStatus.isPortable ? " (portable)" : ""}${appStatus.isDev ? " · dev" : ""}`
+                : "버전 정보를 불러오는 중…"
+            }
+            control={
+              updaterStrategy !== "unsupported" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  isLoading={isCheckingUpdate || isChecking}
+                  onClick={() => {
+                    setIsCheckingUpdate(true);
+                    void window.api
+                      .invoke("updater:checkForUpdates")
+                      .then(async () => {
+                        const status = await window.api.invoke("updater:getStatus");
+                        if (!status.updateAvailable && !status.updateDownloaded) {
+                          toast.success("최신 버전입니다");
+                        }
+                      })
+                      .catch((error) => {
+                        toast.error("업데이트를 확인하지 못했습니다", {
+                          description: error instanceof Error ? error.message : String(error),
+                        });
+                      })
+                      .finally(() => setIsCheckingUpdate(false));
+                  }}
+                >
+                  지금 확인
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void window.api.invoke("updater:openDownloadPage")}
+                >
+                  릴리스 열기
+                </Button>
+              )
+            }
+          />
+          {updaterStrategy !== "unsupported" && (
+            <SettingRow
+              title="자동 업데이트"
+              description={autoUpdateModeDescriptions[settings["general.autoUpdateMode"]]}
+              control={
+                <Select
+                  items={autoUpdateModeOptions}
+                  value={settings["general.autoUpdateMode"]}
+                  onValueChange={(value) => {
+                    if (value === null) return;
+                    void setSetting("general.autoUpdateMode", value);
+                  }}
+                >
+                  <SelectTrigger className="w-34">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent finalFocus={false}>
+                    <SelectGroup>
+                      {autoUpdateModeOptions.map((mode) => (
+                        <SelectItem key={mode.value} value={mode.value}>
+                          {mode.label}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              }
+            />
+          )}
+          <SettingRow
+            title="상태"
+            description={getUpdaterStatusText({
+              strategy: updaterStrategy,
+              mode: settings["general.autoUpdateMode"],
+              isChecking,
+              isDownloading,
+              updateDownloaded,
+              updateAvailable,
+              releaseVersion,
+            })}
+            control={
+              updaterStrategy === "nsis" &&
+              updateAvailable &&
+              !updateDownloaded &&
+              (updaterMode === "notify" || settings["general.autoUpdateMode"] === "notify") ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  isLoading={isUpdateActionPending || isDownloading}
+                  onClick={() => {
+                    setIsUpdateActionPending(true);
+                    void window.api
+                      .invoke("updater:downloadUpdate")
+                      .catch((error) => {
+                        toast.error("업데이트를 다운로드하지 못했습니다", {
+                          description: error instanceof Error ? error.message : String(error),
+                        });
+                      })
+                      .finally(() => setIsUpdateActionPending(false));
+                  }}
+                >
+                  다운로드
+                </Button>
+              ) : updaterStrategy === "nsis" && updateDownloaded ? (
+                <Button type="button" size="sm" onClick={() => setShouldPromptForUpdate(true)}>
+                  설치
+                </Button>
+              ) : updaterStrategy === "manual" && updateAvailable ? (
+                <Button type="button" size="sm" onClick={() => setShouldPromptForUpdate(true)}>
+                  확인
+                </Button>
+              ) : null
             }
           />
         </Section>

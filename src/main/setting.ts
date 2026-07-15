@@ -1,6 +1,8 @@
 import {
     APP_SETTINGS,
     type AppSettings,
+    AUTO_UPDATE_MODES,
+    type AutoUpdateMode,
     BANDWIDTH_LIMIT_MIBPS_DEFAULT,
     BANDWIDTH_LIMIT_MIBPS_MAX,
     BANDWIDTH_LIMIT_MIBPS_MIN,
@@ -230,6 +232,20 @@ export class Setting {
                 getDefault: () => false,
                 fromStored: (value) => parseBooleanSetting(value, false),
                 toStored: (value) => String(value),
+            },
+            "general.autoUpdateMode": {
+                definition: APP_SETTINGS["general.autoUpdateMode"],
+                getDefault: () => "auto" as const,
+                fromStored: (value) =>
+                    value === "false"
+                        ? "off"
+                        : fromOptions(value, AUTO_UPDATE_MODES, "auto" as AutoUpdateMode),
+                toStored: (value) => value,
+                normalize: (value) =>
+                    fromOptions(value, AUTO_UPDATE_MODES, "auto" as AutoUpdateMode),
+                afterSet: async (mode) => {
+                    await this.kd.service.updater.handleAutoUpdateModeChanged(mode);
+                },
             },
             "general.autoTryCollectionPasswords": {
                 definition: APP_SETTINGS["general.autoTryCollectionPasswords"],

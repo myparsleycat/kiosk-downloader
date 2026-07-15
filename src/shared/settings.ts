@@ -7,6 +7,10 @@ export type SettingLogLevel = (typeof SETTING_LOG_LEVELS)[number];
 export const SETTING_THEMES = ["system", "light", "dark"] as const;
 export type SettingTheme = (typeof SETTING_THEMES)[number];
 
+import { AUTO_UPDATE_MODES, type AutoUpdateMode } from "./updater";
+
+export { AUTO_UPDATE_MODES, type AutoUpdateMode };
+
 export interface AppSettings {
     "general.runOnStartup": boolean;
     "general.runInBackground": boolean;
@@ -17,6 +21,7 @@ export interface AppSettings {
     "general.theme": SettingTheme;
     "general.powerSaveBlockInTransfer": boolean;
     "general.shutdownAfterTransfer": boolean;
+    "general.autoUpdateMode": AutoUpdateMode;
     "general.autoTryCollectionPasswords": boolean;
     "general.collectionPasswordList": string[];
     "transfer.segmentPoolSize": number;
@@ -123,6 +128,11 @@ export const APP_SETTINGS = {
         publicKey: "general.shutdownAfterTransfer",
         scope: "general",
         storageKey: "shutdownAfterTransfer",
+    },
+    "general.autoUpdateMode": {
+        publicKey: "general.autoUpdateMode",
+        scope: "general",
+        storageKey: "autoUpdate",
     },
     "general.autoTryCollectionPasswords": {
         publicKey: "general.autoTryCollectionPasswords",

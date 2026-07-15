@@ -17,6 +17,7 @@ import { Logger } from "./logger";
 import { DownloadService } from "./service/download";
 import { StartupCleanupService } from "./service/startup-cleanup";
 import { TransferService } from "./service/transfer";
+import { Updater } from "./service/updater";
 import { UploadService } from "./service/upload";
 import { Setting } from "./setting";
 import { MainWindow } from "./window/main";
@@ -40,6 +41,7 @@ export class KioskDownloader {
 
     public initialized: boolean = false;
     public minimizeToTray: boolean = false;
+    public isInstallingUpdate: boolean = false;
 
     public window: {
         main: MainWindow;
@@ -56,6 +58,7 @@ export class KioskDownloader {
         download: DownloadService;
         upload: UploadService;
         startupCleanup: StartupCleanupService;
+        updater: Updater;
     };
 
     public constructor() {
@@ -78,6 +81,7 @@ export class KioskDownloader {
             startupCleanup: new StartupCleanupService(this),
             download: new DownloadService(this),
             upload: new UploadService(this),
+            updater: new Updater(this),
         };
     }
 
@@ -134,9 +138,11 @@ export class KioskDownloader {
         this.logger.setLevel(logLevel);
 
         await this.window.main.createMainWindow();
+        this.service.updater.initialize();
         await this.service.download.restoreStartupState();
         await this.service.upload.restoreStartupState();
         void this.syncAutoLaunchSetting();
+        void this.service.updater.showPendingDialogsIfNeeded();
     }
 }
 
@@ -182,6 +188,9 @@ void app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", async () => {
+    if (kd.isInstallingUpdate) {
+        return;
+    }
     const runInBackground = await kd.setting.get("general.runInBackground");
     if (!runInBackground) {
         app.quit();
@@ -189,6 +198,9 @@ app.on("window-all-closed", async () => {
 });
 
 app.on("before-quit", () => {
+    if (kd.isInstallingUpdate) {
+        return;
+    }
     try {
         kd.service.download.destroy();
         kd.service.upload.destroy();

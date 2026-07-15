@@ -13,8 +13,22 @@ export class Tray {
 
     public createTray() {
         this.tray = new Tr(createTrayIcon());
+        const canCheckUpdates = this.kd.service.updater.getStrategy() !== "unsupported";
         const contextMenu = Menu.buildFromTemplate([
-            // { type: "separator" },
+            ...(canCheckUpdates
+                ? [
+                      {
+                          label: "업데이트 확인...",
+                          type: "normal" as const,
+                          click: () => {
+                              void this.kd.service.updater.checkForUpdates(true).catch((error) => {
+                                  this.kd.logger.error(error, "tray.checkForUpdates");
+                              });
+                          },
+                      },
+                      { type: "separator" as const },
+                  ]
+                : []),
             {
                 label: "Quit",
                 type: "normal",

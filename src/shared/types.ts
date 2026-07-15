@@ -2,6 +2,7 @@
 export type { IpcHandlers } from "./types.gen";
 
 import type { AppSettings, SettingKey } from "./settings";
+import type { UpdaterStatus } from "./updater";
 
 export interface AppStatus {
     version: string;
@@ -310,4 +311,7 @@ export type IpcEvents = {
     "upload:item-update": (item: UploadItem) => void;
     "upload:progress-update": (patch: UploadProgressPatch) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;
+    "updater:status-changed": (status: UpdaterStatus) => void;
+    "updater:update-available": () => void;
+    "updater:update-downloaded": () => void;
 };
