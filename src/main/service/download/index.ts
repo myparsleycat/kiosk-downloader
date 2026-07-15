@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import { tryParseDownloadUrl } from "@shared/share-url";
+import { applyRenamesToTree, toDisplayPath } from "@shared/tree-rename";
 import type {
     CreateDownloadPayload,
     DownloadItem,
@@ -180,11 +181,13 @@ export class DownloadService {
     public async create(payload: CreateDownloadPayload) {
         const loaded = await this.loadCollectionUnlocked(payload);
         const selectedPaths = new Set(payload.selectedPaths);
+        const renames = payload.renames ?? {};
         let tree = loaded.collection.tree;
 
         if (loaded.provider === "kiosk") {
-            for (const { zip, path: zipPath } of listZipNodes(tree)) {
-                if (!isZipExtractMode(zipPath, selectedPaths)) {
+            for (const { zip, path: originalZipPath } of listZipNodes(tree)) {
+                const displayZipPath = toDisplayPath(originalZipPath, renames);
+                if (!isZipExtractMode(displayZipPath, selectedPaths)) {
                     continue;
                 }
                 const zipPassword = payload.zipPasswords?.[zip.id];
@@ -192,6 +195,8 @@ export class DownloadService {
                 tree = setZipEntries(tree, zip.id, indexed.entries);
             }
         }
+
+        tree = applyRenamesToTree(tree, renames);
 
         const enriched: LoadedCollection = {
             ...loaded,

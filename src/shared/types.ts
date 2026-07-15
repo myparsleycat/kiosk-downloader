@@ -237,6 +237,8 @@ export interface CreateDownloadPayload {
     savePath: string;
     selectedPaths: string[];
     zipPasswords?: Record<string, string>;
+    /** original relative node path → new basename (applied after collection load) */
+    renames?: Record<string, string>;
 }
 
 export interface ListZipEntriesPayload {

@@ -1,4 +1,13 @@
 import type { Collection } from "@renderer/lib/types";
+import {
+    basename,
+    displayPathToOriginal,
+    hasSiblingNameConflict,
+    joinPath,
+    parentPath,
+    rewritePathSet,
+    validateNodeName,
+} from "@shared/tree-rename";
 import { create } from "zustand";
 
 type NewDownloadDraftState = {
@@ -14,6 +23,8 @@ type NewDownloadDraftState = {
     settingsHydrated: boolean;
     zipPasswords: Record<string, string>;
     zipLoadingPaths: Set<string>;
+    /** original relative path → new basename */
+    renames: Record<string, string>;
 };
 
 type NewDownloadDraftActions = {
@@ -29,6 +40,11 @@ type NewDownloadDraftActions = {
     setProbedShareId: (probedShareId: string | null) => void;
     setZipPassword: (fileId: string, password: string) => void;
     setZipLoading: (path: string, loading: boolean) => void;
+    renameNode: (
+        displayPath: string,
+        newName: string,
+        displayTree: Collection["tree"],
+    ) => string | null;
     clearProbeState: () => void;
     resetDraft: () => void;
     hydrateSettings: () => Promise<void>;
@@ -49,6 +65,7 @@ const draftDefaults = {
     settingsHydrated: false,
     zipPasswords: {},
     zipLoadingPaths: new Set<string>(),
+    renames: {},
 } satisfies NewDownloadDraftState;
 
 export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => ({
@@ -66,7 +83,14 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
 
     setPasswordInvalid: (passwordInvalid) => set({ passwordInvalid }),
 
-    setCollection: (collection) => set({ collection }),
+    setCollection: (collection) =>
+        set((state) => ({
+            collection,
+            renames:
+                collection === null || collection.shareId !== state.collection?.shareId
+                    ? {}
+                    : state.renames,
+        })),
 
     setSelected: (selected) => set({ selected }),
 
@@ -87,6 +111,40 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
         set({ zipLoadingPaths: next });
     },
 
+    renameNode: (displayPath, newName, displayTree) => {
+        const collection = get().collection;
+        if (!collection) {
+            return "컬렉션이 없습니다.";
+        }
+        const trimmed = newName.trim();
+        const validationError = validateNodeName(trimmed);
+        if (validationError) {
+            return validationError;
+        }
+        if (basename(displayPath) === trimmed) {
+            return null;
+        }
+        if (hasSiblingNameConflict(displayTree, parentPath(displayPath), trimmed, displayPath)) {
+            return "같은 위치에 동일한 이름이 이미 있습니다.";
+        }
+
+        const originalPath =
+            displayPathToOriginal(collection.tree, get().renames, displayPath) ?? displayPath;
+        const nextDisplayPath = joinPath(parentPath(displayPath), trimmed);
+        const renames = { ...get().renames, [originalPath]: trimmed };
+        // Drop no-op entries that restore the original basename
+        if (trimmed === basename(originalPath)) {
+            delete renames[originalPath];
+        }
+
+        set({
+            renames,
+            selected: rewritePathSet(get().selected, displayPath, nextDisplayPath),
+            zipLoadingPaths: rewritePathSet(get().zipLoadingPaths, displayPath, nextDisplayPath),
+        });
+        return null;
+    },
+
     clearProbeState: () =>
         set({
             password: "",
@@ -97,6 +155,7 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
             probedShareId: null,
             zipPasswords: {},
             zipLoadingPaths: new Set(),
+            renames: {},
         }),
 
     resetDraft: () =>
@@ -110,6 +169,7 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
             probedShareId: null,
             zipPasswords: {},
             zipLoadingPaths: new Set(),
+            renames: {},
         }),
 
     hydrateSettings: async () => {

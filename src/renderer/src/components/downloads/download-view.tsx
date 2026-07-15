@@ -7,9 +7,11 @@ import {
   ContextMenuTrigger,
 } from "@renderer/components/ui/context-menu";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@renderer/components/ui/tooltip";
 import type { DownloadFilter, DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import {
+  BrushCleaningIcon,
   DownloadIcon,
   FilterIcon,
   FolderOpenIcon,
@@ -73,7 +75,8 @@ export function DownloadView({
   }, [filtered, selectedId]);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
-  const { remove, dialog, removing } = useRemoveCollection();
+  const { remove, removeCompleted, dialog, removing } = useRemoveCollection();
+  const hasCompleted = items.some((item) => item.status === "completed");
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {
     try {
@@ -131,6 +134,22 @@ export function DownloadView({
               {f === "all" ? "전체" : f === "active" ? "진행중" : "완료"}
             </button>
           ))}
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={!hasCompleted || removing}
+                  onClick={() => void removeCompleted(items)}
+                  className="ml-auto size-6 text-muted-foreground"
+                >
+                  <BrushCleaningIcon className="size-3.5" />
+                </Button>
+              }
+            />
+            <TooltipContent>완료된 항목 제거</TooltipContent>
+          </Tooltip>
         </div>
         <ScrollArea className="flex-1">
           <div className="flex w-full flex-col gap-2 p-2">
@@ -190,22 +209,24 @@ export function DownloadView({
                       <FolderOpenIcon />
                       폴더 열기
                     </ContextMenuItem>
-                    <ContextMenuItem
-                      onClick={() =>
-                        runAction(async () => {
-                          const result = await window.api.invoke(
-                            "download:exportCollection",
-                            item.id,
-                          );
-                          if (result) {
-                            toast.success("컬렉션을 내보냈습니다");
-                          }
-                        })
-                      }
-                    >
-                      <ShareIcon />
-                      내보내기
-                    </ContextMenuItem>
+                    {item.status !== "completed" && (
+                      <ContextMenuItem
+                        onClick={() =>
+                          runAction(async () => {
+                            const result = await window.api.invoke(
+                              "download:exportCollection",
+                              item.id,
+                            );
+                            if (result) {
+                              toast.success("컬렉션을 내보냈습니다");
+                            }
+                          })
+                        }
+                      >
+                        <ShareIcon />
+                        내보내기
+                      </ContextMenuItem>
+                    )}
                     <ContextMenuSeparator />
                     <ContextMenuItem
                       variant="destructive"

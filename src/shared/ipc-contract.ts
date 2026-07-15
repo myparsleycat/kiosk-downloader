@@ -56,6 +56,7 @@ export type IpcHandlers = {
     "upload:pickFolder": (maxFiles?: number) => Promise<ExpandPathsResult>;
     "upload:remove": UploadService["remove"];
     "upload:removeDraftSources": UploadService["removeDraftSources"];
+    "upload:renameDraftSources": (payload: { from: string; to: string }) => void;
     "upload:resume": UploadService["resumeUpload"];
     "upload:resumeFile": UploadService["resumeFile"];
     "upload:solveTurnstile": UploadService["solveTurnstile"];

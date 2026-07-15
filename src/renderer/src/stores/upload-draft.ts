@@ -1,3 +1,11 @@
+import {
+    basename,
+    hasUploadPathConflict,
+    joinPath,
+    parentPath,
+    renameUploadFiles,
+    validateNodeName,
+} from "@shared/tree-rename";
 import type { UploadTreeFile } from "@shared/types";
 import { create } from "zustand";
 
@@ -31,6 +39,7 @@ type UploadDraftState = {
 type UploadDraftActions = {
     addFiles: (files: UploadTreeFile[]) => void;
     removeFile: (path: string) => void;
+    renameFile: (path: string, newName: string) => Promise<string | null>;
     clearFiles: () => void;
     setName: (name: string) => void;
     setDescription: (description: string) => void;
@@ -70,6 +79,42 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
         const files = get().files.filter((f) => f.path !== path && !f.path.startsWith(prefix));
         void window.api.invoke("upload:removeDraftSources", [path]);
         set({ files });
+    },
+
+    renameFile: async (path, newName) => {
+        const trimmed = newName.trim();
+        const validationError = validateNodeName(trimmed);
+        if (validationError) {
+            return validationError;
+        }
+        if (basename(path) === trimmed) {
+            return null;
+        }
+        const files = get().files;
+        if (hasUploadPathConflict(files, path, trimmed)) {
+            return "같은 위치에 동일한 이름이 이미 있습니다.";
+        }
+        const toPath = joinPath(parentPath(path), trimmed);
+
+        try {
+            await window.api.invoke("upload:renameDraftSources", { from: path, to: toPath });
+        } catch (error) {
+            return error instanceof Error ? error.message : "이름 변경에 실패했습니다.";
+        }
+
+        const nextFiles = renameUploadFiles(get().files, path, trimmed);
+        const currentName = get().name;
+        const topSegment = path.split("/")[0] ?? "";
+        const isRootRename = parentPath(path) === "";
+        const nextName =
+            currentName.trim() === ""
+                ? (nextFiles[0]?.path.split("/")[0] ?? currentName)
+                : isRootRename && currentName === topSegment
+                  ? trimmed
+                  : currentName;
+
+        set({ files: nextFiles, name: nextName });
+        return null;
     },
 
     clearFiles: () => {
