@@ -18,8 +18,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@renderer/components/ui
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Separator } from "@renderer/components/ui/separator";
 import { cn } from "@renderer/lib/utils";
-import { clampExpiry, useUploadDraft } from "@renderer/stores/upload-draft";
-import { buildDirTreeFromFiles } from "@shared/dir-tree";
+import { clampExpiry, mergeDateAndTime, useUploadDraft } from "@renderer/stores/upload-draft";
+import { buildDirTreeFromFiles, validateDirTreeFilePaths } from "@shared/dir-tree";
 import type { ExpandPathsResult, UploadTreeFile } from "@shared/types";
 import { MAX_UPLOAD_FILES } from "@shared/types";
 import { formatSize } from "@shared/utils";
@@ -100,16 +100,6 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   maxExpiryDate.setDate(maxExpiryDate.getDate() + MAX_EXPIRY_DAYS);
   const maxExpiryMonth = new Date(maxExpiryDate.getFullYear(), maxExpiryDate.getMonth(), 1);
 
-  const mergeDateAndTime = (date: Date, time: string): number => {
-    const [h, m, s] = time.split(":").map((n) => {
-      const v = Number(n);
-      return Number.isNaN(v) ? 0 : v;
-    });
-    const merged = new Date(date);
-    merged.setHours(h, m, s, 0);
-    return clampExpiry(merged.getTime());
-  };
-
   const handleExpiryDateSelect = (date: Date | undefined) => {
     if (!date) return;
     setExpiresAt(mergeDateAndTime(date, expiryTime));
@@ -145,6 +135,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     setExpanding(true);
     // Let the loading spinner paint before the heavy IPC / store update.
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    let incomingPaths: string[] = [];
     try {
       const remainingSlots = Math.max(0, MAX_UPLOAD_FILES - files.length);
       if (remainingSlots === 0) {
@@ -155,11 +146,13 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
       const result = await load(remainingSlots);
       if (result.files.length === 0) return;
 
+      incomingPaths = newIncomingPaths(files, result.files);
       const merged = mergeUploadFiles(files, result.files);
+      validateDirTreeFilePaths(merged);
       const mergedBytes = merged.reduce((sum, file) => sum + file.size, 0);
       if (mergedBytes > MAX_UPLOAD_BYTES) {
         toast.warning("최대 50 GiB 까지만 추가할 수 있습니다");
-        removeDraftSources(newIncomingPaths(files, result.files));
+        removeDraftSources(incomingPaths);
         return;
       }
 
@@ -167,13 +160,14 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
         setExpanding(false);
         const confirmed = await askCountOverflow();
         if (!confirmed) {
-          removeDraftSources(newIncomingPaths(files, result.files));
+          removeDraftSources(incomingPaths);
           return;
         }
       }
 
       addFiles(result.files);
     } catch (error) {
+      removeDraftSources(incomingPaths);
       toast.error("파일을 불러오지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
       });

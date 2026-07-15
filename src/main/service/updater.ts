@@ -10,6 +10,7 @@ import {
     type UpdateStrategy,
     type UpdaterStatus,
 } from "@shared/updater";
+import { toErrorMessage } from "@shared/utils";
 import { app, BrowserWindow } from "electron";
 import { convert as htmlToText } from "html-to-text";
 import ms from "ms";
@@ -157,7 +158,19 @@ export class Updater {
         });
 
         autoUpdater.on("update-available", (info) => {
-            void this.handleNsisUpdateAvailable(info);
+            void this.handleNsisUpdateAvailable(info).catch((error) => {
+                this.isCheckingForUpdates = false;
+                this.broadcastStatus();
+                this.kd.logger.error(
+                    {
+                        event: "update-available",
+                        stage: "process-update-info",
+                        message: toErrorMessage(error),
+                    },
+                    "updater.updateAvailable",
+                );
+                this.kd.logger.error(error, "updater.updateAvailable");
+            });
         });
 
         autoUpdater.on("update-not-available", () => {
@@ -636,6 +649,10 @@ export class Updater {
 
     public async openDownloadPage(): Promise<void> {
         await openExternal(GITHUB_RELEASES_LATEST_URL);
+    }
+
+    public async showUpdateUi(): Promise<void> {
+        await this.focusMainWindow();
     }
 
     private async notifyUpdateReady(): Promise<void> {

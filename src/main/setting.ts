@@ -116,17 +116,16 @@ function parseCollectionPasswordList(value: string | null | undefined): string[]
     }
 }
 
-function normalizeCollectionPasswordList(value: string[]) {
+export function normalizeCollectionPasswordList(value: string[]) {
     const seen = new Set<string>();
     const result: string[] = [];
 
     for (const item of value) {
-        const trimmed = item.trim();
-        if (!trimmed || seen.has(trimmed)) {
+        if (item.length === 0 || seen.has(item)) {
             continue;
         }
-        seen.add(trimmed);
-        result.push(trimmed);
+        seen.add(item);
+        result.push(item);
         if (result.length >= COLLECTION_PASSWORD_LIST_MAX) {
             break;
         }

@@ -83,11 +83,11 @@ function isCollectionExpired(expires: number) {
 }
 
 function requireSegmentSize(value: number) {
-    if (!Number.isFinite(value) || value < 1) {
+    if (!Number.isSafeInteger(value) || value < 1) {
         throw new Error(`Invalid collection segment size: ${value}.`);
     }
 
-    return Math.floor(value);
+    return value;
 }
 
 function getChunkCount(fileSize: number, segmentSize: number) {
@@ -467,9 +467,9 @@ export class DownloadRepository {
         const collectionId = randomUUID();
         const timestamp = nowIso();
         const segmentSize = requireSegmentSize(payload.collection.segmentSize);
-        const expired = isCollectionExpired(payload.collection.expires);
         const hasPending = payload.files.some((file) => file.selected && file.status === "pending");
-        const status: DownloadStatus = expired ? "expired" : hasPending ? "queued" : "completed";
+        const expired = hasPending && isCollectionExpired(payload.collection.expires);
+        const status: DownloadStatus = hasPending ? (expired ? "expired" : "queued") : "completed";
 
         this.kd.lib.db.transaction((tx) => {
             tx.run(

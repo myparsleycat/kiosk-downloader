@@ -10,6 +10,16 @@ export function clampExpiry(ms: number): number {
     return Math.min(Math.max(ms, now), now + MAX_EXPIRY_DAYS * DAY);
 }
 
+export function mergeDateAndTime(date: Date, time: string): number {
+    const [hours = 0, minutes = 0, seconds = 0] = time.split(":").map((part) => {
+        const value = Number(part);
+        return Number.isNaN(value) ? 0 : value;
+    });
+    const merged = new Date(date);
+    merged.setHours(hours, minutes, seconds, 0);
+    return clampExpiry(merged.getTime());
+}
+
 type UploadDraftState = {
     files: UploadTreeFile[];
     name: string;

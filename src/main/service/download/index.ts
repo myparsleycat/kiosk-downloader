@@ -542,11 +542,7 @@ export class DownloadService {
                 collectionName: payload.collection.name,
                 shareId: payload.collection.shareId,
             },
-            () => {
-                const id = this.repository.insertImportedDownload(payload, savePath);
-                this.repository.ensureCollectionNotExpired(id);
-                return id;
-            },
+            () => this.repository.insertImportedDownload(payload, savePath),
         );
 
         await this.emitUpdate(collectionId);

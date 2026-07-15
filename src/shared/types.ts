@@ -1,4 +1,3 @@
-// oxlint-disable typescript/no-explicit-any
 export type { IpcHandlers } from "./types.gen";
 
 import type { AppSettings, SettingKey } from "./settings";

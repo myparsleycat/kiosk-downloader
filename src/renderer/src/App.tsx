@@ -404,7 +404,7 @@ function MainComponent() {
             }}
           >
             {updateDownloaded
-              ? "업데이트 확인"
+              ? "설치"
               : updaterStrategy === "manual"
                 ? "업데이트 확인"
                 : "업데이트 다운로드"}

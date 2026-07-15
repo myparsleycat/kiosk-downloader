@@ -870,11 +870,14 @@ function CollectionPasswordListSetting({
     value.map((entry) => createPasswordRow(entry)),
   );
   const itemsRef = React.useRef(items);
-  const focusedCountRef = React.useRef(0);
-  itemsRef.current = items;
+  const isFocusedRef = React.useRef(false);
 
   React.useEffect(() => {
-    if (focusedCountRef.current > 0) {
+    itemsRef.current = items;
+  }, [items]);
+
+  React.useEffect(() => {
+    if (isFocusedRef.current) {
       return;
     }
 
@@ -894,9 +897,13 @@ function CollectionPasswordListSetting({
     });
   }, [value]);
 
-  const commit = (next: PasswordRow[]) => {
+  const updateItems = (next: PasswordRow[]) => {
     itemsRef.current = next;
     setItems(next);
+  };
+
+  const commit = (next: PasswordRow[]) => {
+    updateItems(next);
     onChange(next.map((item) => item.value));
   };
 
@@ -908,28 +915,34 @@ function CollectionPasswordListSetting({
           최대 {COLLECTION_PASSWORD_LIST_MAX}개까지 저장·표시됩니다.
         </span>
       </div>
-      <div className="flex flex-col gap-1.5">
+      <div
+        className="flex flex-col gap-1.5"
+        onFocus={() => {
+          isFocusedRef.current = true;
+        }}
+        onBlur={(event) => {
+          if (
+            event.relatedTarget instanceof Node &&
+            event.currentTarget.contains(event.relatedTarget)
+          ) {
+            return;
+          }
+          isFocusedRef.current = false;
+          onChange(itemsRef.current.map((row) => row.value));
+        }}
+      >
         {items.map((item) => (
           <div key={item.id} className="flex items-center gap-1.5">
             <Input
               value={item.value}
               placeholder="비밀번호"
               className="h-8"
-              onFocus={() => {
-                focusedCountRef.current += 1;
-              }}
               onChange={(event) => {
-                commit(
+                updateItems(
                   itemsRef.current.map((row) =>
                     row.id === item.id ? { ...row, value: event.target.value } : row,
                   ),
                 );
-              }}
-              onBlur={() => {
-                focusedCountRef.current = Math.max(0, focusedCountRef.current - 1);
-                if (focusedCountRef.current === 0) {
-                  onChange(itemsRef.current.map((row) => row.value));
-                }
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -958,7 +971,7 @@ function CollectionPasswordListSetting({
             if (itemsRef.current.length >= COLLECTION_PASSWORD_LIST_MAX) {
               return;
             }
-            setItems([...itemsRef.current, createPasswordRow()]);
+            updateItems([...itemsRef.current, createPasswordRow()]);
           }}
         >
           <PlusIcon className="size-3.5" />

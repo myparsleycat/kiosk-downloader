@@ -1,4 +1,5 @@
-import type { DirNode } from "@shared/types";
+import type { DirNode, DownloadTransferPayload } from "@shared/types";
+import { DOWNLOAD_TRANSFER_KIND, DOWNLOAD_TRANSFER_VERSION } from "@shared/types";
 import { describe, expect, it } from "vitest";
 
 import type { KioskDownloader } from "../..";
@@ -77,6 +78,102 @@ async function createRepository() {
     const repo = new DownloadRepository({ lib: { db } } as KioskDownloader);
     return { db, repo };
 }
+
+function createImportPayload(options: {
+    expires: number;
+    status: "completed" | "pending";
+}): DownloadTransferPayload {
+    return {
+        version: DOWNLOAD_TRANSFER_VERSION,
+        kind: DOWNLOAD_TRANSFER_KIND,
+        exportedAt: Date.now(),
+        collection: {
+            shareId: "imported-share",
+            sourceUrl: "https://example.com/imported-share",
+            passwordPlain: null,
+            name: "Imported",
+            rootId: "root",
+            segmentSize: 1024,
+            expires: options.expires,
+            tree: {
+                type: "dir",
+                id: "root",
+                name: "",
+                entries: [
+                    {
+                        kind: "file",
+                        node: {
+                            type: "file",
+                            id: "file",
+                            name: "file.bin",
+                            size: 12,
+                        },
+                    },
+                ],
+            },
+            asciiFilenames: false,
+            provider: "kiosk",
+        },
+        files: [
+            {
+                remoteId: "file",
+                path: "file.bin",
+                name: "file.bin",
+                size: 12,
+                selected: true,
+                status: options.status,
+                completedElsewhere: options.status === "completed",
+                sourceKind: "file",
+                zipEntryJson: null,
+                sourceMetaJson: null,
+            },
+        ],
+    };
+}
+
+describe("DownloadRepository.insertImportedDownload", () => {
+    it("keeps a fully completed expired import completed without an error", async () => {
+        const { repo } = await createRepository();
+
+        const id = repo.insertImportedDownload(
+            createImportPayload({ expires: 0, status: "completed" }),
+            "/tmp",
+        );
+
+        expect(repo.getCollection(id)).toMatchObject({ status: "completed", error: null });
+        expect(repo.listFiles(id)).toMatchObject([
+            { status: "completed", downloadedBytes: 12, completedElsewhere: 1 },
+        ]);
+    });
+
+    it("marks an expired import with pending selected files expired", async () => {
+        const { repo } = await createRepository();
+
+        const id = repo.insertImportedDownload(
+            createImportPayload({ expires: 0, status: "pending" }),
+            "/tmp",
+        );
+
+        expect(repo.getCollection(id)).toMatchObject({
+            status: "expired",
+            error: "Collection has expired.",
+        });
+    });
+
+    it("queues a non-expired import with pending selected files", async () => {
+        const { repo } = await createRepository();
+
+        const id = repo.insertImportedDownload(
+            createImportPayload({
+                expires: Math.ceil(Date.now() / 1000) + 3600,
+                status: "pending",
+            }),
+            "/tmp",
+        );
+
+        expect(repo.getCollection(id)).toMatchObject({ status: "queued", error: null });
+    });
+});
 
 function seedTransferFile(
     db: DatabaseClient,
