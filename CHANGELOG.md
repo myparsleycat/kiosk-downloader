@@ -1,3 +1,18 @@
+# [1.5.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.4.1...v1.5.0) (2026-07-15)
+
+
+### Bug Fixes
+
+* address validated review issues ([4445eb1](https://github.com/myparsleycat/kiosk-downloader/commit/4445eb1bc44372d55ca19e73277ad1c56d7230bc))
+* **ipc-generator:** bootstrap types.gen.ts when missing ([32cfbf0](https://github.com/myparsleycat/kiosk-downloader/commit/32cfbf0ab679f6dfcb34756ad8e3296a5a8f5c11))
+
+
+### Features
+
+* add app update notifications ([01bdcfc](https://github.com/myparsleycat/kiosk-downloader/commit/01bdcfc3005c5f6f7c534df6e5965eb37a76a645))
+* auto-try saved collection passwords on load ([1860e22](https://github.com/myparsleycat/kiosk-downloader/commit/1860e22960aadb1df197961abedf2d0fdc4ff957))
+* **download:** add collection transfer export and import ([03e4cf6](https://github.com/myparsleycat/kiosk-downloader/commit/03e4cf694fa38f475efdc5343707233612755802))
+
 ## [1.4.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.4.0...v1.4.1) (2026-07-11)
 
 
