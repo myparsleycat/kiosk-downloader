@@ -190,22 +190,24 @@ export function DownloadView({
                       <FolderOpenIcon />
                       폴더 열기
                     </ContextMenuItem>
-                    <ContextMenuItem
-                      onClick={() =>
-                        runAction(async () => {
-                          const result = await window.api.invoke(
-                            "download:exportCollection",
-                            item.id,
-                          );
-                          if (result) {
-                            toast.success("컬렉션을 내보냈습니다");
-                          }
-                        })
-                      }
-                    >
-                      <ShareIcon />
-                      내보내기
-                    </ContextMenuItem>
+                    {item.status !== "completed" && (
+                      <ContextMenuItem
+                        onClick={() =>
+                          runAction(async () => {
+                            const result = await window.api.invoke(
+                              "download:exportCollection",
+                              item.id,
+                            );
+                            if (result) {
+                              toast.success("컬렉션을 내보냈습니다");
+                            }
+                          })
+                        }
+                      >
+                        <ShareIcon />
+                        내보내기
+                      </ContextMenuItem>
+                    )}
                     <ContextMenuSeparator />
                     <ContextMenuItem
                       variant="destructive"
