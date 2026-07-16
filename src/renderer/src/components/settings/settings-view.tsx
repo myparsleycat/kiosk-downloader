@@ -54,6 +54,7 @@ import {
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import {
+  ArrowLeftRightIcon,
   ArrowUpCircleIcon,
   CpuIcon,
   DownloadIcon,
@@ -530,6 +531,21 @@ export function SettingsView() {
           />
         </Section>
 
+        <Section icon={<ArrowLeftRightIcon className="size-3.5" />} title="전송 큐">
+          <SettingRow
+            title="세그먼트 풀 크기"
+            description="다운로드·업로드가 공유하는 세그먼트 풀의 최대 크기입니다. 업로드 동시 세그먼트는 최대 8로 제한됩니다."
+            control={
+              <NumberSetting
+                value={settings["transfer.segmentPoolSize"]}
+                min={SEGMENT_POOL_SIZE_MIN}
+                max={SEGMENT_POOL_SIZE_MAX}
+                onChange={(value) => void setSetting("transfer.segmentPoolSize", value)}
+              />
+            }
+          />
+        </Section>
+
         <Section icon={<DownloadIcon className="size-3.5" />} title="다운로드 큐">
           <SettingRow
             title="대역폭 제한"
@@ -546,18 +562,6 @@ export function SettingsView() {
                 />
                 <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
               </div>
-            }
-          />
-          <SettingRow
-            title="세그먼트 풀 크기"
-            description="앱 전체에서 공유하는 세그먼트 풀의 최대 크기입니다. 여러 파일·컬렉션에 고르게 나뉩니다."
-            control={
-              <NumberSetting
-                value={settings["transfer.segmentPoolSize"]}
-                min={SEGMENT_POOL_SIZE_MIN}
-                max={SEGMENT_POOL_SIZE_MAX}
-                onChange={(value) => void setSetting("transfer.segmentPoolSize", value)}
-              />
             }
           />
           <SettingRow
