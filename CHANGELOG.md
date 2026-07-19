@@ -1,3 +1,14 @@
+## [1.7.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.7.0...v1.7.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **checkbox:** apply primary background to indeterminate state in dark mode ([d4729dd](https://github.com/myparsleycat/kiosk-downloader/commit/d4729dde57176a7b31b3b09beae1d4e240dd8f23))
+* **download:** guard import button and align remove error message ([111ea3c](https://github.com/myparsleycat/kiosk-downloader/commit/111ea3cc6a27de707eb3cd5f39142bfb77e211d2))
+* **metrics:** use monotonic clock for download speed sampling ([19e3f8d](https://github.com/myparsleycat/kiosk-downloader/commit/19e3f8df29ce0141555a740cf7cd54619ab3bfea))
+* **settings:** remove hardcoded upload segment limit from description ([a6ed799](https://github.com/myparsleycat/kiosk-downloader/commit/a6ed799230b07114e2e6e8534fd25250d50f3611))
+* **transfer-items:** flush pending items when initial load fails ([53abf71](https://github.com/myparsleycat/kiosk-downloader/commit/53abf71d8bc9cf7f2d302ead7fbe9d5191d7d8d1))
+
 # [1.7.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.6.0...v1.7.0) (2026-07-15)
 
 
