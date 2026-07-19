@@ -282,7 +282,7 @@ export class UploadService {
 
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.uploadStartupResumeMode");
-        this.repository.restoreStartupState(mode);
+        this.repository.restoreStartupState();
         await this.scheduler.restoreFromRepository();
         await this.emitUpdate();
         if (mode === "auto") {

@@ -43,7 +43,6 @@ import {
 import { TransferItApiClient } from "./transfer-it-api-client";
 import { indexZipFromSegments } from "./zip-index";
 
-const CAT_CACHE_TTL_MS = 10 * 60 * 1000;
 const KDX_FILTERS = [{ name: "Kiosk Download Transfer", extensions: ["kdx"] }];
 
 export class DownloadService {
@@ -52,7 +51,6 @@ export class DownloadService {
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
-    private readonly catCache = new Map<string, { cat: string; expiresAt: number }>();
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
@@ -82,7 +80,7 @@ export class DownloadService {
 
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.startupResumeMode");
-        this.repository.restoreStartupState(mode);
+        this.repository.restoreStartupState();
         this.repository.syncExpiredCollections();
         await this.emitUpdate();
         if (mode === "auto") {
@@ -236,8 +234,7 @@ export class DownloadService {
         await this.emitUpdate(collectionId);
         void this.scheduler.schedule();
         void this.kd.setting.set("general.lastDownloadPath", basePath);
-        const item = this.repository.getItem(collectionId);
-        return item ? this.enrichItem(item) : null;
+        return this.getEnrichedItem(collectionId);
     }
 
     private async loadCollectionUnlocked(payload: {
@@ -251,22 +248,7 @@ export class DownloadService {
         if (parsed.provider === "transfer") {
             return this.transferApi.loadCollection(payload);
         }
-        const loaded = await this.api.loadCollection(payload);
-        this.cacheCat(loaded.collection.shareId, loaded.cat);
-        return loaded;
-    }
-
-    private cacheCat(shareId: string, cat: string) {
-        this.catCache.set(shareId, { cat, expiresAt: Date.now() + CAT_CACHE_TTL_MS });
-    }
-
-    private async getCat(loaded: LoadedKioskCollection) {
-        const cached = this.catCache.get(loaded.collection.shareId);
-        if (cached && cached.expiresAt > Date.now()) {
-            return cached.cat;
-        }
-        this.cacheCat(loaded.collection.shareId, loaded.cat);
-        return loaded.cat;
+        return this.api.loadCollection(payload);
     }
 
     private async indexZipNode(
@@ -275,8 +257,7 @@ export class DownloadService {
         fileSize: number,
         zipPassword?: string,
     ) {
-        const cat = await this.getCat(loaded);
-        const segments = await this.api.getSegments(remoteFileId, cat);
+        const segments = await this.api.getSegments(remoteFileId, loaded.cat);
         return indexZipFromSegments({
             kd: this.kd,
             shareId: loaded.collection.shareId,
@@ -319,8 +300,7 @@ export class DownloadService {
         this.repository.recomputeCollectionStatus(file.collectionId);
         await this.emitUpdate(file.collectionId);
         await this.kd.service.transfer.refreshPowerSaveBlock();
-        const item = this.repository.getItem(file.collectionId);
-        return item ? this.enrichItem(item) : null;
+        return this.getEnrichedItem(file.collectionId);
     }
 
     public async resumeFile(downloadId: string, fileId: string, options: ResumePayload = {}) {
@@ -330,15 +310,13 @@ export class DownloadService {
         }
         if (this.repository.ensureCollectionNotExpired(file.collectionId)) {
             await this.emitUpdate(file.collectionId);
-            const item = this.repository.getItem(file.collectionId);
-            return item ? this.enrichItem(item) : null;
+            return this.getEnrichedItem(file.collectionId);
         }
         this.repository.resumeFile(fileId, Boolean(options.force));
         this.repository.markCollectionStatus(file.collectionId, "queued");
         this.scheduler.resumeFile(fileId);
         await this.emitUpdate(file.collectionId);
-        const item = this.repository.getItem(file.collectionId);
-        return item ? this.enrichItem(item) : null;
+        return this.getEnrichedItem(file.collectionId);
     }
 
     public async includeFile(downloadId: string, fileId: string) {
@@ -348,8 +326,7 @@ export class DownloadService {
         }
         if (this.repository.ensureCollectionNotExpired(file.collectionId)) {
             await this.emitUpdate(file.collectionId);
-            const item = this.repository.getItem(file.collectionId);
-            return item ? this.enrichItem(item) : null;
+            return this.getEnrichedItem(file.collectionId);
         }
         await withLoggedError(
             this.kd.logger,
@@ -368,8 +345,7 @@ export class DownloadService {
         this.repository.markCollectionStatus(file.collectionId, "queued");
         this.scheduler.resumeFile(fileId);
         await this.emitUpdate(file.collectionId);
-        const item = this.repository.getItem(file.collectionId);
-        return item ? this.enrichItem(item) : null;
+        return this.getEnrichedItem(file.collectionId);
     }
 
     public async includeFolder(downloadId: string, folderPath: string) {
@@ -379,8 +355,7 @@ export class DownloadService {
         }
         if (this.repository.ensureCollectionNotExpired(downloadId)) {
             await this.emitUpdate(downloadId);
-            const item = this.repository.getItem(downloadId);
-            return item ? this.enrichItem(item) : null;
+            return this.getEnrichedItem(downloadId);
         }
 
         const fileIds = await withLoggedError(
@@ -396,8 +371,7 @@ export class DownloadService {
         );
 
         if (fileIds.length === 0) {
-            const item = this.repository.getItem(downloadId);
-            return item ? this.enrichItem(item) : null;
+            return this.getEnrichedItem(downloadId);
         }
 
         this.repository.markCollectionStatus(downloadId, "queued");
@@ -405,8 +379,7 @@ export class DownloadService {
             this.scheduler.resumeFile(fileId);
         }
         await this.emitUpdate(downloadId);
-        const item = this.repository.getItem(downloadId);
-        return item ? this.enrichItem(item) : null;
+        return this.getEnrichedItem(downloadId);
     }
 
     public async remove(collectionId: string) {
@@ -561,8 +534,7 @@ export class DownloadService {
             void this.scheduler.schedule();
         }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
-        const item = this.repository.getItem(collectionId);
-        return item ? this.enrichItem(item) : null;
+        return this.getEnrichedItem(collectionId);
     }
 
     private async cleanupOrphanPartFiles() {
@@ -629,6 +601,11 @@ export class DownloadService {
                 asciiFilenames: collection.asciiFilenames === 1,
             }),
         );
+    }
+
+    private getEnrichedItem(collectionId: string) {
+        const item = this.repository.getItem(collectionId);
+        return item ? this.enrichItem(item) : null;
     }
 
     private enrichItem(item: DownloadItem, options: { sampleSpeeds?: boolean } = {}): DownloadItem {

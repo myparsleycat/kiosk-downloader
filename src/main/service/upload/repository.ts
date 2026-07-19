@@ -27,7 +27,7 @@ function parseTree(value: string): DirNode {
 export class UploadRepository {
     public constructor(private readonly kd: KioskDownloader) {}
 
-    public restoreStartupState(mode: "auto" | "manual") {
+    public restoreStartupState() {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(`DELETE FROM "upload_chunk" WHERE "status" = 'uploading'`);
@@ -43,15 +43,6 @@ export class UploadRepository {
                  WHERE "status" = 'uploading'`,
                 [timestamp],
             );
-
-            if (mode === "manual") {
-                tx.run(
-                    `UPDATE "upload_collection"
-                     SET "status" = 'queued', "updated_at" = ?
-                     WHERE "status" = 'uploading'`,
-                    [timestamp],
-                );
-            }
         });
     }
 
@@ -514,10 +505,6 @@ export class UploadRepository {
         }
 
         const files = this.listFiles(collectionId);
-        if (files.length === 0) {
-            this.markCollectionStatus(collectionId, "completed");
-            return;
-        }
         if (files.every((file) => file.status === "completed")) {
             this.markCollectionStatus(collectionId, "completed");
             return;
@@ -531,10 +518,7 @@ export class UploadRepository {
             return;
         }
         if (files.every((file) => file.status === "completed" || file.status === "error")) {
-            this.markCollectionStatus(
-                collectionId,
-                files.some((file) => file.status === "error") ? "error" : "completed",
-            );
+            this.markCollectionStatus(collectionId, "error");
             return;
         }
 

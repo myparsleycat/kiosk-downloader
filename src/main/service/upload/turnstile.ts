@@ -226,8 +226,6 @@ const READ_TOKEN_SCRIPT = `
 (() => ({ token: window.__turnstileToken, error: window.__turnstileError }))()
 `;
 
-const STEALTH_ONLY_SCRIPT = STEALTH_SCRIPT;
-
 export class TurnstileSolver {
     private activeWindow: BrowserWindow | null = null;
     private activeSession: Session | null = null;
@@ -256,9 +254,7 @@ export class TurnstileSolver {
             // Patch as early as the first document allows, before SPA scripts settle.
             window.webContents.on("dom-ready", () => {
                 if (window.isDestroyed()) return;
-                void window.webContents
-                    .executeJavaScript(STEALTH_ONLY_SCRIPT, true)
-                    .catch(() => {});
+                void window.webContents.executeJavaScript(STEALTH_SCRIPT, true).catch(() => {});
             });
 
             await window.loadURL(UPLOAD_URL, { userAgent: ua });

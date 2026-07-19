@@ -118,6 +118,66 @@ describe("TransferService.maybeShutdownAfterTransfer", () => {
     });
 });
 
+describe("TransferService.refreshPowerSaveBlock", () => {
+    it("passes the desired transfer state to the idempotent blocker", async () => {
+        const { service, preventAppSuspension } = createPowerSaveService();
+
+        await service.refreshPowerSaveBlock();
+
+        expect(preventAppSuspension).toHaveBeenCalledWith(true);
+    });
+
+    it.each([
+        { active: true, operation: "start" },
+        { active: false, operation: "stop" },
+    ])("logs $operation failures without rethrowing", async ({ active, operation }) => {
+        const error = new Error(`${operation} failed`);
+        const { service, logger } = createPowerSaveService({ active, error });
+
+        await expect(service.refreshPowerSaveBlock()).resolves.toBeUndefined();
+
+        expect(logger.error).toHaveBeenCalledWith(
+            error,
+            `TransferService:preventAppSuspension:${operation}`,
+        );
+    });
+});
+
+function createPowerSaveService(options: { active?: boolean; error?: Error } = {}) {
+    const active = options.active ?? true;
+    const preventAppSuspension = vi.fn(() => {
+        if (options.error) {
+            throw options.error;
+        }
+    });
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const kd = {
+        setting: {
+            get: vi.fn(async (key: string) => {
+                if (key === "general.powerSaveBlockInTransfer") {
+                    return true;
+                }
+                throw new Error(`Unexpected setting get: ${key}`);
+            }),
+        },
+        service: {
+            download: {
+                hasActiveTransfers: vi.fn(() => active),
+                listOsProgressTransfers: vi.fn(() => []),
+            },
+            upload: {
+                hasActiveTransfers: vi.fn(() => false),
+                listOsProgressTransfers: vi.fn(() => []),
+            },
+        },
+        logger,
+        lib: { utils: { preventAppSuspension } },
+        window: { main: { window: null } },
+    } as unknown as KioskDownloader;
+
+    return { service: new TransferService(kd), preventAppSuspension, logger };
+}
+
 function createService(options: {
     enabled: boolean;
     downloadTransfers: unknown[];

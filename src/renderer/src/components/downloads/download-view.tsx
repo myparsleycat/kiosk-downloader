@@ -8,6 +8,7 @@ import {
 } from "@renderer/components/ui/context-menu";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@renderer/components/ui/tooltip";
+import { useRemoveTransfer } from "@renderer/hooks/use-remove-transfer";
 import type { DownloadFilter, DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import {
@@ -27,7 +28,13 @@ import { toast } from "sonner";
 
 import { DownloadCard } from "./download-card";
 import { DownloadDetail } from "./download-detail";
-import { useRemoveCollection } from "./remove-collection";
+
+const removeCollectionOptions = {
+  removeById: (id: string) => window.api.invoke("download:remove", id),
+  errorMessage: "작업을 완료하지 못했습니다",
+  dialogTitle: "컬렉션 삭제",
+  dialogDescription: "아직 완료되지 않은 전송입니다. 정말 삭제하시겠습니까?",
+};
 
 export function DownloadView({
   items,
@@ -65,17 +72,15 @@ export function DownloadView({
     return items.filter((i) => i.status === "completed");
   }, [items, filter]);
 
-  // 선택된 항목이 필터에 의해 사라지면 null 처리
   React.useEffect(() => {
-    if (!selectedId) {
-      setSelectedId(filtered[0]?.id ?? null);
-    } else if (!filtered.some((i) => i.id === selectedId)) {
+    if (!selectedId || !filtered.some((i) => i.id === selectedId)) {
       setSelectedId(filtered[0]?.id ?? null);
     }
   }, [filtered, selectedId]);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
-  const { remove, removeCompleted, dialog, removing } = useRemoveCollection();
+  const { remove, removeCompleted, dialog, removing } =
+    useRemoveTransfer<DownloadItem>(removeCollectionOptions);
   const hasCompleted = items.some((item) => item.status === "completed");
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {

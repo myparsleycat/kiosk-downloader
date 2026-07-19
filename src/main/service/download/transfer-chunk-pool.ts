@@ -721,13 +721,6 @@ export class TransferChunkPool {
                     break;
                 }
             }
-        } catch (error) {
-            try {
-                await reader.cancel();
-            } catch {
-                // ignore cancel failures after abort/error
-            }
-            throw error;
         } finally {
             try {
                 await reader.cancel();

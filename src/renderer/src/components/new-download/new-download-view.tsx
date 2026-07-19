@@ -15,6 +15,7 @@ import {
   collectAllPaths,
   countFiles,
   dirTotalSize,
+  selectExpandedZipEntries,
   type SortDir,
   type SortField,
   sortTree,
@@ -331,10 +332,9 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         if (zipPassword) {
           setZipPassword(fileId, zipPassword);
         }
-        setCollection({
-          ...collection,
-          tree: setZipEntries(collection.tree, fileId, result.entries),
-        });
+        const nextTree = setZipEntries(collection.tree, fileId, result.entries);
+        setCollection({ ...collection, tree: nextTree });
+        updateSelected((prev) => selectExpandedZipEntries(prev, nextTree, zipPath, fileId));
         setZipPasswordPrompt(null);
         setZipPasswordInput("");
       } catch (error) {
@@ -353,7 +353,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         setZipLoading(zipPath, false);
       }
     },
-    [collection, password, setCollection, setZipLoading, setZipPassword, url],
+    [collection, password, setCollection, setZipLoading, setZipPassword, updateSelected, url],
   );
 
   const handleExpandZip = (zipPath: string, fileId: string) => {

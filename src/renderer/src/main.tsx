@@ -1,11 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode, useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 
 import App from "./App";
 import "./style.css";
-
-const queryClient = new QueryClient();
 
 const Root = () => {
   const [key, setKey] = useState(0);
@@ -19,9 +16,7 @@ const Root = () => {
 
   return (
     <StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <App key={key} />
-      </QueryClientProvider>
+      <App key={key} />
     </StrictMode>
   );
 };

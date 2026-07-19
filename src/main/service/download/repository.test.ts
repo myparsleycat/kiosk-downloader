@@ -79,6 +79,82 @@ async function createRepository() {
     return { db, repo };
 }
 
+describe("DownloadRepository.restoreStartupState", () => {
+    it("recovers interrupted work while preserving user-paused files", async () => {
+        const { db, repo } = await createRepository();
+        const timestamp = new Date().toISOString();
+        db.run(
+            `INSERT INTO "download_collection"
+             ("id", "share_id", "source_url", "name", "root_id", "segment_size", "expires",
+              "tree_json", "save_path", "status", "created_at", "updated_at", "error")
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'downloading', ?, ?, ?)`,
+            [
+                "collection",
+                "share",
+                "https://example.com/share",
+                "Collection",
+                "root",
+                1024,
+                Date.now() + 60_000,
+                JSON.stringify({ type: "dir", id: "root", name: "", entries: [] }),
+                "/tmp",
+                timestamp,
+                timestamp,
+                "interrupted",
+            ],
+        );
+        for (const [id, pausedByUser] of [
+            ["active", false],
+            ["paused", true],
+        ] as const) {
+            db.run(
+                `INSERT INTO "download_file"
+                 ("id", "collection_id", "remote_id", "path", "name", "size", "selected",
+                  "status", "paused_by_user", "created_at", "updated_at", "error")
+                 VALUES (?, 'collection', ?, ?, ?, 10, 1, 'downloading', ?, ?, ?, ?)`,
+                [
+                    id,
+                    id,
+                    `${id}.bin`,
+                    `${id}.bin`,
+                    pausedByUser ? 1 : 0,
+                    timestamp,
+                    timestamp,
+                    "error",
+                ],
+            );
+        }
+        db.run(
+            `INSERT INTO "download_chunk"
+             ("collection_id", "file_id", "chunk_index", "offset", "size", "status",
+              "updated_at", "error")
+             VALUES ('collection', 'active', 0, 0, 10, 'downloading', ?, ?)`,
+            [timestamp, "error"],
+        );
+
+        repo.restoreStartupState();
+
+        expect(
+            db.get<{ status: string; error: string | null }>(
+                `SELECT "status", "error" FROM "download_collection" WHERE "id" = 'collection'`,
+            ),
+        ).toEqual({ status: "queued", error: null });
+        expect(
+            db.all<{ id: string; status: string; error: string | null }>(
+                `SELECT "id", "status", "error" FROM "download_file" ORDER BY "id"`,
+            ),
+        ).toEqual([
+            { id: "active", status: "pending", error: null },
+            { id: "paused", status: "downloading", error: "error" },
+        ]);
+        expect(
+            db.get<{ status: string; error: string | null }>(
+                `SELECT "status", "error" FROM "download_chunk" WHERE "file_id" = 'active'`,
+            ),
+        ).toEqual({ status: "pending", error: null });
+    });
+});
+
 function createImportPayload(options: {
     expires: number;
     status: "completed" | "pending";

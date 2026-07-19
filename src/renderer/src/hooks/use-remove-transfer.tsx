@@ -8,24 +8,28 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@renderer/components/ui/alert-dialog";
-import type { UploadItem, UploadStatus } from "@shared/types";
 import * as React from "react";
 import { toast } from "sonner";
 
-function isUploadIncomplete(status: UploadStatus) {
-  return status !== "completed";
+interface RemoveTransferOptions {
+  removeById: (id: string) => Promise<unknown>;
+  errorMessage: string;
+  dialogTitle: string;
+  dialogDescription: string;
 }
 
-export function useRemoveUpload() {
-  const [target, setTarget] = React.useState<UploadItem | null>(null);
+export function useRemoveTransfer<TItem extends { id: string; status: string }>(
+  options: RemoveTransferOptions,
+) {
+  const [target, setTarget] = React.useState<TItem | null>(null);
   const [removing, setRemoving] = React.useState(false);
 
   const executeRemove = async (id: string) => {
     setRemoving(true);
     try {
-      await window.api.invoke("upload:remove", id);
+      await options.removeById(id);
     } catch (error) {
-      toast.error("삭제하지 못했습니다", {
+      toast.error(options.errorMessage, {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -34,15 +38,15 @@ export function useRemoveUpload() {
     }
   };
 
-  const remove = (item: UploadItem) => {
-    if (isUploadIncomplete(item.status)) {
+  const remove = (item: TItem) => {
+    if (item.status !== "completed") {
       setTarget(item);
       return;
     }
     void executeRemove(item.id);
   };
 
-  const removeCompleted = async (items: UploadItem[]) => {
+  const removeCompleted = async (items: TItem[]) => {
     const completed = items.filter((item) => item.status === "completed");
     if (completed.length === 0) return;
 
@@ -51,13 +55,13 @@ export function useRemoveUpload() {
     try {
       for (const item of completed) {
         try {
-          await window.api.invoke("upload:remove", item.id);
+          await options.removeById(item.id);
         } catch (error) {
           firstError ??= error instanceof Error ? error : new Error(String(error));
         }
       }
       if (firstError) {
-        toast.error("삭제하지 못했습니다", {
+        toast.error(options.errorMessage, {
           description: firstError.message,
         });
       }
@@ -75,10 +79,8 @@ export function useRemoveUpload() {
     >
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>업로드 삭제</AlertDialogTitle>
-          <AlertDialogDescription>
-            아직 완료되지 않은 업로드입니다. 정말 삭제하시겠습니까?
-          </AlertDialogDescription>
+          <AlertDialogTitle>{options.dialogTitle}</AlertDialogTitle>
+          <AlertDialogDescription>{options.dialogDescription}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={removing}>취소</AlertDialogCancel>

@@ -52,7 +52,6 @@
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/git": "^10.0.1",
     "@tailwindcss/vite": "^4.3.2",
-    "@tanstack/react-query": "^5.101.2",
     "@types/auto-launch": "^5.0.5",
     "@types/fs-extra": "^11.0.4",
     "@types/html-to-text": "^9.0.4",

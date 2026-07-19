@@ -14,26 +14,13 @@ export type {
 } from "@shared/types";
 
 import type { DirNode, FileNode, TreeEntry, ZipNode } from "@shared/types";
-import { hasSelectedDescendant, isZipExtractMode } from "@shared/zip-tree";
+import { findZipNodeById, hasSelectedDescendant, isZipExtractMode } from "@shared/zip-tree";
 
 function asDirEntries(node: DirNode | ZipNode): TreeEntry[] {
     if (node.type === "zip") {
         return node.entries ?? [];
     }
     return node.entries;
-}
-
-function walkDirLike(
-    node: DirNode | ZipNode,
-    stack: string[],
-    visit: (entry: TreeEntry, key: string, childStack: string[]) => void,
-) {
-    for (const entry of asDirEntries(node)) {
-        const child = entry.node;
-        const key = [...stack, child.name].join("/");
-        const childStack = [...stack, child.name];
-        visit(entry, key, childStack);
-    }
 }
 
 export function countFiles(dir: DirNode): number {
@@ -93,61 +80,16 @@ export function dirTotalSize(dir: DirNode | ZipNode): number {
     return total;
 }
 
-export function flattenTree(dir: DirNode, prefix: string[] = [], out: FlatFile[] = []): FlatFile[] {
-    for (const entry of dir.entries) {
-        if (entry.kind === "file") {
-            const node = entry.node as FileNode;
-            out.push({
-                id: node.id,
-                path: [...prefix, node.name].join("/"),
-                name: node.name,
-                size: node.size,
-                dirName: prefix.join("/"),
-            });
-            continue;
-        }
-        if (entry.kind === "zip") {
-            const zip = entry.node as ZipNode;
-            const zipPath = [...prefix, zip.name];
-            if (!zip.entries) {
-                out.push({
-                    id: zip.id,
-                    path: zipPath.join("/"),
-                    name: zip.name,
-                    size: zip.size,
-                    dirName: prefix.join("/"),
-                });
-                continue;
-            }
-            flattenTree(
-                { type: "dir", id: zip.id, name: zip.name, entries: zip.entries },
-                zipPath,
-                out,
-            );
-            continue;
-        }
-        const child = entry.node as DirNode;
-        flattenTree(child, [...prefix, child.name], out);
-    }
-    return out;
-}
-
-export interface FlatFile {
-    id: string;
-    path: string;
-    name: string;
-    size: number;
-    dirName: string;
-}
-
 export function collectAllPaths(root: DirNode): Set<string> {
     const paths = new Set<string>();
 
     function walk(node: DirNode | ZipNode, stack: string[]) {
-        walkDirLike(node, stack, (entry, key, childStack) => {
+        for (const entry of asDirEntries(node)) {
+            const key = [...stack, entry.node.name].join("/");
+            const childStack = [...stack, entry.node.name];
             if (entry.kind === "file") {
                 paths.add(key);
-                return;
+                continue;
             }
             if (entry.kind === "zip") {
                 const zip = entry.node as ZipNode;
@@ -155,13 +97,13 @@ export function collectAllPaths(root: DirNode): Set<string> {
                 if (zip.entries) {
                     walk(zip, childStack);
                 }
-                return;
+                continue;
             }
             if (entry.node.name !== "") {
                 paths.add(key);
             }
             walk(entry.node as DirNode, entry.node.name === "" ? stack : childStack);
-        });
+        }
     }
 
     walk(root, []);
@@ -181,46 +123,29 @@ export function toggleTreeSelection(
     const next = new Set(selected);
     const selecting = !next.has(key);
 
-    if (resolved.kind === "dir") {
-        const subtree = collectSubtreePaths(resolved.node as DirNode, key);
-        if (selecting) {
-            for (const path of subtree) {
+    const subtreeRoot =
+        resolved.kind === "dir"
+            ? (resolved.node as DirNode)
+            : resolved.kind === "zip" && (resolved.node as ZipNode).entries
+              ? (resolved.node as ZipNode)
+              : null;
+    if (subtreeRoot) {
+        const subtree = collectSubtreePaths(subtreeRoot, key);
+        for (const path of subtree) {
+            if (selecting) {
                 next.add(path);
+            } else {
+                next.delete(path);
             }
+        }
+        if (selecting) {
             for (const parent of parentPaths(key)) {
                 next.add(parent);
             }
-            return next;
-        }
-        for (const path of subtree) {
-            next.delete(path);
-        }
-        pruneEmptyAncestors(key, next);
-        return next;
-    }
-
-    if (resolved.kind === "zip") {
-        const zip = resolved.node as ZipNode;
-        if (zip.entries) {
-            const subtree = collectSubtreePaths(
-                { type: "dir", id: zip.id, name: zip.name, entries: zip.entries },
-                key,
-            );
-            if (selecting) {
-                for (const path of subtree) {
-                    next.add(path);
-                }
-                for (const parent of parentPaths(key)) {
-                    next.add(parent);
-                }
-                return next;
-            }
-            for (const path of subtree) {
-                next.delete(path);
-            }
+        } else {
             pruneEmptyAncestors(key, next);
-            return next;
         }
+        return next;
     }
 
     if (selecting) {
@@ -385,6 +310,26 @@ export function parentPaths(key: string): string[] {
     return parents;
 }
 
+/**
+ * A selected zip is stored as a marker path only; when its entries are loaded,
+ * expand the marker into the full subtree so the zip stays selected in extract mode.
+ */
+export function selectExpandedZipEntries(
+    selected: Set<string>,
+    tree: DirNode,
+    zipPath: string,
+    fileId: string,
+): Set<string> {
+    if (!selected.has(zipPath)) {
+        return selected;
+    }
+    const found = findZipNodeById(tree, fileId);
+    if (!found?.zip.entries) {
+        return selected;
+    }
+    return new Set([...selected, ...collectSubtreePaths(found.zip, zipPath)]);
+}
+
 function pruneEmptyAncestors(key: string, selected: Set<string>) {
     const parents = parentPaths(key);
     for (let index = parents.length - 1; index >= 0; index -= 1) {
@@ -393,10 +338,6 @@ function pruneEmptyAncestors(key: string, selected: Set<string>) {
             selected.delete(parent);
         }
     }
-}
-
-export function treeEntries(dir: DirNode | ZipNode): TreeEntry[] {
-    return asDirEntries(dir);
 }
 
 export type SortField = "name" | "size";
@@ -428,15 +369,14 @@ export function sortTree(root: DirNode, field: SortField, dir: SortDir): DirNode
             else files.push(entry);
         }
 
-        if (field === "name") {
-            dirs.sort((a, b) => compareName(a.node, b.node));
-            zips.sort((a, b) => compareName(a.node, b.node));
-            files.sort((a, b) => compareName(a.node, b.node));
-        } else {
-            dirs.sort((a, b) => (entrySize(a) - entrySize(b)) * sign);
-            zips.sort((a, b) => (entrySize(a) - entrySize(b)) * sign);
-            files.sort((a, b) => (entrySize(a) - entrySize(b)) * sign);
-        }
+        const compare =
+            field === "name"
+                ? (left: TreeEntry, right: TreeEntry) => compareName(left.node, right.node)
+                : (left: TreeEntry, right: TreeEntry) =>
+                      (entrySize(left) - entrySize(right)) * sign;
+        dirs.sort(compare);
+        zips.sort(compare);
+        files.sort(compare);
 
         const entries = [
             ...dirs.map((e) => ({ kind: "dir" as const, node: sortNode(e.node as DirNode) })),

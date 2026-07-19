@@ -77,35 +77,6 @@ function normalizeType(value: string | null | undefined) {
     return (value ?? "").trim().toUpperCase();
 }
 
-function toBuffer(value: unknown) {
-    if (Buffer.isBuffer(value)) {
-        return value;
-    }
-
-    if (value instanceof Uint8Array) {
-        return Buffer.from(value);
-    }
-
-    return Buffer.from(value as ArrayBufferLike);
-}
-
-function toBoolean(value: unknown) {
-    if (typeof value === "number") {
-        return value !== 0;
-    }
-
-    if (typeof value === "bigint") {
-        return value !== 0n;
-    }
-
-    if (typeof value === "string") {
-        const normalized = value.trim().toLowerCase();
-        return normalized === "1" || normalized === "true";
-    }
-
-    return Boolean(value);
-}
-
 function sortStrings(values: string[]) {
     return [...values].sort((left, right) => left.localeCompare(right));
 }
@@ -215,11 +186,10 @@ export class DatabaseClient {
 
     public readonly settings = {
         get: async (key: string) => {
-            const row = this.get<SettingRow>(
+            return this.get<SettingRow>(
                 `SELECT "key", "value" FROM "setting" WHERE "key" = ? LIMIT 1`,
                 [key],
             );
-            return row ?? null;
         },
         getValue: async (key: string) => (await this.settings.get(key))?.value ?? null,
         list: async () =>
@@ -250,12 +220,11 @@ export class DatabaseClient {
 
     public readonly appState = {
         get: async (key: string) => {
-            const row = this.get<AppStateRow>(
+            return this.get<AppStateRow>(
                 `SELECT "key", "value", "updated_at" AS "updatedAt"
                  FROM "app_state" WHERE "key" = ? LIMIT 1`,
                 [key],
             );
-            return row ?? null;
         },
         getValue: async (key: string) => (await this.appState.get(key))?.value ?? null,
         list: async () =>
@@ -284,12 +253,11 @@ export class DatabaseClient {
 
     public readonly schemaState = {
         get: async (key: string) => {
-            const row = this.get<SchemaStateRow>(
+            return this.get<SchemaStateRow>(
                 `SELECT "key", "value", "updated_at" AS "updatedAt"
                  FROM "_schema_state" WHERE "key" = ? LIMIT 1`,
                 [key],
             );
-            return row ?? null;
         },
         upsert: async (key: string, value: string, updatedAt: string) => {
             this.run(

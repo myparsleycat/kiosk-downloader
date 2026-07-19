@@ -134,12 +134,10 @@ export class Updater {
         this.nsisListenersRegistered = true;
 
         autoUpdater.on("error", (err) => {
-            if (this.isDownloadingUpdate) {
-                this.isCheckingForUpdates = false;
-                this.isDownloadingUpdate = false;
-            } else {
-                this.isCheckingForUpdates = false;
-                this.isDownloadingUpdate = false;
+            const wasDownloadingUpdate = this.isDownloadingUpdate;
+            this.isCheckingForUpdates = false;
+            this.isDownloadingUpdate = false;
+            if (!wasDownloadingUpdate) {
                 this.updateDownloaded = false;
                 this.updateAvailable = false;
                 this.releaseVersion = null;

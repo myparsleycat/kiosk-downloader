@@ -54,10 +54,6 @@ export class PartFileWriter {
         }
     }
 
-    public writeAt(offset: number, buffer: Buffer, chunkIndex: number) {
-        return this.writeAtInternal(offset, buffer, chunkIndex);
-    }
-
     public async writeChunkFromStream(
         offset: number,
         chunkIndex: number,
@@ -174,11 +170,6 @@ export class PartFileWriter {
 
     public static async removeSidecar(partPath: string) {
         await fse.remove(getPartDigestPath(partPath)).catch(() => undefined);
-    }
-
-    private async writeAtInternal(offset: number, buffer: Buffer, chunkIndex: number) {
-        await this.writePartialInternal(offset, buffer);
-        await this.writeDigestInternal(chunkIndex, toUnsignedCrc32(buffer));
     }
 
     private async writePartialInternal(offset: number, buffer: Uint8Array) {

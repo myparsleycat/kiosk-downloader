@@ -7,7 +7,6 @@ import { shutdownSystem } from "./util";
 const MIB = 1024 * 1024;
 
 export class TransferService {
-    private isPowerSaveBlockerActive = false;
     private shutdownRequested = false;
     private shutdownScheduling = false;
 
@@ -49,23 +48,11 @@ export class TransferService {
 
         this.syncMainWindowProgressBar();
 
-        if (shouldBlock && !this.isPowerSaveBlockerActive) {
-            try {
-                await this.kd.lib.utils.preventAppSuspension(true);
-                this.isPowerSaveBlockerActive = true;
-            } catch (error) {
-                this.kd.logger.error(error, "TransferService:preventAppSuspension:start");
-            }
-            return;
-        }
-
-        if (!shouldBlock && this.isPowerSaveBlockerActive) {
-            try {
-                await this.kd.lib.utils.preventAppSuspension(false);
-                this.isPowerSaveBlockerActive = false;
-            } catch (error) {
-                this.kd.logger.error(error, "TransferService:preventAppSuspension:stop");
-            }
+        try {
+            this.kd.lib.utils.preventAppSuspension(shouldBlock);
+        } catch (error) {
+            const operation = shouldBlock ? "start" : "stop";
+            this.kd.logger.error(error, `TransferService:preventAppSuspension:${operation}`);
         }
     }
 

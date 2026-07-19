@@ -31,8 +31,6 @@ export function getAppStatus(): AppStatus {
     };
 }
 
-export type ShowModalReturnValue = ReturnType<typeof dialog.showMessageBox>;
-
 export async function showModal(options: MessageBoxOptions) {
     return dialog.showMessageBox({
         type: options.type,
