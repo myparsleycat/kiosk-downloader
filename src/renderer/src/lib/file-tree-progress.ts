@@ -152,18 +152,21 @@ function finalizeSummary(summary: DirProgressAccumulator): DirProgressSummary {
     return {
         ...summary,
         allExcluded,
-        status: allExcluded
-            ? "skipped"
-            : summary.selectedCount > 0 && summary.completedCount === summary.selectedCount
-              ? "completed"
-              : summary.hasDownloading
-                ? "downloading"
-                : summary.hasInflating
-                  ? "inflating"
-                  : summary.hasError
-                    ? "error"
-                    : summary.hasPaused
-                      ? "paused"
-                      : "pending",
+        status: dirProgressStatus(allExcluded, summary),
     };
+}
+
+function dirProgressStatus(
+    allExcluded: boolean,
+    summary: DirProgressAccumulator,
+): DirProgressSummary["status"] {
+    if (allExcluded) return "skipped";
+    if (summary.selectedCount > 0 && summary.completedCount === summary.selectedCount) {
+        return "completed";
+    }
+    if (summary.hasDownloading) return "downloading";
+    if (summary.hasInflating) return "inflating";
+    if (summary.hasError) return "error";
+    if (summary.hasPaused) return "paused";
+    return "pending";
 }
