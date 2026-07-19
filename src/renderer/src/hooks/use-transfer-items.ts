@@ -81,6 +81,9 @@ export function useTransferItems<TItem extends { id: string }, TPatch>(
             })
             .catch((error) => {
                 if (!mounted) return;
+                initialized = true;
+                setItems(applyPendingItems([], pendingItems));
+                pendingItems.clear();
                 toast.error(source.loadErrorMessage, {
                     description: error instanceof Error ? error.message : String(error),
                 });
