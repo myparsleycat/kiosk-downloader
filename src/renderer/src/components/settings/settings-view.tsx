@@ -497,7 +497,7 @@ export function SettingsView() {
         <Section icon={<ArrowLeftRightIcon className="size-3.5" />} title="전송 큐">
           <SettingRow
             title="세그먼트 풀 크기"
-            description="다운로드·업로드가 공유하는 세그먼트 풀의 최대 크기입니다. 업로드 동시 세그먼트는 최대 8로 제한됩니다."
+            description="다운로드·업로드가 공유하는 세그먼트 풀의 최대 크기입니다. 업로드 동시 세그먼트는 별도 제한이 적용됩니다."
             control={
               <NumberSetting
                 value={settings["transfer.segmentPoolSize"]}
