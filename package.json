@@ -84,5 +84,5 @@
     "vitest": "4.1.10",
     "zustand": "^5.0.14"
   },
-  "packageManager": "pnpm@11.13.0"
+  "packageManager": "pnpm@11.15.0"
 }
