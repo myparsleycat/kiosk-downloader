@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 import { TransferSpeedSampler } from "../transfer-speed";
 
 const SPEED_WINDOW_MS = 2000;
@@ -11,8 +13,11 @@ export class DownloadTransferMetrics {
     private readonly transferredByFile = new Map<string, number>();
     private readonly transferredByCollection = new Map<string, number>();
     private readonly collectionByFile = new Map<string, string>();
-    private readonly fileSpeed = new TransferSpeedSampler(() => Date.now(), SPEED_WINDOW_MS);
-    private readonly collectionSpeed = new TransferSpeedSampler(() => Date.now(), SPEED_WINDOW_MS);
+    private readonly fileSpeed = new TransferSpeedSampler(() => performance.now(), SPEED_WINDOW_MS);
+    private readonly collectionSpeed = new TransferSpeedSampler(
+        () => performance.now(),
+        SPEED_WINDOW_MS,
+    );
     private readonly persistedByFile = new Map<string, number>();
 
     public registerFile(collectionId: string, fileId: string, bytes: number) {
