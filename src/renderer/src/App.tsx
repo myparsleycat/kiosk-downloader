@@ -1,6 +1,5 @@
 import { cn } from "@renderer/lib/utils";
 import { tryDecodeShareUrlBase64, tryParseDownloadUrl } from "@shared/share-url";
-import type { DownloadItem, UploadItem } from "@shared/types";
 import {
   DownloadIcon,
   LoaderCircleIcon,
@@ -25,10 +24,10 @@ import { UploadList } from "./components/uploads/upload-list";
 import { UploadView } from "./components/uploads/upload-view";
 import { useTitleBarOverlay } from "./hooks/use-title-bar-overlay";
 import {
-  applyPendingItems,
-  mergeProgressPatchIntoItems,
-  upsertItem,
-} from "./lib/merge-progress-patch";
+  downloadItemsSource,
+  uploadItemsSource,
+  useTransferItems,
+} from "./hooks/use-transfer-items";
 import { useDownloadTreeExpanded } from "./stores/download-tree-expanded";
 import { useNewDownloadDraft } from "./stores/new-download-draft";
 import { useUpdaterStore } from "./stores/updater";
@@ -52,8 +51,8 @@ const isDarwin = window.electron.process.platform === "darwin";
 
 function MainComponent() {
   const [tab, setTab] = React.useState<TabValue>("downloads");
-  const [downloads, setDownloads] = React.useState<DownloadItem[]>([]);
-  const [uploads, setUploads] = React.useState<UploadItem[]>([]);
+  const downloads = useTransferItems(downloadItemsSource);
+  const uploads = useTransferItems(uploadItemsSource);
   const [focusDownloadId, setFocusDownloadId] = React.useState<string | null>(null);
   const [focusUploadId, setFocusUploadId] = React.useState<string | null>(null);
 
@@ -156,119 +155,11 @@ function MainComponent() {
   }, []);
 
   React.useEffect(() => {
-    let mounted = true;
-    let initialized = false;
-    const pendingItems = new Map<string, DownloadItem>();
-
-    const applyFullItems = (items: DownloadItem[]) => {
-      if (initialized) {
-        setDownloads(items);
-        return;
-      }
-      for (const item of items) pendingItems.set(item.id, item);
-    };
-
-    const applyFullItem = (item: DownloadItem) => {
-      if (initialized) {
-        setDownloads((prev) => upsertItem(prev, item));
-        return;
-      }
-      pendingItems.set(item.id, item);
-    };
-
-    window.api
-      .invoke("download:list")
-      .then((items) => {
-        if (!mounted) return;
-        initialized = true;
-        setDownloads(applyPendingItems(items, pendingItems));
-        pendingItems.clear();
-      })
-      .catch((error) => {
-        toast.error("다운로드 목록을 불러오지 못했습니다", {
-          description: error instanceof Error ? error.message : String(error),
-        });
-      });
-
-    const offUpdate = window.api.on("download:update", (items) => {
-      applyFullItems(items);
-    });
-    const offItem = window.api.on("download:item-update", (item) => {
-      applyFullItem(item);
-    });
-    const offProgress = window.api.on("download:progress-update", (patch) => {
-      if (!initialized) return;
-      React.startTransition(() => {
-        setDownloads((prev) => mergeProgressPatchIntoItems(prev, patch));
-      });
-    });
     const offToast = window.api.on("fn:toast", (message, data) => {
       toast(message, data);
     });
 
-    return () => {
-      mounted = false;
-      offUpdate();
-      offItem();
-      offProgress();
-      offToast();
-    };
-  }, []);
-
-  React.useEffect(() => {
-    let mounted = true;
-    let initialized = false;
-    const pendingItems = new Map<string, UploadItem>();
-
-    const applyFullItems = (items: UploadItem[]) => {
-      if (initialized) {
-        setUploads(items);
-        return;
-      }
-      for (const item of items) pendingItems.set(item.id, item);
-    };
-
-    const applyFullItem = (item: UploadItem) => {
-      if (initialized) {
-        setUploads((prev) => upsertItem(prev, item));
-        return;
-      }
-      pendingItems.set(item.id, item);
-    };
-
-    const offUpdate = window.api.on("upload:update", (items) => {
-      applyFullItems(items);
-    });
-    const offItem = window.api.on("upload:item-update", (item) => {
-      applyFullItem(item);
-    });
-    const offProgress = window.api.on("upload:progress-update", (patch) => {
-      if (!initialized) return;
-      React.startTransition(() => {
-        setUploads((prev) => mergeProgressPatchIntoItems(prev, patch));
-      });
-    });
-
-    window.api
-      .invoke("upload:list")
-      .then((items) => {
-        if (!mounted) return;
-        initialized = true;
-        setUploads(applyPendingItems(items, pendingItems));
-        pendingItems.clear();
-      })
-      .catch((error) => {
-        toast.error("업로드 목록을 불러오지 못했습니다", {
-          description: error instanceof Error ? error.message : String(error),
-        });
-      });
-
-    return () => {
-      mounted = false;
-      offUpdate();
-      offItem();
-      offProgress();
-    };
+    return offToast;
   }, []);
 
   return (

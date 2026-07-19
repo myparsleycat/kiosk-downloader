@@ -1,8 +1,8 @@
-import { cachedSpeedOrClearIfStale, SPEED_EMA_TAU_MS, updateSpeedEma } from "../transfer-speed";
+import { performance } from "node:perf_hooks";
+
+import { TransferSpeedSampler } from "../transfer-speed";
 
 const SPEED_WINDOW_MS = 2000;
-const MIN_SPEED_SAMPLE_SPAN_MS = 500;
-type ByteSample = { t: number; b: number };
 
 export class DownloadTransferMetrics {
     // Progress is based on written bytes; speed is based on cumulative transferred bytes.
@@ -13,12 +13,11 @@ export class DownloadTransferMetrics {
     private readonly transferredByFile = new Map<string, number>();
     private readonly transferredByCollection = new Map<string, number>();
     private readonly collectionByFile = new Map<string, string>();
-    private readonly samplesByFile = new Map<string, ByteSample[]>();
-    private readonly samplesByCollection = new Map<string, ByteSample[]>();
-    private readonly speedByFile = new Map<string, number>();
-    private readonly speedByCollection = new Map<string, number>();
-    private readonly lastEmaAtByFile = new Map<string, number>();
-    private readonly lastEmaAtByCollection = new Map<string, number>();
+    private readonly fileSpeed = new TransferSpeedSampler(() => performance.now(), SPEED_WINDOW_MS);
+    private readonly collectionSpeed = new TransferSpeedSampler(
+        () => performance.now(),
+        SPEED_WINDOW_MS,
+    );
     private readonly persistedByFile = new Map<string, number>();
 
     public registerFile(collectionId: string, fileId: string, bytes: number) {
@@ -83,9 +82,7 @@ export class DownloadTransferMetrics {
                 this.transferredByChunk.delete(key);
             }
         }
-        this.samplesByFile.delete(fileId);
-        this.speedByFile.delete(fileId);
-        this.lastEmaAtByFile.delete(fileId);
+        this.fileSpeed.clear(fileId);
         this.persistedByFile.delete(fileId);
         this.transferredByFile.delete(fileId);
         this.collectionByFile.delete(fileId);
@@ -95,7 +92,7 @@ export class DownloadTransferMetrics {
         this.ensurePersistedDownloaded(fileId, persistedDownloaded);
         return {
             liveDownloaded: this.getTotalBytes(fileId),
-            speedBps: this.speedByFile.get(fileId) ?? 0,
+            speedBps: this.fileSpeed.get(fileId),
         };
     }
 
@@ -104,37 +101,26 @@ export class DownloadTransferMetrics {
         const liveDownloaded = this.getTotalBytes(fileId);
         return {
             liveDownloaded,
-            speedBps: this.recordSpeedSample(
-                fileId,
-                this.transferredByFile.get(fileId) ?? 0,
-                this.samplesByFile,
-                this.speedByFile,
-                this.lastEmaAtByFile,
-            ),
+            speedBps: this.fileSpeed.sample(fileId, this.transferredByFile.get(fileId) ?? 0),
         };
     }
 
     public getCollectionSnapshot(collectionId: string) {
         return {
             activeTransferredBytes: this.writtenByCollection.get(collectionId) ?? 0,
-            speedBps: this.speedByCollection.get(collectionId) ?? 0,
+            speedBps: this.collectionSpeed.get(collectionId),
         };
     }
 
     public sampleCollection(collectionId: string) {
-        return this.recordSpeedSample(
+        return this.collectionSpeed.sample(
             collectionId,
             this.transferredByCollection.get(collectionId) ?? 0,
-            this.samplesByCollection,
-            this.speedByCollection,
-            this.lastEmaAtByCollection,
         );
     }
 
     public clearCollection(collectionId: string) {
-        this.samplesByCollection.delete(collectionId);
-        this.speedByCollection.delete(collectionId);
-        this.lastEmaAtByCollection.delete(collectionId);
+        this.collectionSpeed.clear(collectionId);
         this.writtenByCollection.delete(collectionId);
         this.transferredByCollection.delete(collectionId);
     }
@@ -194,39 +180,5 @@ export class DownloadTransferMetrics {
 
     private getTotalBytes(fileId: string) {
         return (this.persistedByFile.get(fileId) ?? 0) + (this.writtenByFile.get(fileId) ?? 0);
-    }
-
-    private recordSpeedSample(
-        key: string,
-        totalBytes: number,
-        samplesByKey: Map<string, ByteSample[]>,
-        speedByKey: Map<string, number>,
-        lastEmaAtByKey: Map<string, number>,
-    ) {
-        const now = Date.now();
-        const samples = samplesByKey.get(key) ?? [];
-        samples.push({ t: now, b: totalBytes });
-        const window = samples.filter((sample) => now - sample.t <= SPEED_WINDOW_MS);
-        samplesByKey.set(key, window);
-
-        if (window.length < 2) {
-            return cachedSpeedOrClearIfStale(now, key, speedByKey, lastEmaAtByKey, SPEED_WINDOW_MS);
-        }
-
-        const first = window[0];
-        const last = window[window.length - 1];
-        const elapsedMs = last.t - first.t;
-        if (elapsedMs < MIN_SPEED_SAMPLE_SPAN_MS) {
-            return cachedSpeedOrClearIfStale(now, key, speedByKey, lastEmaAtByKey, SPEED_WINDOW_MS);
-        }
-
-        const instantBps = Math.max(0, (last.b - first.b) / (elapsedMs / 1000));
-        const prevEma = speedByKey.get(key);
-        const lastEmaAt = lastEmaAtByKey.get(key);
-        const dtMs = lastEmaAt === undefined ? Number.POSITIVE_INFINITY : now - lastEmaAt;
-        const speedBps = updateSpeedEma(prevEma, instantBps, dtMs, SPEED_EMA_TAU_MS);
-        speedByKey.set(key, speedBps);
-        lastEmaAtByKey.set(key, now);
-        return speedBps;
     }
 }

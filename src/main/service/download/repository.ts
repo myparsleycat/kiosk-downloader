@@ -135,42 +135,15 @@ function transferSourceMetaJson(
 
 function normalizeTransferFile(file: DownloadFileRow) {
     const selected = file.selected === 1;
-    if (!selected) {
-        return {
-            remoteId: file.remoteId,
-            path: file.path,
-            name: file.name,
-            size: file.size,
-            selected: false,
-            status: "pending" as const,
-            completedElsewhere: false,
-            sourceKind: file.sourceKind,
-            zipEntryJson: file.zipEntryJson,
-            sourceMetaJson: file.sourceMetaJson,
-        };
-    }
-    if (file.status === "completed") {
-        return {
-            remoteId: file.remoteId,
-            path: file.path,
-            name: file.name,
-            size: file.size,
-            selected: true,
-            status: "completed" as const,
-            completedElsewhere: true,
-            sourceKind: file.sourceKind,
-            zipEntryJson: file.zipEntryJson,
-            sourceMetaJson: file.sourceMetaJson,
-        };
-    }
+    const completedElsewhere = selected && file.status === "completed";
     return {
         remoteId: file.remoteId,
         path: file.path,
         name: file.name,
         size: file.size,
-        selected: true,
-        status: "pending" as const,
-        completedElsewhere: false,
+        selected,
+        status: completedElsewhere ? ("completed" as const) : ("pending" as const),
+        completedElsewhere,
         sourceKind: file.sourceKind,
         zipEntryJson: file.zipEntryJson,
         sourceMetaJson: file.sourceMetaJson,
@@ -329,7 +302,7 @@ export class DownloadRepository {
         return true;
     }
 
-    public restoreStartupState(mode: "auto" | "manual") {
+    public restoreStartupState() {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(
@@ -350,15 +323,6 @@ export class DownloadRepository {
                  WHERE "status" IN ('downloading', 'inflating')`,
                 [timestamp],
             );
-
-            if (mode === "manual") {
-                tx.run(
-                    `UPDATE "download_collection"
-                     SET "status" = 'queued', "updated_at" = ?
-                     WHERE "status" IN ('downloading', 'inflating')`,
-                    [timestamp],
-                );
-            }
         });
     }
 

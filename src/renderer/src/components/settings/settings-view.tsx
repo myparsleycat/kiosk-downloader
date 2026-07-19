@@ -54,6 +54,7 @@ import {
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import {
+  ArrowLeftRightIcon,
   ArrowUpCircleIcon,
   CpuIcon,
   DownloadIcon,
@@ -120,31 +121,10 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
 };
 
-const chunkRetryOptions = Array.from(
-  { length: CHUNK_RETRY_MAX - CHUNK_RETRY_MIN + 1 },
-  (_, index) => CHUNK_RETRY_MIN + index,
-).map((value) => ({
-  value: String(value),
-  label: String(value),
-}));
-
-const uploadChunkRetryOptions = Array.from(
-  { length: UPLOAD_CHUNK_RETRY_MAX - UPLOAD_CHUNK_RETRY_MIN + 1 },
-  (_, index) => UPLOAD_CHUNK_RETRY_MIN + index,
-).map((value) => ({
-  value: String(value),
-  label: String(value),
-}));
-
-const streamWriteBatchOptions = STREAM_WRITE_BATCH_BYTES_OPTIONS.map((value) => ({
-  value: String(value),
-  label: formatSize(value),
-}));
-
-const inflateBufferOptions = INFLATE_BUFFER_BYTES_OPTIONS.map((value) => ({
-  value: String(value),
-  label: formatSize(value),
-}));
+const chunkRetryOptions = rangeOptions(CHUNK_RETRY_MIN, CHUNK_RETRY_MAX);
+const uploadChunkRetryOptions = rangeOptions(UPLOAD_CHUNK_RETRY_MIN, UPLOAD_CHUNK_RETRY_MAX);
+const streamWriteBatchOptions = byteOptions(STREAM_WRITE_BATCH_BYTES_OPTIONS);
+const inflateBufferOptions = byteOptions(INFLATE_BUFFER_BYTES_OPTIONS);
 
 const startupResumeModeLabels: Record<StartupResumeMode, string> = {
   auto: "자동",
@@ -383,27 +363,11 @@ export function SettingsView() {
               title="자동 업데이트"
               description={autoUpdateModeDescriptions[settings["general.autoUpdateMode"]]}
               control={
-                <Select
-                  items={autoUpdateModeOptions}
+                <SettingSelect
+                  options={autoUpdateModeOptions}
                   value={settings["general.autoUpdateMode"]}
-                  onValueChange={(value) => {
-                    if (value === null) return;
-                    void setSetting("general.autoUpdateMode", value);
-                  }}
-                >
-                  <SelectTrigger className="w-34">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent finalFocus={false}>
-                    <SelectGroup>
-                      {autoUpdateModeOptions.map((mode) => (
-                        <SelectItem key={mode.value} value={mode.value}>
-                          {mode.label}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
+                  onChange={(value) => void setSetting("general.autoUpdateMode", value)}
+                />
               }
             />
           )}
@@ -530,6 +494,21 @@ export function SettingsView() {
           />
         </Section>
 
+        <Section icon={<ArrowLeftRightIcon className="size-3.5" />} title="전송 큐">
+          <SettingRow
+            title="세그먼트 풀 크기"
+            description="다운로드·업로드가 공유하는 세그먼트 풀의 최대 크기입니다. 업로드 동시 세그먼트는 별도 제한이 적용됩니다."
+            control={
+              <NumberSetting
+                value={settings["transfer.segmentPoolSize"]}
+                min={SEGMENT_POOL_SIZE_MIN}
+                max={SEGMENT_POOL_SIZE_MAX}
+                onChange={(value) => void setSetting("transfer.segmentPoolSize", value)}
+              />
+            }
+          />
+        </Section>
+
         <Section icon={<DownloadIcon className="size-3.5" />} title="다운로드 큐">
           <SettingRow
             title="대역폭 제한"
@@ -549,123 +528,53 @@ export function SettingsView() {
             }
           />
           <SettingRow
-            title="세그먼트 풀 크기"
-            description="앱 전체에서 공유하는 세그먼트 풀의 최대 크기입니다. 여러 파일·컬렉션에 고르게 나뉩니다."
-            control={
-              <NumberSetting
-                value={settings["transfer.segmentPoolSize"]}
-                min={SEGMENT_POOL_SIZE_MIN}
-                max={SEGMENT_POOL_SIZE_MAX}
-                onChange={(value) => void setSetting("transfer.segmentPoolSize", value)}
-              />
-            }
-          />
-          <SettingRow
             title="청크 재시도"
             description="청크 다운로드 실패 시 최대 재시도 횟수입니다."
             control={
-              <Select
-                items={chunkRetryOptions}
+              <SettingSelect
+                options={chunkRetryOptions}
                 value={String(settings["transfer.maxChunkRetries"])}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("transfer.maxChunkRetries", Number.parseInt(value, 10));
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {chunkRetryOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) =>
+                  void setSetting("transfer.maxChunkRetries", Number.parseInt(value, 10))
+                }
+              />
             }
           />
           <SettingRow
             title="스트림 쓰기 배치"
             description="스트림으로 받은 데이터를 디스크에 쓰기 전에 모으는 크기입니다."
             control={
-              <Select
-                items={streamWriteBatchOptions}
+              <SettingSelect
+                options={streamWriteBatchOptions}
                 value={String(settings["transfer.streamWriteBatchBytes"])}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("transfer.streamWriteBatchBytes", Number.parseInt(value, 10));
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {streamWriteBatchOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) =>
+                  void setSetting("transfer.streamWriteBatchBytes", Number.parseInt(value, 10))
+                }
+              />
             }
           />
           <SettingRow
             title="압축 해제 배치"
             description="Deflate ZIP 항목을 압축 해제할 때 사용하는 버퍼 크기입니다."
             control={
-              <Select
-                items={inflateBufferOptions}
+              <SettingSelect
+                options={inflateBufferOptions}
                 value={String(settings["transfer.inflateBufferBytes"])}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("transfer.inflateBufferBytes", Number.parseInt(value, 10));
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {inflateBufferOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) =>
+                  void setSetting("transfer.inflateBufferBytes", Number.parseInt(value, 10))
+                }
+              />
             }
           />
           <SettingRow
             title="시작 시 이어받기"
             description="앱 시작 시 이전 다운로드를 자동으로 다시 시작할지 선택합니다."
             control={
-              <Select
-                items={startupResumeModeOptions}
+              <SettingSelect
+                options={startupResumeModeOptions}
                 value={settings["transfer.startupResumeMode"]}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("transfer.startupResumeMode", value);
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {startupResumeModeOptions.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        {mode.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) => void setSetting("transfer.startupResumeMode", value)}
+              />
             }
           />
         </Section>
@@ -690,54 +599,24 @@ export function SettingsView() {
             title="청크 재시도"
             description="청크 업로드 실패 시 최대 재시도 횟수입니다."
             control={
-              <Select
-                items={uploadChunkRetryOptions}
+              <SettingSelect
+                options={uploadChunkRetryOptions}
                 value={String(settings["transfer.uploadMaxChunkRetries"])}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("transfer.uploadMaxChunkRetries", Number.parseInt(value, 10));
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {uploadChunkRetryOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) =>
+                  void setSetting("transfer.uploadMaxChunkRetries", Number.parseInt(value, 10))
+                }
+              />
             }
           />
           <SettingRow
             title="시작 시 이어받기"
             description="앱 시작 시 이전 업로드를 자동으로 다시 시작할지 선택합니다."
             control={
-              <Select
-                items={startupResumeModeOptions}
+              <SettingSelect
+                options={startupResumeModeOptions}
                 value={settings["transfer.uploadStartupResumeMode"]}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("transfer.uploadStartupResumeMode", value);
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {startupResumeModeOptions.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        {mode.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) => void setSetting("transfer.uploadStartupResumeMode", value)}
+              />
             }
           />
         </Section>
@@ -747,27 +626,11 @@ export function SettingsView() {
             title="로그 레벨"
             description="앱 로그의 상세 정도를 설정합니다."
             control={
-              <Select
-                items={logLevelOptions}
+              <SettingSelect
+                options={logLevelOptions}
                 value={settings["general.logLevel"]}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("general.logLevel", value);
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {logLevelOptions.map((level) => (
-                      <SelectItem key={level.value} value={level.value}>
-                        {level.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) => void setSetting("general.logLevel", value)}
+              />
             }
           />
         </Section>
@@ -777,32 +640,60 @@ export function SettingsView() {
             title="테마"
             description="앱의 색상 테마를 선택합니다."
             control={
-              <Select
-                items={themeOptions}
+              <SettingSelect
+                options={themeOptions}
                 value={settings["general.theme"]}
-                onValueChange={(value) => {
-                  if (value === null) return;
-                  void setSetting("general.theme", value);
-                }}
-              >
-                <SelectTrigger className="w-34">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent finalFocus={false}>
-                  <SelectGroup>
-                    {themeOptions.map((theme) => (
-                      <SelectItem key={theme.value} value={theme.value}>
-                        {theme.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                onChange={(value) => void setSetting("general.theme", value)}
+              />
             }
           />
         </Section>
       </div>
     </ScrollArea>
+  );
+}
+
+function rangeOptions(min: number, max: number) {
+  return Array.from({ length: max - min + 1 }, (_, index) => {
+    const value = String(min + index);
+    return { value, label: value };
+  });
+}
+
+function byteOptions(values: readonly number[]) {
+  return values.map((value) => ({ value: String(value), label: formatSize(value) }));
+}
+
+function SettingSelect<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: ReadonlyArray<{ value: T; label: string }>;
+  value: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <Select
+      items={options}
+      value={value}
+      onValueChange={(nextValue) => {
+        if (nextValue !== null) onChange(nextValue);
+      }}
+    >
+      <SelectTrigger className="w-34">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent finalFocus={false}>
+        <SelectGroup>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
   );
 }
 

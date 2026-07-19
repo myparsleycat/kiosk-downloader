@@ -100,3 +100,33 @@ describe("getSelectionCheckState", () => {
         expect(getSelectionCheckState(selected, "archive.zip/folder", folder)).toBe(true);
     });
 });
+
+describe("toggleTreeSelection", () => {
+    it("selects and deselects directory and expanded zip subtrees consistently", () => {
+        const root = zipWithFolder();
+        const zip = root.entries[0]?.node as ZipNode;
+
+        const zipSelected = toggleTreeSelection(new Set(), "archive.zip", root);
+        expect(zipSelected).toEqual(
+            new Set([
+                "archive.zip",
+                "archive.zip/folder",
+                "archive.zip/folder/a.bin",
+                "archive.zip/folder/b.bin",
+            ]),
+        );
+        expect(toggleTreeSelection(zipSelected, "archive.zip", root)).toEqual(new Set());
+
+        const folderSelected = toggleTreeSelection(new Set(), "archive.zip/folder", root);
+        expect(folderSelected).toEqual(
+            new Set([
+                "archive.zip",
+                "archive.zip/folder",
+                "archive.zip/folder/a.bin",
+                "archive.zip/folder/b.bin",
+            ]),
+        );
+        expect(getSelectionCheckState(folderSelected, "archive.zip", zip)).toBe(true);
+        expect(toggleTreeSelection(folderSelected, "archive.zip/folder", root)).toEqual(new Set());
+    });
+});

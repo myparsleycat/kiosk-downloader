@@ -7,34 +7,32 @@ import type { KioskDownloader } from "..";
 
 export class Utils {
     private kd: KioskDownloader;
-    private isPreventAppSuspension: boolean = false;
     private preventAppSuspensionId: number | null = null;
 
     constructor(kd: KioskDownloader) {
         this.kd = kd;
     }
 
-    public async preventAppSuspension(v: boolean) {
-        if (v && !this.isPreventAppSuspension) {
-            const id = powerSaveBlocker.start("prevent-app-suspension");
-            this.isPreventAppSuspension = true;
-            this.preventAppSuspensionId = id;
-            return id;
-        } else if (!v && this.preventAppSuspensionId !== null) {
-            if (powerSaveBlocker.isStarted(this.preventAppSuspensionId)) {
-                powerSaveBlocker.stop(this.preventAppSuspensionId);
+    public preventAppSuspension(shouldPrevent: boolean) {
+        if (shouldPrevent) {
+            if (
+                this.preventAppSuspensionId !== null &&
+                powerSaveBlocker.isStarted(this.preventAppSuspensionId)
+            ) {
+                return this.preventAppSuspensionId;
             }
-            this.isPreventAppSuspension = false;
-            this.preventAppSuspensionId = null;
-            return null;
-        } else if (
-            (v && this.isPreventAppSuspension) ||
-            (!v && this.preventAppSuspensionId === null)
-        ) {
+            this.preventAppSuspensionId = powerSaveBlocker.start("prevent-app-suspension");
             return this.preventAppSuspensionId;
-        } else {
-            throw new Error("Invalid arguments");
         }
+
+        if (
+            this.preventAppSuspensionId !== null &&
+            powerSaveBlocker.isStarted(this.preventAppSuspensionId)
+        ) {
+            powerSaveBlocker.stop(this.preventAppSuspensionId);
+        }
+        this.preventAppSuspensionId = null;
+        return null;
     }
 
     public async getFileHash(path: string) {

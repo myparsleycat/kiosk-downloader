@@ -17,6 +17,7 @@ import {
 } from "@renderer/components/ui/dialog";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@renderer/components/ui/tooltip";
+import { useRemoveTransfer } from "@renderer/hooks/use-remove-transfer";
 import { cn } from "@renderer/lib/utils";
 import type { DownloadStatus, FileProgress, UploadFileProgress, UploadItem } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
@@ -38,10 +39,16 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
-import { useRemoveUpload } from "./remove-upload";
 import { UploadCard } from "./upload-card";
 
 type UploadFilter = "all" | "active" | "completed";
+
+const removeUploadOptions = {
+  removeById: (id: string) => window.api.invoke("upload:remove", id),
+  errorMessage: "삭제하지 못했습니다",
+  dialogTitle: "업로드 삭제",
+  dialogDescription: "아직 완료되지 않은 업로드입니다. 정말 삭제하시겠습니까?",
+};
 
 export function UploadList({
   items,
@@ -78,15 +85,14 @@ export function UploadList({
   }, [items, filter]);
 
   React.useEffect(() => {
-    if (!selectedId) {
-      setSelectedId(filtered[0]?.id ?? null);
-    } else if (!filtered.some((i) => i.id === selectedId)) {
+    if (!selectedId || !filtered.some((i) => i.id === selectedId)) {
       setSelectedId(filtered[0]?.id ?? null);
     }
   }, [filtered, selectedId]);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
-  const { remove, removeCompleted, dialog, removing } = useRemoveUpload();
+  const { remove, removeCompleted, dialog, removing } =
+    useRemoveTransfer<UploadItem>(removeUploadOptions);
   const hasCompleted = items.some((item) => item.status === "completed");
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {

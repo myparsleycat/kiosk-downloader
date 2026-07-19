@@ -127,12 +127,7 @@ function requireTransferCollection(input: unknown): DownloadTransferPayload["col
         throw new Error("Invalid transfer collection.");
     }
     const tree = requireCollectionTree(input.tree);
-    const passwordPlain =
-        input.passwordPlain == null
-            ? null
-            : typeof input.passwordPlain === "string"
-              ? input.passwordPlain
-              : null;
+    const passwordPlain = typeof input.passwordPlain === "string" ? input.passwordPlain : null;
     return {
         shareId: input.shareId,
         sourceUrl: input.sourceUrl,
@@ -175,18 +170,8 @@ function requireTransferFile(input: unknown, index: number): DownloadTransferFil
     if (input.sourceKind !== "file" && input.sourceKind !== "zip_entry") {
         throw new Error(`Invalid transfer file entry at ${index}.`);
     }
-    const zipEntryJson =
-        input.zipEntryJson == null
-            ? null
-            : typeof input.zipEntryJson === "string"
-              ? input.zipEntryJson
-              : null;
-    const sourceMetaJson =
-        input.sourceMetaJson == null
-            ? null
-            : typeof input.sourceMetaJson === "string"
-              ? input.sourceMetaJson
-              : null;
+    const zipEntryJson = typeof input.zipEntryJson === "string" ? input.zipEntryJson : null;
+    const sourceMetaJson = typeof input.sourceMetaJson === "string" ? input.sourceMetaJson : null;
     return {
         remoteId: input.remoteId,
         path: input.path,

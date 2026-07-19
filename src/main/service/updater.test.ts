@@ -69,6 +69,7 @@ function createUpdater() {
         http: { request: vi.fn() },
     } as unknown as KioskDownloader;
     const updater = new Updater(kd);
+    vi.spyOn(updater, "getStrategy").mockReturnValue("nsis");
     (
         updater as unknown as {
             registerNsisListeners(): void;

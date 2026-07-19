@@ -11,6 +11,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@renderer/components/ui/dropdown-menu";
+import {
+  buildDirProgressSummaries,
+  type DirProgressSummary,
+  type FileTreeError,
+} from "@renderer/lib/file-tree-progress";
 import type {
   DirNode,
   DownloadStatus,
@@ -63,10 +68,7 @@ export interface FileTreeProgressProps {
   onError?: (errors: FileTreeError[]) => void;
 }
 
-export interface FileTreeError {
-  path: string;
-  message: string;
-}
+export type { FileTreeError } from "@renderer/lib/file-tree-progress";
 
 export type FileTreeProps = FileTreeSelectionProps | FileTreeProgressProps;
 
@@ -640,188 +642,6 @@ function ZipRow({
         ))}
     </>
   );
-}
-
-interface DirProgressSummary {
-  totalSize: number;
-  folderTotalSize: number;
-  downloaded: number;
-  speedBps: number;
-  fileCount: number;
-  excludedCount: number;
-  selectedCount: number;
-  completedCount: number;
-  allExcluded: boolean;
-  hasDownloading: boolean;
-  hasInflating: boolean;
-  hasPaused: boolean;
-  hasError: boolean;
-  errors: FileTreeError[];
-  status: "skipped" | "completed" | "downloading" | "inflating" | "error" | "paused" | "pending";
-}
-
-function buildDirProgressSummaries(root: DirNode, progress: Record<string, FileProgress>) {
-  const summaries = new Map<string, DirProgressSummary>();
-
-  function walk(dir: DirNode, pathStack: string[]): DirProgressSummary {
-    let totalSize = 0;
-    let downloaded = 0;
-    let speedBps = 0;
-    let fileCount = 0;
-    let excludedCount = 0;
-    let selectedCount = 0;
-    let folderTotalSize = 0;
-    let completedCount = 0;
-    let hasDownloading = false;
-    let hasInflating = false;
-    let hasPaused = false;
-    let hasError = false;
-    const errors: FileTreeError[] = [];
-
-    for (const e of dir.entries) {
-      if (e.kind === "file") {
-        const file = e.node as FileNode;
-        const key = [...pathStack, file.name].join("/");
-        const prog = progress[key];
-        const selected = prog?.selected ?? true;
-
-        fileCount += 1;
-        folderTotalSize += file.size;
-
-        if (!selected) {
-          excludedCount += 1;
-          continue;
-        }
-
-        selectedCount += 1;
-        totalSize += file.size;
-        downloaded += prog?.downloaded ?? 0;
-
-        const status = prog?.status ?? "pending";
-        if (status === "downloading") {
-          hasDownloading = true;
-          speedBps += prog?.speedBps ?? 0;
-        } else if (status === "inflating") {
-          hasInflating = true;
-        } else if (status === "paused") {
-          hasPaused = true;
-        } else if (status === "error") {
-          hasError = true;
-          errors.push({ path: key, message: prog?.error ?? "오류 정보가 없습니다." });
-        } else if (status === "completed") {
-          completedCount += 1;
-        }
-        continue;
-      }
-
-      if (e.kind === "zip") {
-        const zip = e.node as ZipNode;
-        if (!zip.entries) {
-          const key = [...pathStack, zip.name].join("/");
-          const prog = progress[key];
-          const selected = prog?.selected ?? true;
-          fileCount += 1;
-          folderTotalSize += zip.size;
-          if (!selected) {
-            excludedCount += 1;
-            continue;
-          }
-          selectedCount += 1;
-          totalSize += zip.size;
-          downloaded += prog?.downloaded ?? 0;
-          const status = prog?.status ?? "pending";
-          if (status === "downloading") {
-            hasDownloading = true;
-            speedBps += prog?.speedBps ?? 0;
-          } else if (status === "inflating") {
-            hasInflating = true;
-          } else if (status === "paused") {
-            hasPaused = true;
-          } else if (status === "error") {
-            hasError = true;
-            errors.push({ path: key, message: prog?.error ?? "오류 정보가 없습니다." });
-          } else if (status === "completed") {
-            completedCount += 1;
-          }
-          continue;
-        }
-        const childStack = [...pathStack, zip.name];
-        const childSummary = walk(
-          { type: "dir", id: zip.id, name: zip.name, entries: zip.entries },
-          childStack,
-        );
-        totalSize += childSummary.totalSize;
-        downloaded += childSummary.downloaded;
-        speedBps += childSummary.speedBps;
-        fileCount += childSummary.fileCount;
-        excludedCount += childSummary.excludedCount;
-        selectedCount += childSummary.selectedCount;
-        folderTotalSize += childSummary.folderTotalSize;
-        completedCount += childSummary.completedCount;
-        hasDownloading ||= childSummary.hasDownloading;
-        hasInflating ||= childSummary.hasInflating;
-        hasPaused ||= childSummary.hasPaused;
-        hasError ||= childSummary.hasError;
-        errors.push(...childSummary.errors);
-        continue;
-      }
-
-      const child = e.node as DirNode;
-      const childStack = child.name === "" ? pathStack : [...pathStack, child.name];
-      const childSummary = walk(child, childStack);
-      totalSize += childSummary.totalSize;
-      downloaded += childSummary.downloaded;
-      speedBps += childSummary.speedBps;
-      fileCount += childSummary.fileCount;
-      excludedCount += childSummary.excludedCount;
-      selectedCount += childSummary.selectedCount;
-      folderTotalSize += childSummary.folderTotalSize;
-      completedCount += childSummary.completedCount;
-      hasDownloading ||= childSummary.hasDownloading;
-      hasInflating ||= childSummary.hasInflating;
-      hasPaused ||= childSummary.hasPaused;
-      hasError ||= childSummary.hasError;
-      errors.push(...childSummary.errors);
-    }
-
-    const allExcluded = fileCount > 0 && excludedCount === fileCount;
-    const status = allExcluded
-      ? "skipped"
-      : selectedCount > 0 && completedCount === selectedCount
-        ? "completed"
-        : hasDownloading
-          ? "downloading"
-          : hasInflating
-            ? "inflating"
-            : hasError
-              ? "error"
-              : hasPaused
-                ? "paused"
-                : "pending";
-
-    const summary: DirProgressSummary = {
-      totalSize,
-      folderTotalSize,
-      downloaded,
-      speedBps,
-      fileCount,
-      excludedCount,
-      selectedCount,
-      completedCount,
-      allExcluded,
-      hasDownloading,
-      hasInflating,
-      hasPaused,
-      hasError,
-      errors,
-      status,
-    };
-    summaries.set(pathStack.join("/"), summary);
-    return summary;
-  }
-
-  walk(root, []);
-  return summaries;
 }
 
 interface TreeRowProps {

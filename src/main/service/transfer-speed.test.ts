@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { cachedSpeedOrClearIfStale, SPEED_EMA_TAU_MS, updateSpeedEma } from "./transfer-speed";
+import {
+    cachedSpeedOrClearIfStale,
+    SPEED_EMA_TAU_MS,
+    TransferSpeedSampler,
+    updateSpeedEma,
+} from "./transfer-speed";
 
 describe("updateSpeedEma", () => {
     it("seeds with the instant rate when there is no previous value", () => {
@@ -35,5 +40,36 @@ describe("cachedSpeedOrClearIfStale", () => {
         expect(cachedSpeedOrClearIfStale(3001, "file", speedByKey, lastEmaAtByKey, 2000)).toBe(0);
         expect(speedByKey.has("file")).toBe(false);
         expect(lastEmaAtByKey.has("file")).toBe(false);
+    });
+});
+
+describe("TransferSpeedSampler", () => {
+    it("warms up, calculates EMA, and clears its state", () => {
+        let now = 0;
+        const sampler = new TransferSpeedSampler(() => now, 2000);
+
+        expect(sampler.sample("file", 0)).toBe(0);
+        now = 500;
+        expect(sampler.sample("file", 500)).toBe(1000);
+        now = 1000;
+        expect(sampler.sample("file", 1500)).toBeGreaterThan(1000);
+        expect(sampler.get("file")).toBeGreaterThan(1000);
+
+        sampler.clear("file");
+        expect(sampler.get("file")).toBe(0);
+        expect(sampler.sample("file", 1500)).toBe(0);
+    });
+
+    it.each([2000, 3000])("clears cached speed after a %dms stale window", (windowMs) => {
+        let now = 0;
+        const sampler = new TransferSpeedSampler(() => now, windowMs);
+
+        sampler.sample("file", 0);
+        now = 500;
+        expect(sampler.sample("file", 1000)).toBe(2000);
+        now += windowMs + 1;
+
+        expect(sampler.sample("file", 1000)).toBe(0);
+        expect(sampler.get("file")).toBe(0);
     });
 });
