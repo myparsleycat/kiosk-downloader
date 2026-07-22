@@ -1,3 +1,10 @@
+## [1.7.2](https://github.com/myparsleycat/kiosk-downloader/compare/v1.7.1...v1.7.2) (2026-07-22)
+
+
+### Bug Fixes
+
+* **download:** queue collections when slots are full ([1a90e56](https://github.com/myparsleycat/kiosk-downloader/commit/1a90e5650358cc5b4bc106975039bd2fa635e532))
+
 ## [1.7.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.7.0...v1.7.1) (2026-07-19)
 
 
