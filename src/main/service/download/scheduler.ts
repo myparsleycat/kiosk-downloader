@@ -85,8 +85,6 @@ export class DownloadScheduler {
     private readonly progressBatcher: TransferProgressBatcher;
     private readonly segmentPool: GlobalSegmentPool;
     private readonly transferPool: TransferChunkPool;
-    private readonly fileStartOrder: string[] = [];
-    private readonly collectionStartOrder: string[] = [];
     private readonly fileStartedAt = new Map<string, number>();
     private readonly collectionStartedAt = new Map<string, number>();
     private readonly collectionTimerStartedAt = new Map<string, number>();
@@ -258,32 +256,22 @@ export class DownloadScheduler {
             );
             const isNewCollection = hasPending && !this.activeCollections.has(collection.id);
 
-            if (isNewCollection) {
-                while (this.activeCollections.size >= segmentPoolSize) {
-                    if (!this.evictOldestActiveCollection()) {
-                        break;
-                    }
-                }
+            if (isNewCollection && this.activeCollections.size >= segmentPoolSize) {
+                continue;
             }
 
             let startedAny = false;
             while (true) {
+                if (this.fileControllers.size >= segmentPoolSize) {
+                    break;
+                }
+
                 const nextFile = this.pickNextFile(collection.id);
                 if (!nextFile) {
                     break;
                 }
 
                 if (!this.canStartFile(collection.id, segmentPoolSize)) {
-                    break;
-                }
-
-                while (this.fileControllers.size >= segmentPoolSize) {
-                    if (!this.evictOldestActiveFile()) {
-                        break;
-                    }
-                }
-
-                if (this.fileControllers.size >= segmentPoolSize) {
                     break;
                 }
 
@@ -375,53 +363,12 @@ export class DownloadScheduler {
         return outstandingChunks < segmentPoolSize;
     }
 
-    private evictOldestActiveFile() {
-        const oldestFileId = this.fileStartOrder.find((fileId) => this.fileControllers.has(fileId));
-        if (!oldestFileId) {
-            return false;
-        }
-
-        this.yieldFileToPending(oldestFileId);
-        return true;
-    }
-
-    private evictOldestActiveCollection() {
-        const oldestCollectionId = this.collectionStartOrder.find((collectionId) =>
-            this.activeCollections.has(collectionId),
-        );
-        if (!oldestCollectionId) {
-            return false;
-        }
-
-        for (const fileId of [...(this.activeFilesByCollection.get(oldestCollectionId) ?? [])]) {
-            this.yieldFileToPending(fileId);
-        }
-        this.deactivateCollectionTransfer(oldestCollectionId);
-        this.stopCollectionTimer(oldestCollectionId);
-        this.repository.markCollectionStatus(oldestCollectionId, "queued");
-        return true;
-    }
-
-    private yieldFileToPending(fileId: string) {
-        this.pauseFile(fileId);
-        this.repository.resetRunningChunksForFile(fileId);
-        this.repository.markFileStatus(fileId, "pending");
-    }
-
     private clearFileStartTracking(fileId: string) {
         this.fileStartedAt.delete(fileId);
-        const index = this.fileStartOrder.indexOf(fileId);
-        if (index >= 0) {
-            this.fileStartOrder.splice(index, 1);
-        }
     }
 
     private clearCollectionStartTracking(collectionId: string) {
         this.collectionStartedAt.delete(collectionId);
-        const index = this.collectionStartOrder.indexOf(collectionId);
-        if (index >= 0) {
-            this.collectionStartOrder.splice(index, 1);
-        }
     }
 
     private startCollectionTimer(collectionId: string) {
@@ -449,11 +396,9 @@ export class DownloadScheduler {
     ) {
         const startedAt = Date.now();
         this.fileStartedAt.set(file.id, startedAt);
-        this.fileStartOrder.push(file.id);
 
         if (!this.collectionStartedAt.has(collection.id)) {
             this.collectionStartedAt.set(collection.id, startedAt);
-            this.collectionStartOrder.push(collection.id);
             this.startCollectionTimer(collection.id);
         }
 
