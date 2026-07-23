@@ -1025,13 +1025,17 @@ export class DownloadService {
         }
 
         const elapsedMs = this.scheduler.getCollectionElapsedMs(item.id);
-        const collectionSpeedBps = isBundle
-            ? item.status === "downloading" && options.sampleSpeeds
+        const sampleSpeeds = item.status === "downloading" && options.sampleSpeeds;
+        let collectionSpeedBps: number;
+        if (isBundle) {
+            collectionSpeedBps = sampleSpeeds
                 ? this.metrics.sampleBundle(item.id, subCollectionIds)
-                : this.metrics.getBundleSnapshot(item.id, subCollectionIds).speedBps
-            : item.status === "downloading" && options.sampleSpeeds
-              ? this.metrics.sampleCollection(item.id)
-              : this.metrics.getCollectionSnapshot(item.id).speedBps;
+                : this.metrics.getBundleSnapshot(item.id, subCollectionIds).speedBps;
+        } else {
+            collectionSpeedBps = sampleSpeeds
+                ? this.metrics.sampleCollection(item.id)
+                : this.metrics.getCollectionSnapshot(item.id).speedBps;
+        }
         if (item.status !== "downloading") {
             if (isBundle) {
                 this.metrics.clearBundle(item.id);
