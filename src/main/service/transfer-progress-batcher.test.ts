@@ -48,12 +48,18 @@ describe("TransferProgressBatcher", () => {
 
         release?.();
         await Promise.resolve();
-        await vi.advanceTimersByTimeAsync(500);
-        await vi.advanceTimersByTimeAsync(500);
-
+        await Promise.resolve();
+        expect(flush).toHaveBeenCalledTimes(2);
         expect([...flush.mock.calls[1][1]]).toEqual(["two"]);
-        expect([...flush.mock.calls[2][1]]).toEqual(["two"]);
         expect(onError).toHaveBeenCalledTimes(1);
+
+        // Failed ids stay dirty, but retry waits for the next poll tick.
+        await Promise.resolve();
+        expect(flush).toHaveBeenCalledTimes(2);
+
+        await vi.advanceTimersByTimeAsync(500);
+        expect(flush).toHaveBeenCalledTimes(3);
+        expect([...flush.mock.calls[2][1]]).toEqual(["two"]);
         batcher.destroy();
     });
 });
