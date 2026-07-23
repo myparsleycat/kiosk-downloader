@@ -155,6 +155,187 @@ describe("DownloadRepository.restoreStartupState", () => {
     });
 });
 
+describe("DownloadRepository bundles", () => {
+    it("aggregates downloaded pieces as one logical file", async () => {
+        const { db, repo } = await createRepository();
+        const tree: DirNode = {
+            type: "dir",
+            id: "root",
+            name: "",
+            entries: [
+                {
+                    kind: "file",
+                    node: { type: "file", id: "large.bin", name: "large.bin", size: 15 },
+                },
+            ],
+        };
+        repo.insertBundle({
+            id: "bundle",
+            sourceInput: "KDE1.test",
+            name: "Bundle",
+            treeJson: JSON.stringify(tree),
+            manifestJson: JSON.stringify({
+                renames: {},
+                splitFiles: [
+                    {
+                        path: "large.bin",
+                        size: 15,
+                        sha256: "00".repeat(32),
+                        pieces: [
+                            { sourceIndex: 0, remoteFileId: "remote-0", offset: 0, length: 10 },
+                            { sourceIndex: 1, remoteFileId: "remote-1", offset: 10, length: 5 },
+                        ],
+                    },
+                ],
+            }),
+            savePath: "/tmp",
+            expires: Math.floor(Date.now() / 1000) + 60,
+        });
+        for (const [ordinal, size] of [
+            [0, 10],
+            [1, 5],
+        ] as const) {
+            repo.insertDownload({
+                loaded: {
+                    provider: "kiosk",
+                    cat: "cat",
+                    rootId: "root",
+                    passwordProtected: false,
+                    collection: {
+                        shareId: `share-${ordinal}`,
+                        name: "Bundle",
+                        expires: Math.floor(Date.now() / 1000) + 60,
+                        segmentSize: 16,
+                        passwordProtected: false,
+                        provider: "kiosk",
+                        tree: {
+                            type: "dir",
+                            id: "root",
+                            name: "",
+                            entries: [
+                                {
+                                    kind: "file",
+                                    node: {
+                                        type: "file",
+                                        id: `remote-${ordinal}`,
+                                        name: `${ordinal}.part`,
+                                        size,
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                },
+                url: `https://kio.ac/c/share-${ordinal}`,
+                savePath: `/tmp/${ordinal}`,
+                selectedPaths: [`${ordinal}.part`],
+                asciiFilenames: false,
+                bundleId: "bundle",
+                ordinal,
+            });
+        }
+
+        expect(repo.getItem("bundle")).toMatchObject({
+            id: "bundle",
+            collection: { provider: "extended" },
+            summary: { totalBytes: 15, totalFiles: 1 },
+            progress: { "large.bin": { size: 15, downloaded: 0 } },
+        });
+
+        const firstCollection = repo.listBundleCollections("bundle")[0];
+        repo.markCollectionStatus(firstCollection.id, "completed");
+        db.run(`UPDATE "download_file" SET "downloaded_bytes" = "size" WHERE "collection_id" = ?`, [
+            firstCollection.id,
+        ]);
+        expect(repo.listOsProgressRows()).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    status: "completed",
+                    transferredBytes: 10,
+                    totalBytes: 10,
+                }),
+                expect.objectContaining({ status: "queued", transferredBytes: 0, totalBytes: 5 }),
+            ]),
+        );
+    });
+
+    it("projects only selected logical ranges from a shared physical pack", async () => {
+        const { repo } = await createRepository();
+        const tree: DirNode = { type: "dir", id: "root", name: "", entries: [] };
+        repo.insertBundle({
+            id: "packed-bundle",
+            sourceInput: "KDE1.test",
+            name: "Packed",
+            treeJson: JSON.stringify(tree),
+            manifestJson: JSON.stringify({
+                renames: {},
+                selectedPaths: ["b.txt"],
+                splitFiles: [
+                    {
+                        path: "a.txt",
+                        size: 4,
+                        pieces: [{ sourceIndex: 0, remoteFileId: "pack", offset: 0, length: 4 }],
+                    },
+                    {
+                        path: "b.txt",
+                        size: 6,
+                        pieces: [
+                            {
+                                sourceIndex: 0,
+                                remoteFileId: "pack",
+                                offset: 0,
+                                length: 6,
+                                remoteOffset: 4,
+                            },
+                        ],
+                    },
+                ],
+            }),
+            savePath: "/tmp",
+            expires: Math.floor(Date.now() / 1000) + 60,
+        });
+        repo.insertDownload({
+            loaded: {
+                provider: "kiosk",
+                cat: "cat",
+                rootId: "root",
+                passwordProtected: false,
+                collection: {
+                    shareId: "share",
+                    name: "Packed",
+                    expires: Math.floor(Date.now() / 1000) + 60,
+                    segmentSize: 16,
+                    passwordProtected: false,
+                    provider: "kiosk",
+                    tree: {
+                        type: "dir",
+                        id: "root",
+                        name: "",
+                        entries: [
+                            {
+                                kind: "file",
+                                node: { type: "file", id: "pack", name: "pack", size: 10 },
+                            },
+                        ],
+                    },
+                },
+            },
+            url: "https://kio.ac/c/share",
+            savePath: "/tmp/pack",
+            selectedPaths: ["pack"],
+            asciiFilenames: false,
+            bundleId: "packed-bundle",
+            ordinal: 0,
+        });
+
+        expect(repo.getItem("packed-bundle")).toMatchObject({
+            summary: { totalBytes: 6, totalFiles: 1 },
+            progress: { "b.txt": { size: 6, downloaded: 0 } },
+        });
+        expect(repo.getItem("packed-bundle")?.progress["a.txt"]).toBeUndefined();
+    });
+});
+
 function createImportPayload(options: {
     expires: number;
     status: "completed" | "pending";

@@ -6,7 +6,7 @@ import {
     renameUploadFiles,
     validateNodeName,
 } from "@shared/tree-rename";
-import type { UploadTreeFile } from "@shared/types";
+import type { UploadMode, UploadTreeFile } from "@shared/types";
 import { create } from "zustand";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -34,6 +34,7 @@ type UploadDraftState = {
     description: string;
     password: string;
     expiresAt: number;
+    mode: UploadMode;
 };
 
 type UploadDraftActions = {
@@ -45,6 +46,7 @@ type UploadDraftActions = {
     setDescription: (description: string) => void;
     setPassword: (password: string) => void;
     setExpiresAt: (ms: number) => void;
+    setMode: (mode: UploadMode) => void;
     resetDraft: () => void;
 };
 
@@ -56,6 +58,7 @@ const draftDefaults = {
     description: "",
     password: "",
     expiresAt: clampExpiry(Date.now() + DEFAULT_EXPIRY_DAYS * DAY),
+    mode: "standard",
 } satisfies UploadDraftState;
 
 export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
@@ -126,6 +129,7 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
     setDescription: (description) => set({ description }),
     setPassword: (password) => set({ password }),
     setExpiresAt: (expiresAt) => set({ expiresAt: clampExpiry(expiresAt) }),
+    setMode: (mode) => set({ mode }),
 
     resetDraft: () => {
         void window.api.invoke("upload:clearDraftSources");
@@ -135,6 +139,7 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
             description: "",
             password: "",
             expiresAt: clampExpiry(Date.now() + DEFAULT_EXPIRY_DAYS * DAY),
+            mode: "standard",
         });
     },
 }));

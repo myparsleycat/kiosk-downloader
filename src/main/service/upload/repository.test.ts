@@ -74,3 +74,162 @@ describe("UploadRepository.restoreStartupState", () => {
         );
     });
 });
+
+describe("UploadRepository bundles", () => {
+    it("aggregates physical pieces as one logical file", async () => {
+        const db = new DatabaseClient(":memory:");
+        await db.reconcile();
+        const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
+        const tree = {
+            type: "dir" as const,
+            id: "root",
+            name: "",
+            entries: [
+                {
+                    kind: "file" as const,
+                    node: { type: "file" as const, id: "large.bin", name: "large.bin", size: 15 },
+                },
+            ],
+        };
+        repo.insertBundle({
+            id: "bundle",
+            mode: "integrated",
+            name: "Bundle",
+            description: "",
+            password: "",
+            treeJson: JSON.stringify(tree),
+            planJson: JSON.stringify({ collections: [] }),
+            physicalCount: 2,
+            expires: Date.now() + 60_000,
+        });
+        for (const [ordinal, size, offset] of [
+            [0, 10, 0],
+            [1, 5, 10],
+        ] as const) {
+            repo.insertUpload({
+                created: {
+                    collectionUuid: Buffer.alloc(16, ordinal + 1),
+                    uploadToken: `token-${ordinal}`,
+                    root: { id: Buffer.alloc(16), name: "", files: [], children: [] },
+                },
+                options: {
+                    name: `Bundle (${ordinal + 1}/2)`,
+                    description: "",
+                    password: "",
+                    expires: Date.now() + 60_000,
+                },
+                files: [
+                    {
+                        path: `.parts/${ordinal}`,
+                        name: String(ordinal),
+                        size,
+                        fsPath: "/tmp/large.bin",
+                        sourceMtimeMs: 0,
+                        logicalPath: "large.bin",
+                        logicalSize: 15,
+                        sourceOffset: offset,
+                        logicalSha256: "00".repeat(32),
+                    },
+                ],
+                segmentSize: 16,
+                tree,
+                bundleId: "bundle",
+                ordinal,
+            });
+        }
+
+        expect(repo.getItem("bundle")).toMatchObject({
+            id: "bundle",
+            summary: { totalBytes: 15, totalFiles: 1 },
+            progress: { "large.bin": { size: 15, uploaded: 0 } },
+            physicalCollectionCount: 2,
+        });
+
+        const firstCollection = repo.listBundleCollections("bundle")[0];
+        repo.markCollectionStatus(firstCollection.id, "completed");
+        db.run(`UPDATE "upload_file" SET "uploaded_bytes" = "size" WHERE "collection_id" = ?`, [
+            firstCollection.id,
+        ]);
+        expect(repo.listOsProgressRows()).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    status: "completed",
+                    transferredBytes: 10,
+                    totalBytes: 10,
+                }),
+                expect.objectContaining({ status: "queued", transferredBytes: 0, totalBytes: 5 }),
+            ]),
+        );
+    });
+
+    it("projects one physical pack as multiple logical file progress rows", async () => {
+        const db = new DatabaseClient(":memory:");
+        await db.reconcile();
+        const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
+        const tree = {
+            type: "dir" as const,
+            id: "root",
+            name: "",
+            entries: [],
+        };
+        repo.insertBundle({
+            id: "packed-bundle",
+            mode: "integrated",
+            name: "Packed",
+            description: "",
+            password: "",
+            treeJson: JSON.stringify(tree),
+            planJson: JSON.stringify({
+                collections: [
+                    {
+                        files: [
+                            {
+                                path: "packs/0",
+                                packEntries: [
+                                    { path: "a.txt", size: 4 },
+                                    { path: "b.txt", size: 6 },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            }),
+            physicalCount: 1,
+            expires: Date.now() + 60_000,
+        });
+        repo.insertUpload({
+            created: {
+                collectionUuid: Buffer.alloc(16, 1),
+                uploadToken: "token",
+                root: { id: Buffer.alloc(16), name: "", files: [], children: [] },
+            },
+            options: {
+                name: "Packed (1/1)",
+                description: "",
+                password: "",
+                expires: Date.now() + 60_000,
+            },
+            files: [
+                {
+                    path: "packs/0",
+                    name: "0",
+                    size: 10,
+                    fsPath: "/tmp/pack",
+                    sourceMtimeMs: 0,
+                },
+            ],
+            segmentSize: 16,
+            tree,
+            bundleId: "packed-bundle",
+            ordinal: 0,
+        });
+
+        expect(repo.getItem("packed-bundle")).toMatchObject({
+            summary: { totalBytes: 10, totalFiles: 2 },
+            progress: {
+                "a.txt": { size: 4, uploaded: 0 },
+                "b.txt": { size: 6, uploaded: 0 },
+            },
+        });
+    });
+});

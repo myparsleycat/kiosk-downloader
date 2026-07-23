@@ -44,6 +44,7 @@ import {
   CheckIcon,
   ClockIcon,
   DownloadIcon,
+  FileUpIcon,
   FolderOpenIcon,
   HardDriveIcon,
   HashIcon,
@@ -96,6 +97,12 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const renameNode = useNewDownloadDraft((state) => state.renameNode);
 
   const [loading, setLoading] = React.useState(false);
+  const [shareDragOver, setShareDragOver] = React.useState(false);
+  const [readingShareFile, setReadingShareFile] = React.useState(false);
+  const [extendedLoadProgress, setExtendedLoadProgress] = React.useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const [starting, setStarting] = React.useState(false);
   const [sortField, setSortField] = React.useState<SortField>("name");
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
@@ -119,6 +126,55 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   React.useEffect(() => {
     requestAnimationFrame(() => urlInputRef.current?.focus());
   }, []);
+
+  React.useEffect(
+    () =>
+      window.api.on("download:extended-load-progress", (progress) =>
+        setExtendedLoadProgress(progress),
+      ),
+    [],
+  );
+
+  const loadShareFromResult = React.useCallback(
+    (result: { shareInput: string } | null) => {
+      if (!result) return;
+      setUrl(result.shareInput);
+    },
+    [setUrl],
+  );
+
+  const handlePickShareFile = React.useCallback(async () => {
+    setReadingShareFile(true);
+    try {
+      loadShareFromResult(await window.api.invoke("download:readShareFile"));
+    } catch (error) {
+      toast.error("공유 정보 파일을 읽지 못했습니다", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setReadingShareFile(false);
+    }
+  }, [loadShareFromResult]);
+
+  const handleShareDrop = React.useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setShareDragOver(false);
+      const files = collectDroppedFiles(e.dataTransfer);
+      if (files.length === 0) return;
+      setReadingShareFile(true);
+      void window.api
+        .readDroppedShareFile(files)
+        .then(loadShareFromResult)
+        .catch((error: unknown) => {
+          toast.error("공유 정보 파일을 읽지 못했습니다", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        })
+        .finally(() => setReadingShareFile(false));
+    },
+    [loadShareFromResult],
+  );
 
   const tryAutoCollectionPasswords = React.useCallback(
     async (trimmedUrl: string, shareId: string, seq: number) => {
@@ -202,12 +258,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const loadCollection = React.useCallback(
     async (trimmedUrl: string, loadPassword?: string) => {
       const parsed = tryParseDownloadUrl(trimmedUrl);
-      if (!parsed) {
+      const extended = trimmedUrl.startsWith("KDE1.");
+      if (!parsed && !extended) {
         return;
       }
 
       const seq = ++loadSeqRef.current;
       setLoading(true);
+      setExtendedLoadProgress(extended ? { current: 0, total: 0 } : null);
 
       try {
         const loaded = await window.api.invoke("download:loadCollection", {
@@ -223,26 +281,37 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         setSelected(collectAllPaths(loaded.tree));
         setPasswordRequired(false);
         setPasswordInvalid(false);
-        setProbedShareId(parsed.id);
+        setProbedShareId(parsed?.id ?? trimmedUrl);
       } catch (error) {
         if (seq !== loadSeqRef.current) {
           return;
         }
 
-        if (loadPassword && isCollectionInvalidPasswordError(error)) {
+        const errorCause = getIpcErrorCause(error);
+        if (
+          loadPassword &&
+          (isCollectionInvalidPasswordError(error) || errorCause.includes("Incorrect password"))
+        ) {
           setPasswordInvalid(true);
           setCollection(null);
           setSelected(new Set());
           return;
         }
 
-        if (!loadPassword && isCollectionPasswordRequiredError(error)) {
+        if (
+          !loadPassword &&
+          (isCollectionPasswordRequiredError(error) || errorCause.includes("Password is required"))
+        ) {
+          setProbedShareId(parsed?.id ?? trimmedUrl);
           setPasswordRequired(true);
-          setProbedShareId(parsed.id);
           setCollection(null);
           setSelected(new Set());
 
-          const autoTried = await tryAutoCollectionPasswords(trimmedUrl, parsed.id, seq);
+          const autoTried = await tryAutoCollectionPasswords(
+            trimmedUrl,
+            parsed?.id ?? trimmedUrl,
+            seq,
+          );
           if (autoTried || seq !== loadSeqRef.current) {
             return;
           }
@@ -261,6 +330,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       } finally {
         if (seq === loadSeqRef.current) {
           setLoading(false);
+          setExtendedLoadProgress(null);
         }
       }
     },
@@ -276,7 +346,11 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
   const verifyPassword = React.useCallback(() => {
     const trimmedUrl = url.trim();
-    if (passwordRequired !== true || !password.trim() || !tryParseDownloadUrl(trimmedUrl)) {
+    if (
+      passwordRequired !== true ||
+      !password.trim() ||
+      (!tryParseDownloadUrl(trimmedUrl) && !trimmedUrl.startsWith("KDE1."))
+    ) {
       return;
     }
 
@@ -286,19 +360,20 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   React.useEffect(() => {
     const trimmedUrl = url.trim();
     const parsed = tryParseDownloadUrl(trimmedUrl);
+    const identity = parsed?.id ?? (trimmedUrl.startsWith("KDE1.") ? trimmedUrl : null);
 
-    if (!parsed) {
+    if (!identity) {
       loadSeqRef.current += 1;
       clearProbeState();
       setLoading(false);
       return;
     }
 
-    if (parsed.id === collection?.shareId) {
+    if (identity === probedShareId || (parsed != null && parsed.id === collection?.shareId)) {
       return;
     }
 
-    if (parsed.id === probedShareId && passwordRequired === true) {
+    if (identity === probedShareId && passwordRequired === true) {
       return;
     }
 
@@ -383,8 +458,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     setSortDir("desc");
   };
 
-  const currentShareId = tryParseDownloadUrl(url.trim())?.id ?? null;
-  const collectionSynced = collection !== null && currentShareId === collection.shareId && !loading;
+  const currentShareId =
+    tryParseDownloadUrl(url.trim())?.id ?? (url.trim().startsWith("KDE1.") ? url.trim() : null);
+  const collectionSynced =
+    collection !== null &&
+    (collection.provider === "extended"
+      ? currentShareId === probedShareId
+      : currentShareId === collection.shareId) &&
+    !loading;
   const canStart =
     collectionSynced && summary.count > 0 && savePath.trim().length > 0 && passwordInvalid !== true;
   const effectiveSavePath =
@@ -399,7 +480,9 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     if (
       !collection ||
       !canStart ||
-      tryParseDownloadUrl(url.trim())?.id !== collection.shareId ||
+      (collection.provider === "extended"
+        ? currentShareId !== probedShareId
+        : currentShareId !== collection.shareId) ||
       loading
     ) {
       return;
@@ -437,33 +520,69 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         <div className="border-b px-4 py-3">
           <h2 className="cn-font-heading text-sm font-medium">새 다운로드</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            kio.ac 또는 transfer.it 공유 링크를 입력하세요
+            공유 URL을 입력하거나 확장 공유 파일(.kds)을 선택하세요
           </p>
         </div>
 
         <ScrollArea className="flex-1">
           <div className="flex w-full min-w-0 flex-col gap-4 p-4">
-            <div className="flex flex-col gap-1.5">
+            <div
+              className={cn(
+                "flex flex-col gap-1.5 rounded-lg transition-colors",
+                shareDragOver && "bg-primary/5 ring-1 ring-primary/30",
+              )}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setShareDragOver(true);
+              }}
+              onDragLeave={() => setShareDragOver(false)}
+              onDrop={handleShareDrop}
+            >
               <Field>
                 <FieldLabel htmlFor="url-input">
                   <LinkIcon className="size-3" />
-                  공유 URL
+                  공유 URL 또는 확장 공유 파일
                 </FieldLabel>
                 <InputGroup>
                   <InputGroupInput
                     ref={urlInputRef}
                     id="url-input"
-                    placeholder="https://kio.ac/c/... 또는 https://transfer.it/t/..."
+                    placeholder="https://kio.ac/c/... 또는 .kds 파일"
                     value={url}
                     onChange={(e) => {
                       const value = e.target.value;
                       setUrl(tryDecodeShareUrlBase64(value) ?? value);
                     }}
+                    onPaste={(e) => {
+                      const value = e.clipboardData.getData("text").trim();
+                      const resolved = tryDecodeShareUrlBase64(value) ?? value;
+                      if (!tryParseDownloadUrl(resolved)) return;
+                      e.preventDefault();
+                      setUrl(resolved);
+                    }}
                   />
                   <InputGroupAddon align="inline-end">
-                    {loading && <Loader2Icon className="size-4 animate-spin" />}
+                    {(loading || readingShareFile) && (
+                      <Loader2Icon className="size-4 animate-spin" />
+                    )}
+                    <InputGroupButton
+                      size="icon-xs"
+                      aria-label="공유 정보 파일 선택"
+                      disabled={readingShareFile || loading}
+                      onClick={() => void handlePickShareFile()}
+                    >
+                      <FileUpIcon />
+                    </InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
+                <FieldDescription className="text-xs">
+                  .kds 파일을 드래그하거나 파일 선택 버튼으로 불러올 수 있습니다
+                </FieldDescription>
+                {loading && extendedLoadProgress && extendedLoadProgress.total > 0 && (
+                  <FieldDescription className="text-xs">
+                    컬렉션 {extendedLoadProgress.current}/{extendedLoadProgress.total} 불러오는 중
+                  </FieldDescription>
+                )}
               </Field>
             </div>
 
@@ -593,8 +712,15 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         {collection ? (
           <>
             <div className="flex items-center justify-between border-b px-4 py-2.5">
-              <span className="cn-font-heading text-sm font-medium">파일 선택</span>
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <div>
+                <span className="cn-font-heading text-sm font-medium">파일 선택</span>
+                {collection.provider === "extended" && (
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    확장 공유의 ZIP은 완성 파일로 다운로드되며 내부 목록은 미리 열 수 없습니다.
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
                 <span className="tabular-nums">{summary.count}</span>
                 <span>/</span>
                 <span className="tabular-nums">{totalFiles} 파일</span>
@@ -608,7 +734,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   root={sortedTree ?? displayTree ?? collection.tree}
                   selected={selected}
                   onToggle={handleToggle}
-                  onExpandZip={handleExpandZip}
+                  onExpandZip={collection.provider === "extended" ? undefined : handleExpandZip}
                   zipLoadingPaths={zipLoadingPaths}
                   onRename={(key, kind) => {
                     setRenameError(null);
@@ -806,8 +932,21 @@ function EmptyState({ loading }: { loading: boolean }) {
         <DownloadIcon className="size-8 opacity-30" />
       )}
       <span className="text-sm">
-        {loading ? "컬렉션을 불러오는 중..." : "좌측에서 URL을 입력해 컬렉션을 불러오세요"}
+        {loading ? "컬렉션을 불러오는 중..." : "좌측에서 URL 또는 공유 파일을 불러오세요"}
       </span>
     </div>
   );
+}
+
+function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
+  const items = dataTransfer.items;
+  if (!items || items.length === 0) return [];
+  const files: File[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return files;
 }

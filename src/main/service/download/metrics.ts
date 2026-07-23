@@ -119,6 +119,28 @@ export class DownloadTransferMetrics {
         );
     }
 
+    public sampleBundle(bundleId: string, subCollectionIds: string[]) {
+        const total = subCollectionIds.reduce(
+            (sum, id) => sum + (this.transferredByCollection.get(id) ?? 0),
+            0,
+        );
+        return this.collectionSpeed.sample(bundleId, total);
+    }
+
+    public getBundleSnapshot(bundleId: string, subCollectionIds: string[]) {
+        return {
+            activeTransferredBytes: subCollectionIds.reduce(
+                (sum, id) => sum + (this.writtenByCollection.get(id) ?? 0),
+                0,
+            ),
+            speedBps: this.collectionSpeed.get(bundleId),
+        };
+    }
+
+    public clearBundle(bundleId: string) {
+        this.collectionSpeed.clear(bundleId);
+    }
+
     public clearCollection(collectionId: string) {
         this.collectionSpeed.clear(collectionId);
         this.writtenByCollection.delete(collectionId);

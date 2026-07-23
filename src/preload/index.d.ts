@@ -19,6 +19,7 @@ declare global {
                 listener: (...args: Parameters<IpcEvents[T]>) => void,
             ): () => void;
             expandDroppedFiles(files: File[], maxFiles?: number): Promise<ExpandPathsResult>;
+            readDroppedShareFile(files: File[]): Promise<{ shareInput: string } | null>;
         };
     }
 }

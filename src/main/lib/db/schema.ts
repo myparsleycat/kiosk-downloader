@@ -48,7 +48,7 @@ export type TableSpec = {
     foreignKeys?: TableForeignKeySpec[];
 };
 
-export const APP_SCHEMA_VERSION = 6;
+export const APP_SCHEMA_VERSION = 8;
 
 export const TABLE_SPECS: TableSpec[] = [
     {
@@ -72,6 +72,27 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "key", type: "TEXT", primaryKey: true, notNull: true },
             { name: "value", type: "TEXT", notNull: true },
             { name: "updated_at", type: "TEXT", notNull: true },
+        ],
+    },
+    {
+        name: "download_bundle",
+        columns: [
+            { name: "id", type: "TEXT", primaryKey: true, notNull: true },
+            { name: "source_input", type: "TEXT", notNull: true },
+            { name: "password_plain", type: "TEXT" },
+            { name: "name", type: "TEXT", notNull: true },
+            { name: "tree_json", type: "TEXT", notNull: true },
+            { name: "manifest_json", type: "TEXT", notNull: true },
+            { name: "save_path", type: "TEXT", notNull: true },
+            { name: "status", type: "TEXT", notNull: true },
+            { name: "expires", type: "INTEGER", notNull: true },
+            { name: "created_at", type: "TEXT", notNull: true },
+            { name: "updated_at", type: "TEXT", notNull: true },
+            { name: "error", type: "TEXT" },
+        ],
+        indexes: [
+            { name: "idx_download_bundle_status", columns: ["status"] },
+            { name: "idx_download_bundle_created_at", columns: ["created_at"] },
         ],
     },
     {
@@ -105,10 +126,22 @@ export const TABLE_SPECS: TableSpec[] = [
                 notNull: true,
                 defaultSql: "'kiosk'",
             },
+            { name: "bundle_id", type: "TEXT" },
+            { name: "ordinal", type: "INTEGER", notNull: true, defaultSql: "0" },
         ],
         indexes: [
             { name: "idx_download_collection_status", columns: ["status"] },
             { name: "idx_download_collection_created_at", columns: ["created_at"] },
+            { name: "idx_download_collection_bundle_id", columns: ["bundle_id"] },
+        ],
+        foreignKeys: [
+            {
+                columns: ["bundle_id"],
+                refTable: "download_bundle",
+                refColumns: ["id"],
+                onDelete: "cascade",
+                onUpdate: "cascade",
+            },
         ],
     },
     {
@@ -205,6 +238,30 @@ export const TABLE_SPECS: TableSpec[] = [
         ],
     },
     {
+        name: "upload_bundle",
+        columns: [
+            { name: "id", type: "TEXT", primaryKey: true, notNull: true },
+            { name: "mode", type: "TEXT", notNull: true },
+            { name: "name", type: "TEXT", notNull: true },
+            { name: "description", type: "TEXT", notNull: true, defaultSql: "''" },
+            { name: "password_plain", type: "TEXT" },
+            { name: "tree_json", type: "TEXT", notNull: true },
+            { name: "plan_json", type: "TEXT", notNull: true },
+            { name: "physical_count", type: "INTEGER", notNull: true },
+            { name: "initialized_count", type: "INTEGER", notNull: true, defaultSql: "0" },
+            { name: "share_value", type: "TEXT" },
+            { name: "status", type: "TEXT", notNull: true },
+            { name: "expires", type: "INTEGER", notNull: true },
+            { name: "created_at", type: "TEXT", notNull: true },
+            { name: "updated_at", type: "TEXT", notNull: true },
+            { name: "error", type: "TEXT" },
+        ],
+        indexes: [
+            { name: "idx_upload_bundle_status", columns: ["status"] },
+            { name: "idx_upload_bundle_created_at", columns: ["created_at"] },
+        ],
+    },
+    {
         name: "upload_collection",
         columns: [
             { name: "id", type: "TEXT", primaryKey: true, notNull: true },
@@ -223,10 +280,23 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "updated_at", type: "TEXT", notNull: true },
             { name: "elapsed_ms", type: "INTEGER", notNull: true, defaultSql: "0" },
             { name: "error", type: "TEXT" },
+            { name: "bundle_id", type: "TEXT" },
+            { name: "ordinal", type: "INTEGER", notNull: true, defaultSql: "0" },
+            { name: "superseded", type: "INTEGER", notNull: true, defaultSql: "0", boolean: true },
         ],
         indexes: [
             { name: "idx_upload_collection_status", columns: ["status"] },
             { name: "idx_upload_collection_created_at", columns: ["created_at"] },
+            { name: "idx_upload_collection_bundle_id", columns: ["bundle_id"] },
+        ],
+        foreignKeys: [
+            {
+                columns: ["bundle_id"],
+                refTable: "upload_bundle",
+                refColumns: ["id"],
+                onDelete: "cascade",
+                onUpdate: "cascade",
+            },
         ],
     },
     {
@@ -252,6 +322,10 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "created_at", type: "TEXT", notNull: true },
             { name: "updated_at", type: "TEXT", notNull: true },
             { name: "error", type: "TEXT" },
+            { name: "logical_path", type: "TEXT" },
+            { name: "source_offset", type: "INTEGER", notNull: true, defaultSql: "0" },
+            { name: "logical_size", type: "INTEGER" },
+            { name: "logical_sha256", type: "TEXT" },
         ],
         indexes: [
             { name: "idx_upload_file_collection_id", columns: ["collection_id"] },

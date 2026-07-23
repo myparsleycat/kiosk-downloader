@@ -249,6 +249,8 @@ export function buildSegmentWorkItems(
                 length: 0,
                 fsPath: localFile.fsPath,
                 sourceMtimeMs: localFile.sourceMtimeMs,
+                sourceOffset: localFile.sourceOffset ?? 0,
+                sourceSize: localFile.logicalSize ?? localFile.size,
             });
             continue;
         }
@@ -263,6 +265,8 @@ export function buildSegmentWorkItems(
                 length: Math.min(segmentSize, size - offset),
                 fsPath: localFile.fsPath,
                 sourceMtimeMs: localFile.sourceMtimeMs,
+                sourceOffset: localFile.sourceOffset ?? 0,
+                sourceSize: localFile.logicalSize ?? localFile.size,
             });
         }
     }
@@ -523,9 +527,10 @@ export class KioUploadClient {
 
 async function readSegmentBytes(item: ServerFileMapping): Promise<Buffer> {
     const stat = await fs.stat(item.fsPath).catch(() => null);
+    const sourceSize = item.sourceSize ?? item.size;
     if (
         !stat?.isFile() ||
-        stat.size !== item.size ||
+        stat.size !== sourceSize ||
         Math.trunc(stat.mtimeMs) !== item.sourceMtimeMs
     ) {
         throw new UploadSourceChangedError(item.fsPath);
@@ -534,7 +539,7 @@ async function readSegmentBytes(item: ServerFileMapping): Promise<Buffer> {
     const handle = await fs.open(item.fsPath, "r");
     try {
         const afterOpen = await handle.stat();
-        if (afterOpen.size !== item.size || Math.trunc(afterOpen.mtimeMs) !== item.sourceMtimeMs) {
+        if (afterOpen.size !== sourceSize || Math.trunc(afterOpen.mtimeMs) !== item.sourceMtimeMs) {
             throw new UploadSourceChangedError(item.fsPath);
         }
 
@@ -545,7 +550,7 @@ async function readSegmentBytes(item: ServerFileMapping): Promise<Buffer> {
                 bytes,
                 total,
                 item.length - total,
-                item.offset + total,
+                (item.sourceOffset ?? 0) + item.offset + total,
             );
             if (bytesRead === 0) {
                 throw new UploadSourceChangedError(item.fsPath);

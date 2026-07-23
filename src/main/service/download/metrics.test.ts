@@ -1,14 +1,21 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { performance } from "node:perf_hooks";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DownloadTransferMetrics } from "./metrics";
 
 describe("DownloadTransferMetrics speed EMA", () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+        vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    });
+
     afterEach(() => {
         vi.useRealTimers();
+        vi.restoreAllMocks();
     });
 
     it("stays at 0 during warmup then seeds from the first measurable rate", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();
@@ -28,7 +35,6 @@ describe("DownloadTransferMetrics speed EMA", () => {
     });
 
     it("decays EMA toward 0 when transferred bytes stall", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();
@@ -48,7 +54,6 @@ describe("DownloadTransferMetrics speed EMA", () => {
     });
 
     it("resets speed after clearFile", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();
@@ -66,7 +71,6 @@ describe("DownloadTransferMetrics speed EMA", () => {
     });
 
     it("clears cached speed after a sampling gap longer than the speed window", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();

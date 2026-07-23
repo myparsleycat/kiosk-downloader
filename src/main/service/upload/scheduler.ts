@@ -327,6 +327,8 @@ export class UploadScheduler {
                     length: 0,
                     fsPath: file.fsPath,
                     sourceMtimeMs: file.sourceMtimeMs,
+                    sourceOffset: file.sourceOffset,
+                    sourceSize: file.logicalSize ?? file.size,
                 },
             ];
         }
@@ -345,6 +347,8 @@ export class UploadScheduler {
                 length: Math.min(collection.segmentSize, file.size - offset),
                 fsPath: file.fsPath,
                 sourceMtimeMs: file.sourceMtimeMs,
+                sourceOffset: file.sourceOffset,
+                sourceSize: file.logicalSize ?? file.size,
             });
         }
         return chunks;

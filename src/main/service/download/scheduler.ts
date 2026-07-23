@@ -20,7 +20,7 @@ import type {
 } from "./types";
 
 import { TransferProgressBatcher } from "../transfer-progress-batcher";
-import { getStagingPartPath, PartFileWriter } from "./part-file";
+import { getBundleTempDirName, getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
 import { TransferChunkPool, parseTransferNodeKey } from "./transfer-chunk-pool";
 import { openZipFileEntry } from "./zip-index";
@@ -103,6 +103,10 @@ export class DownloadScheduler {
             collectionId: string,
             fileIds: Set<string>,
         ) => Promise<void>,
+        private readonly onFileFinalized?: (
+            collection: DownloadCollectionRow,
+            file: DownloadFileRow,
+        ) => void,
     ) {
         this.progressBatcher = new TransferProgressBatcher(
             async (collectionId, fileIds) => {
@@ -238,7 +242,7 @@ export class DownloadScheduler {
             }),
         );
         await fse
-            .remove(path.join(collection.savePath, ".kiosk-part", collection.id))
+            .remove(path.join(collection.savePath, getBundleTempDirName(collection.id)))
             .catch(() => undefined);
     }
 
@@ -1147,6 +1151,7 @@ export class DownloadScheduler {
         // Mark complete before slow staging cleanup so the UI does not sit at 100%.
         this.repository.completeFile(file.id);
         this.progressBatcher.mark(collection.id, file.id);
+        this.onFileFinalized?.(collection, file);
     }
 
     private async cleanupZipEntryStaging(partPath: string) {

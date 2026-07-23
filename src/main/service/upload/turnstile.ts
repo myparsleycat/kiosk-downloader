@@ -226,58 +226,177 @@ const READ_TOKEN_SCRIPT = `
 (() => ({ token: window.__turnstileToken, error: window.__turnstileError }))()
 `;
 
+const REFRESH_WIDGET_SCRIPT = `
+(() => {
+    window.__turnstileToken = null;
+    window.__turnstileError = null;
+    window.__turnstileRetries = 0;
+    const widgetId = window.__turnstileWidgetId;
+    if (widgetId != null && window.turnstile && typeof window.turnstile.reset === 'function') {
+        try {
+            window.turnstile.reset(widgetId);
+            return 'reset';
+        } catch (e) {
+            window.__turnstileError = String(e);
+        }
+    }
+    return 'rerender';
+})()
+`;
+
 export class TurnstileSolver {
     private activeWindow: BrowserWindow | null = null;
     private activeSession: Session | null = null;
+    private sessionParent: BrowserWindow | null | undefined = undefined;
+    private sessionActive = false;
+    private chromeUserAgent = this.buildChromeUserAgent();
 
     public constructor(private readonly kd: KioskDownloader) {}
 
-    // Open a modal child window on the kio.ac origin, render a Turnstile widget,
-    // and wait for the solved token. Applies best-effort stealth so Electron looks
-    // closer to stock Chrome; network-level TLS fingerprint still differs.
-    public async solve(parentWindow?: BrowserWindow | null): Promise<string> {
-        const ua = this.buildChromeUserAgent();
-        const partition = `turnstile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const ses = session.fromPartition(partition, { cache: false });
-        this.configureSession(ses, ua);
+    // Keep one auth window across sequential solves (bulk collection init).
+    // endSession() must run in a finally so the window always closes.
+    public beginSession(parentWindow?: BrowserWindow | null) {
+        this.sessionParent = parentWindow;
+        this.sessionActive = true;
+    }
 
-        const window = new BrowserWindow(this.buildWindowOptions(parentWindow, ses));
-        this.activeWindow = window;
-        this.activeSession = ses;
+    public endSession() {
+        this.sessionActive = false;
+        this.sessionParent = undefined;
+        void this.destroyWindow(this.activeWindow);
+    }
 
-        window.on("closed", () => {
-            this.activeWindow = null;
-            this.activeSession = null;
-        });
+    // Open (or reuse) a modal child window on the kio.ac origin, render/reset a
+    // Turnstile widget, and wait for the solved token. Applies best-effort stealth
+    // so Electron looks closer to stock Chrome; network-level TLS fingerprint still differs.
+    public async solve(
+        parentWindow?: BrowserWindow | null,
+        progress?: { current: number; total: number },
+    ): Promise<string> {
+        const parent = parentWindow ?? this.sessionParent;
+        const { window, reused } = await this.ensureWindow(parent, progress);
 
         try {
-            // Patch as early as the first document allows, before SPA scripts settle.
-            window.webContents.on("dom-ready", () => {
-                if (window.isDestroyed()) return;
-                void window.webContents.executeJavaScript(STEALTH_SCRIPT, true).catch(() => {});
-            });
-
-            await window.loadURL(UPLOAD_URL, { userAgent: ua });
-            await window.webContents.executeJavaScript(RENDER_WIDGET_SCRIPT, true);
-
-            return await this.waitForToken(window);
+            if (reused) {
+                await this.refreshChallenge(window, progress);
+            } else {
+                await this.setProgressLabel(window, progress);
+            }
+            const token = await this.waitForToken(window);
+            if (this.sessionActive) {
+                await this.setProgressLabel(window, progress, "처리 중…");
+            }
+            return token;
+        } catch (error) {
+            await this.destroyWindow(window);
+            throw error;
         } finally {
-            this.destroyWindow();
+            if (!this.sessionActive) {
+                await this.destroyWindow(window);
+            }
         }
     }
 
     public destroy() {
-        this.destroyWindow();
+        this.sessionActive = false;
+        this.sessionParent = undefined;
+        void this.destroyWindow(this.activeWindow);
+    }
+
+    private async ensureWindow(
+        parentWindow: BrowserWindow | null | undefined,
+        progress?: { current: number; total: number },
+    ): Promise<{ window: BrowserWindow; reused: boolean }> {
+        const existing = this.activeWindow;
+        if (existing && !existing.isDestroyed()) {
+            this.applyWindowChrome(existing, progress);
+            if (!existing.isVisible()) existing.show();
+            existing.focus();
+            return { window: existing, reused: true };
+        }
+
+        const ua = this.chromeUserAgent;
+        const partition = `turnstile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const ses = session.fromPartition(partition, { cache: false });
+        this.configureSession(ses, ua);
+
+        const window = new BrowserWindow(this.buildWindowOptions(parentWindow, ses, progress));
+        this.activeWindow = window;
+        this.activeSession = ses;
+
+        window.on("closed", () => {
+            if (this.activeWindow === window) {
+                this.activeWindow = null;
+                this.activeSession = null;
+            }
+        });
+
+        // Patch as early as the first document allows, before SPA scripts settle.
+        window.webContents.on("dom-ready", () => {
+            if (window.isDestroyed()) return;
+            void window.webContents.executeJavaScript(STEALTH_SCRIPT, true).catch(() => {});
+        });
+
+        await window.loadURL(UPLOAD_URL, { userAgent: ua });
+        await window.webContents.executeJavaScript(RENDER_WIDGET_SCRIPT, true);
+        return { window, reused: false };
+    }
+
+    private async refreshChallenge(
+        window: BrowserWindow,
+        progress?: { current: number; total: number },
+    ) {
+        this.applyWindowChrome(window, progress);
+        await this.setProgressLabel(window, progress);
+
+        let refreshResult: string;
+        try {
+            refreshResult = await window.webContents.executeJavaScript(REFRESH_WIDGET_SCRIPT, true);
+        } catch {
+            refreshResult = "rerender";
+        }
+
+        if (refreshResult === "rerender") {
+            await window.webContents.executeJavaScript(RENDER_WIDGET_SCRIPT, true);
+            await this.setProgressLabel(window, progress);
+        }
+    }
+
+    private applyWindowChrome(
+        window: BrowserWindow,
+        progress?: { current: number; total: number },
+    ) {
+        if (window.isDestroyed()) return;
+        window.setTitle(progress ? `보안 인증 ${progress.current}/${progress.total}` : "보안 인증");
+    }
+
+    private async setProgressLabel(
+        window: BrowserWindow,
+        progress?: { current: number; total: number },
+        suffix?: string,
+    ) {
+        if (window.isDestroyed()) return;
+        const base = progress
+            ? `보안 인증 ${progress.current}/${progress.total}`
+            : "보안 인증 대기 중";
+        const label = suffix ? `${base} · ${suffix}` : base;
+        await window.webContents
+            .executeJavaScript(
+                `(() => { const el = document.querySelector('h2'); if (el) el.textContent = ${JSON.stringify(label)}; })()`,
+                true,
+            )
+            .catch(() => {});
     }
 
     private buildWindowOptions(
         parentWindow: BrowserWindow | null | undefined,
         ses: Session,
+        progress?: { current: number; total: number },
     ): BrowserWindowConstructorOptions {
         return {
             parent: parentWindow ?? undefined,
             modal: parentWindow != null,
-            title: "보안 인증",
+            title: progress ? `보안 인증 ${progress.current}/${progress.total}` : "보안 인증",
             // Slightly larger than the bare widget so outer/inner metrics look normal.
             width: 520,
             height: 480,
@@ -438,12 +557,23 @@ export class TurnstileSolver {
         });
     }
 
-    private destroyWindow() {
-        const window = this.activeWindow;
-        this.activeWindow = null;
-        this.activeSession = null;
-        if (window && !window.isDestroyed()) {
+    private async destroyWindow(window: BrowserWindow | null) {
+        if (!window) return;
+        if (window.isDestroyed()) {
+            if (this.activeWindow === window) {
+                this.activeWindow = null;
+                this.activeSession = null;
+            }
+            return;
+        }
+
+        await new Promise<void>((resolve) => {
+            window.once("closed", resolve);
             window.destroy();
+        });
+        if (this.activeWindow === window) {
+            this.activeWindow = null;
+            this.activeSession = null;
         }
     }
 }
