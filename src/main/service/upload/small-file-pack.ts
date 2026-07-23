@@ -46,7 +46,7 @@ export const SMALL_FILE_PACK_ENTRY_MAX_BYTES = 16 * 1024 ** 2;
 export const PACK_ALGORITHM_VERSION = 2;
 
 export const PACK_POLICY_V2 = {
-    algorithm: "sha256-size-greedy",
+    algorithm: "sha256-prefix-trie",
     hash: "sha256",
     maxPackBytes: SMALL_FILE_PACK_BYTES,
     maxEntryBytes: SMALL_FILE_PACK_ENTRY_MAX_BYTES,
@@ -55,14 +55,24 @@ export const PACK_POLICY_V2 = {
 
 const HASH_CONCURRENCY = 2;
 const RECIPE_DOMAIN = "KDE-PACK-RECIPE-V2";
+const PLACEMENT_DOMAIN = "KDE-PACK-V2";
+const MAX_TRIE_DEPTH = 256;
+
+type PackInstance = {
+    file: PersistedBundleFile;
+    contentSha256: string;
+    occurrence: number;
+    placementKey: Buffer;
+};
 
 export function isPackCandidate(file: Pick<PersistedBundleFile, "size" | "logicalSize">) {
     return file.logicalSize === file.size && file.size < SMALL_FILE_PACK_ENTRY_MAX_BYTES;
 }
 
 /**
- * Globally pack whole small files by content hash + size (path-independent membership/order).
- * Non-candidates pass through unchanged. Call before collection bin-packing.
+ * Globally pack whole small files via content-addressed hash-prefix trie.
+ * Membership/order depend on (sha256, size, multiplicity), not paths or collections.
+ * Call before collection bin-packing.
  */
 export function createDeterministicPackArtifacts(
     files: PersistedBundleFile[],
@@ -79,51 +89,11 @@ export function createDeterministicPackArtifacts(
         candidates.push(file);
     }
 
-    const sorted = candidates.toSorted(comparePackCandidates);
-    const groups: PersistedBundleFile[][] = [];
-    for (const file of sorted) {
-        const group = groups.at(-1);
-        const groupSize = group?.reduce((sum, candidate) => sum + candidate.size, 0) ?? 0;
-        if (!group || groupSize + file.size > SMALL_FILE_PACK_BYTES) {
-            groups.push([file]);
-        } else {
-            group.push(file);
-        }
-    }
-
-    const packed = groups.flatMap((group): PersistedBundleFile[] => {
-        if (group.length === 1) return group;
-
-        const ordered = group.toSorted(comparePackConcatOrder);
-        let remoteOffset = 0;
-        const packEntries = ordered.map((file) => {
-            const entry: PersistedBundlePackEntry = {
-                fsPath: file.fsPath,
-                sourceMtimeMs: file.sourceMtimeMs,
-                path: file.logicalPath ?? file.path,
-                size: file.size,
-                remoteOffset,
-                contentSha256: file.logicalSha256,
-            };
-            remoteOffset += file.size;
-            return entry;
-        });
-
-        const recipeId = computePackRecipeId(packEntries);
-        const physicalPath = `kde_pack_v2/${recipeId}`;
-        return [
-            {
-                path: physicalPath,
-                name: path.basename(physicalPath),
-                size: remoteOffset,
-                fsPath: path.join(packDir, `${recipeId}.pack`),
-                sourceMtimeMs: 0,
-                sourceOffset: 0,
-                logicalPath: physicalPath,
-                logicalSize: remoteOffset,
-                packEntries,
-            },
-        ];
+    const instances = assignPackInstances(candidates);
+    const leaves = partitionByHashPrefix(instances, 0);
+    const packed = leaves.flatMap((leaf): PersistedBundleFile[] => {
+        if (leaf.length === 1) return [leaf[0]!.file];
+        return [materializePackArtifact(leaf, packDir)];
     });
 
     return [...direct, ...packed];
@@ -243,31 +213,134 @@ export async function hashFilesBounded(
     return new Map(entries);
 }
 
-function comparePackCandidates(left: PersistedBundleFile, right: PersistedBundleFile) {
-    if (left.size !== right.size) return right.size - left.size;
-    const leftHash = left.logicalSha256 ?? "";
-    const rightHash = right.logicalSha256 ?? "";
-    if (leftHash !== rightHash) return leftHash < rightHash ? -1 : 1;
-    return 0;
+function assignPackInstances(candidates: PersistedBundleFile[]): PackInstance[] {
+    const byIdentity = new Map<string, PersistedBundleFile[]>();
+    for (const file of candidates) {
+        const key = `${file.logicalSha256}\0${file.size}`;
+        const group = byIdentity.get(key) ?? [];
+        group.push(file);
+        byIdentity.set(key, group);
+    }
+
+    const instances: PackInstance[] = [];
+    for (const group of byIdentity.values()) {
+        const ordered = group.toSorted((left, right) => {
+            const leftPath = left.logicalPath ?? left.path;
+            const rightPath = right.logicalPath ?? right.path;
+            if (leftPath === rightPath) return 0;
+            return compareUtf8(leftPath, rightPath);
+        });
+        for (const [occurrence, file] of ordered.entries()) {
+            const contentSha256 = file.logicalSha256!;
+            instances.push({
+                file,
+                contentSha256,
+                occurrence,
+                placementKey: computePlacementKey(contentSha256, file.size, occurrence),
+            });
+        }
+    }
+    return instances;
 }
 
-function comparePackConcatOrder(left: PersistedBundleFile, right: PersistedBundleFile) {
-    const leftHash = left.logicalSha256 ?? "";
-    const rightHash = right.logicalSha256 ?? "";
-    if (leftHash !== rightHash) return leftHash < rightHash ? -1 : 1;
-    if (left.size !== right.size) return left.size - right.size;
-    return 0;
+function partitionByHashPrefix(instances: PackInstance[], depth: number): PackInstance[][] {
+    if (instances.length === 0) return [];
+    const total = instances.reduce((sum, instance) => sum + instance.file.size, 0);
+    if (total <= SMALL_FILE_PACK_BYTES || depth >= MAX_TRIE_DEPTH) {
+        return [instances];
+    }
+
+    const zero: PackInstance[] = [];
+    const one: PackInstance[] = [];
+    for (const instance of instances) {
+        if (getPlacementBit(instance.placementKey, depth) === 0) zero.push(instance);
+        else one.push(instance);
+    }
+
+    // Pathological hash collision: force direct uploads rather than infinite split.
+    if (zero.length === 0 || one.length === 0) {
+        return instances.map((instance) => [instance]);
+    }
+
+    return [...partitionByHashPrefix(zero, depth + 1), ...partitionByHashPrefix(one, depth + 1)];
 }
 
-function computePackRecipeId(entries: PersistedBundlePackEntry[]) {
+function materializePackArtifact(leaf: PackInstance[], packDir: string): PersistedBundleFile {
+    const ordered = leaf.toSorted((left, right) => left.placementKey.compare(right.placementKey));
+    let remoteOffset = 0;
+    const packEntries = ordered.map((instance) => {
+        const entry: PersistedBundlePackEntry = {
+            fsPath: instance.file.fsPath,
+            sourceMtimeMs: instance.file.sourceMtimeMs,
+            path: instance.file.logicalPath ?? instance.file.path,
+            size: instance.file.size,
+            remoteOffset,
+            contentSha256: instance.contentSha256,
+        };
+        remoteOffset += instance.file.size;
+        return entry;
+    });
+
+    const recipeId = computePackRecipeId(
+        ordered.map((instance) => ({
+            contentSha256: instance.contentSha256,
+            size: instance.file.size,
+            occurrence: instance.occurrence,
+        })),
+    );
+    const physicalPath = `kde_pack_v2/${recipeId}`;
+    return {
+        path: physicalPath,
+        name: path.basename(physicalPath),
+        size: remoteOffset,
+        fsPath: path.join(packDir, `${recipeId}.pack`),
+        sourceMtimeMs: 0,
+        sourceOffset: 0,
+        logicalPath: physicalPath,
+        logicalSize: remoteOffset,
+        packEntries,
+    };
+}
+
+function computePlacementKey(contentSha256: string, size: number, occurrence: number) {
+    const hash = createHash("sha256");
+    hash.update(PLACEMENT_DOMAIN);
+    hash.update(Buffer.from([0]));
+    hash.update(Buffer.from(contentSha256, "hex"));
+    const sizeBuf = Buffer.alloc(8);
+    sizeBuf.writeBigUInt64BE(BigInt(size));
+    hash.update(sizeBuf);
+    const occBuf = Buffer.alloc(4);
+    occBuf.writeUInt32BE(occurrence);
+    hash.update(occBuf);
+    return hash.digest();
+}
+
+function getPlacementBit(placementKey: Buffer, bitIndex: number) {
+    const byte = placementKey[Math.floor(bitIndex / 8)] ?? 0;
+    return (byte >> (7 - (bitIndex % 8))) & 1;
+}
+
+function computePackRecipeId(
+    entries: Array<{ contentSha256: string; size: number; occurrence: number }>,
+) {
     const hash = createHash("sha256");
     hash.update(RECIPE_DOMAIN);
     hash.update(Buffer.from([0]));
     for (const entry of entries) {
-        hash.update(Buffer.from(entry.contentSha256 ?? "", "hex"));
+        hash.update(Buffer.from(entry.contentSha256, "hex"));
         const size = Buffer.alloc(8);
         size.writeBigUInt64BE(BigInt(entry.size));
         hash.update(size);
+        const occ = Buffer.alloc(4);
+        occ.writeUInt32BE(entry.occurrence);
+        hash.update(occ);
     }
     return hash.digest("hex");
+}
+
+function compareUtf8(left: string, right: string) {
+    const leftBytes = Buffer.from(left, "utf8");
+    const rightBytes = Buffer.from(right, "utf8");
+    return leftBytes.compare(rightBytes);
 }

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import fse from "fs-extra";
@@ -50,6 +51,7 @@ type PackEntry = {
     finalPath: string;
     sourceOffset: number;
     length: number;
+    sha256: string | undefined;
     published: boolean;
 };
 
@@ -202,6 +204,7 @@ export class BundleReassemblyCoordinator {
             finalPath,
             sourceOffset: piece.remoteOffset ?? 0,
             length: piece.length,
+            sha256: splitFile.sha256,
             published: false,
         });
     }
@@ -365,6 +368,12 @@ export class BundleReassemblyCoordinator {
 
     private async extractPackEntry(pack: PackState, entry: PackEntry): Promise<void> {
         if (entry.length === 0) {
+            if (entry.sha256) {
+                const digest = createHash("sha256").update("").digest("hex");
+                if (digest !== entry.sha256) {
+                    throw new Error(`팩 추출 파일 해시가 일치하지 않습니다: ${entry.splitPath}`);
+                }
+            }
             await fse.ensureDir(path.dirname(entry.finalPath));
             await fse.outputFile(entry.finalPath, "");
             return;
@@ -375,14 +384,36 @@ export class BundleReassemblyCoordinator {
             throw new Error(`팩 파일이 준비되지 않았습니다: ${entry.splitPath}`);
         }
 
+        const hash = entry.sha256 ? createHash("sha256") : null;
+        const tempPath = `${entry.finalPath}.pack-extract.tmp`;
         await fse.ensureDir(path.dirname(entry.finalPath));
-        await pipeline(
-            createReadStream(pack.filePath, {
-                start: entry.sourceOffset,
-                end: entry.sourceOffset + entry.length - 1,
-            }),
-            createWriteStream(entry.finalPath),
-        );
+        await fse.remove(tempPath);
+        try {
+            await pipeline(
+                createReadStream(pack.filePath, {
+                    start: entry.sourceOffset,
+                    end: entry.sourceOffset + entry.length - 1,
+                }),
+                new Transform({
+                    transform(chunk, _encoding, callback) {
+                        hash?.update(chunk as Buffer);
+                        callback(null, chunk);
+                    },
+                }),
+                createWriteStream(tempPath),
+            );
+            if (hash && hash.digest("hex") !== entry.sha256) {
+                throw new Error(`팩 추출 파일 해시가 일치하지 않습니다: ${entry.splitPath}`);
+            }
+            const written = await fse.stat(tempPath);
+            if (written.size !== entry.length) {
+                throw new Error(`팩 추출 파일 크기가 일치하지 않습니다: ${entry.splitPath}`);
+            }
+            await fse.move(tempPath, entry.finalPath, { overwrite: true });
+        } catch (error) {
+            await fse.remove(tempPath).catch(() => undefined);
+            throw error;
+        }
     }
 
     private async releasePieceFileIfConsumed(

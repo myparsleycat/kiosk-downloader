@@ -36,8 +36,27 @@ function source(
     };
 }
 
+function packPaths(artifacts: PersistedBundleFile[]) {
+    return artifacts
+        .filter((file) => file.packEntries)
+        .map((file) => file.path)
+        .toSorted();
+}
+
+function packDigests(artifacts: PersistedBundleFile[]) {
+    return artifacts
+        .filter((file) => file.packEntries)
+        .map((file) => ({
+            path: file.path,
+            entries: file.packEntries!.map((entry) => entry.contentSha256 ?? "").toSorted((a, b) =>
+                a < b ? -1 : a > b ? 1 : 0,
+            ),
+        }))
+        .toSorted((left, right) => (left.path < right.path ? -1 : 1));
+}
+
 describe("small file packs", () => {
-    it("packs whole files under the entry threshold by content hash order", () => {
+    it("packs whole files under the entry threshold into content-addressed packs", () => {
         const a = source("a", 4 * 1024 ** 2);
         const b = source("b", 5 * 1024 ** 2);
         const c = source("c", 1);
@@ -64,12 +83,8 @@ describe("small file packs", () => {
             "/packs",
         );
 
-        expect(first.find((file) => file.packEntries)?.path).toBe(
-            second.find((file) => file.packEntries)?.path,
-        );
-        expect(
-            first.find((file) => file.packEntries)?.packEntries?.map((entry) => entry.size),
-        ).toEqual(second.find((file) => file.packEntries)?.packEntries?.map((entry) => entry.size));
+        expect(packPaths(first)).toEqual(packPaths(second));
+        expect(packDigests(first)).toEqual(packDigests(second));
     });
 
     it("keeps split pieces and files at or above the entry threshold as direct uploads", () => {
@@ -101,12 +116,72 @@ describe("small file packs", () => {
         const left = createDeterministicPackArtifacts(files, "/packs");
         const right = createDeterministicPackArtifacts([...files].reverse(), "/packs");
 
-        expect(left.map((file) => file.path)).toEqual(right.map((file) => file.path));
-        expect(
-            left.map((file) => file.packEntries?.map((entry) => entry.contentSha256) ?? null),
-        ).toEqual(
-            right.map((file) => file.packEntries?.map((entry) => entry.contentSha256) ?? null),
+        expect(packPaths(left)).toEqual(packPaths(right));
+        expect(packDigests(left)).toEqual(packDigests(right));
+    });
+
+    it("limits pack churn when one unrelated file is added", () => {
+        // 200 × 2 MiB = 400 MiB forces several trie splits under the 100 MiB cap.
+        const base = Array.from({ length: 200 }, (_, index) =>
+            source(
+                `base-${index}`,
+                2 * 1024 ** 2,
+                createHash("sha256").update(`base-${index}`).digest("hex"),
+            ),
         );
+        const withExtra = [
+            ...base,
+            source("extra", 2 * 1024 ** 2, createHash("sha256").update("extra").digest("hex")),
+        ];
+
+        const before = new Set(packPaths(createDeterministicPackArtifacts(base, "/packs")));
+        const after = new Set(packPaths(createDeterministicPackArtifacts(withExtra, "/packs")));
+
+        let removed = 0;
+        for (const path of before) {
+            if (!after.has(path)) removed += 1;
+        }
+        let added = 0;
+        for (const path of after) {
+            if (!before.has(path)) added += 1;
+        }
+
+        // Hash-prefix locality: most existing packs stay put; only the touched leaf path changes.
+        expect(before.size).toBeGreaterThan(3);
+        expect(removed).toBeLessThanOrEqual(2);
+        expect(added).toBeLessThanOrEqual(3);
+        expect(removed + added).toBeLessThan(before.size);
+    });
+
+    it("splits leaves that exceed the 100 MiB pack cap", () => {
+        const files = Array.from({ length: 12 }, (_, index) =>
+            source(
+                `big-${index}`,
+                10 * 1024 ** 2,
+                createHash("sha256").update(`big-${index}`).digest("hex"),
+            ),
+        );
+        const artifacts = createDeterministicPackArtifacts(files, "/packs");
+        const packs = artifacts.filter((file) => file.packEntries);
+        const directs = artifacts.filter((file) => !file.packEntries);
+
+        expect(packs.every((pack) => pack.size <= SMALL_FILE_PACK_BYTES)).toBe(true);
+        expect(
+            packs.reduce((sum, pack) => sum + pack.size, 0) +
+                directs.reduce((sum, file) => sum + file.size, 0),
+        ).toBe(files.reduce((sum, file) => sum + file.size, 0));
+        expect(packs.length + directs.length).toBeGreaterThan(1);
+    });
+
+    it("preserves multiplicity for identical content at different paths", () => {
+        const hash = createHash("sha256").update("dup").digest("hex");
+        const artifacts = createDeterministicPackArtifacts(
+            [source("a/copy.bin", 8, hash), source("b/copy.bin", 8, hash)],
+            "/packs",
+        );
+        const pack = artifacts.find((file) => file.packEntries);
+        expect(pack?.size).toBe(16);
+        expect(pack?.packEntries).toHaveLength(2);
     });
 
     it("preserves legacy collection-local packing for v1 resume", () => {

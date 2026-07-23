@@ -207,6 +207,107 @@ describe("BundleReassemblyCoordinator", () => {
         expect(coordinator.isComplete()).toBe(true);
     });
 
+    it("verifies pack entry hashes when present and rejects mismatches", async () => {
+        const dir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-coord-test-"));
+        testDirs.push(dir);
+
+        const collection0 = createCollection("col-0", 0, path.join(dir, "col-0"));
+        await fse.ensureDir(collection0.savePath);
+
+        const fileA = Buffer.from("first");
+        const fileB = Buffer.from("SECOND");
+        const packPath = path.join(collection0.savePath, "pack.bin");
+        await fse.writeFile(packPath, Buffer.concat([fileA, fileB]));
+
+        const ok = new BundleReassemblyCoordinator(
+            createKd(),
+            "bundle-1",
+            dir,
+            {
+                renames: {},
+                splitFiles: [
+                    {
+                        path: "a.txt",
+                        size: fileA.length,
+                        sha256: createHash("sha256").update(fileA).digest("hex"),
+                        pieces: [
+                            {
+                                sourceIndex: 0,
+                                remoteFileId: "remote-pack",
+                                offset: 0,
+                                length: fileA.length,
+                                remoteOffset: 0,
+                            },
+                        ],
+                    },
+                    {
+                        path: "b.txt",
+                        size: fileB.length,
+                        sha256: createHash("sha256").update(fileB).digest("hex"),
+                        pieces: [
+                            {
+                                sourceIndex: 0,
+                                remoteFileId: "remote-pack",
+                                offset: 0,
+                                length: fileB.length,
+                                remoteOffset: fileA.length,
+                            },
+                        ],
+                    },
+                ],
+            },
+            [collection0],
+            () => packPath,
+        );
+
+        await expect(ok.onPieceFileSettled("col-0", "remote-pack")).resolves.toMatchObject({
+            publishedPaths: expect.arrayContaining([
+                path.join(dir, "a.txt"),
+                path.join(dir, "b.txt"),
+            ]),
+        });
+        expect(await fse.readFile(path.join(dir, "a.txt"))).toEqual(fileA);
+        expect(await fse.readFile(path.join(dir, "b.txt"))).toEqual(fileB);
+
+        const badDir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-coord-test-"));
+        testDirs.push(badDir);
+        const badCollection = createCollection("col-0", 0, path.join(badDir, "col-0"));
+        await fse.ensureDir(badCollection.savePath);
+        const badPackPath = path.join(badCollection.savePath, "pack.bin");
+        await fse.writeFile(badPackPath, Buffer.concat([fileA, fileB]));
+
+        const bad = new BundleReassemblyCoordinator(
+            createKd(),
+            "bundle-2",
+            badDir,
+            {
+                renames: {},
+                splitFiles: [
+                    {
+                        path: "a.txt",
+                        size: fileA.length,
+                        sha256: "0".repeat(64),
+                        pieces: [
+                            {
+                                sourceIndex: 0,
+                                remoteFileId: "remote-pack",
+                                offset: 0,
+                                length: fileA.length,
+                                remoteOffset: 0,
+                            },
+                        ],
+                    },
+                ],
+            },
+            [badCollection],
+            () => badPackPath,
+        );
+
+        await expect(bad.onPieceFileSettled("col-0", "remote-pack")).rejects.toThrow("해시");
+        expect(await fse.pathExists(path.join(badDir, "a.txt"))).toBe(false);
+        expect(await fse.pathExists(`${path.join(badDir, "a.txt")}.pack-extract.tmp`)).toBe(false);
+    });
+
     it("deletes partial assembly on teardown and prevents further publishing", async () => {
         const dir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-coord-test-"));
         testDirs.push(dir);
