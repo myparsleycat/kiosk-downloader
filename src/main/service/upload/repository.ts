@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type {
     DirNode,
     TransferProgressSummary,
+    UploadFileProgress,
     UploadItem,
     UploadStatus,
     FileUploadStatus,
@@ -203,6 +204,157 @@ export class UploadRepository {
                 ) ORDER BY "logical_path" ASC, "source_offset" ASC`,
             [bundleId],
         );
+    }
+
+    /**
+     * Progress-path snapshot without parsing treeJson.
+     * `progress` contains only logical keys affected by `dirtyFileIds`.
+     */
+    public getBundleProgressSnapshot(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
+        const bundle = this.getBundle(bundleId);
+        if (!bundle) {
+            return null;
+        }
+        const collections = this.listBundleCollections(bundleId);
+        const files = this.listBundleFiles(bundleId);
+        const filesById = new Map(files.map((file) => [file.id, file]));
+        const plan = JSON.parse(bundle.planJson) as BundlePlanJson;
+        const packedPhysicalPaths = new Set<string>();
+        const packByPhysicalId = new Map<
+            string,
+            { physical: UploadFileRow; entries: Array<{ path: string; size: number }> }
+        >();
+
+        for (const [ordinal, plannedCollection] of plan.collections.entries()) {
+            const collection = collections.find((candidate) => candidate.ordinal === ordinal);
+            if (!collection) continue;
+            for (const plannedFile of plannedCollection.files) {
+                if (!plannedFile.packEntries) continue;
+                packedPhysicalPaths.add(`${collection.id}\0${plannedFile.path}`);
+                const physical = files.find(
+                    (file) => file.collectionId === collection.id && file.path === plannedFile.path,
+                );
+                if (!physical) continue;
+                packByPhysicalId.set(physical.id, {
+                    physical,
+                    entries: plannedFile.packEntries,
+                });
+            }
+        }
+
+        const byLogicalPath = new Map<string, UploadFileRow[]>();
+        for (const file of files) {
+            if (packedPhysicalPaths.has(`${file.collectionId}\0${file.path}`)) continue;
+            const logicalPath = file.logicalPath ?? file.path;
+            const entries = byLogicalPath.get(logicalPath) ?? [];
+            entries.push(file);
+            byLogicalPath.set(logicalPath, entries);
+        }
+
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        for (const { physical, entries } of packByPhysicalId.values()) {
+            for (const entry of entries) {
+                const uploaded =
+                    physical.size > 0
+                        ? Math.floor(
+                              entry.size * Math.min(1, physical.uploadedBytes / physical.size),
+                          )
+                        : 0;
+                summary.transferredBytes += uploaded;
+                summary.totalBytes += entry.size;
+                summary.totalFiles += 1;
+                if (physical.status === "completed") summary.completedFiles += 1;
+            }
+        }
+        for (const pieces of byLogicalPath.values()) {
+            const size =
+                pieces[0].logicalSize ?? pieces.reduce((sum, piece) => sum + piece.size, 0);
+            const uploaded = Math.min(
+                size,
+                pieces.reduce((sum, piece) => sum + piece.uploadedBytes, 0),
+            );
+            const status = aggregateUploadPieceStatus(pieces);
+            summary.transferredBytes += uploaded;
+            summary.totalBytes += size;
+            summary.totalFiles += 1;
+            if (status === "completed") summary.completedFiles += 1;
+        }
+
+        const dirtyLogicalPaths = new Set<string>();
+        const dirtyPackIds = new Set<string>();
+        for (const fileId of dirtyFileIds) {
+            if (packByPhysicalId.has(fileId)) {
+                dirtyPackIds.add(fileId);
+                continue;
+            }
+            const file = filesById.get(fileId);
+            if (!file) continue;
+            dirtyLogicalPaths.add(file.logicalPath ?? file.path);
+        }
+
+        const progress: Record<string, UploadFileProgress> = {};
+        for (const physicalId of dirtyPackIds) {
+            const pack = packByPhysicalId.get(physicalId);
+            if (!pack) continue;
+            for (const entry of pack.entries) {
+                const uploaded =
+                    pack.physical.size > 0
+                        ? Math.floor(
+                              entry.size *
+                                  Math.min(1, pack.physical.uploadedBytes / pack.physical.size),
+                          )
+                        : 0;
+                progress[entry.path] = {
+                    fileId: `${pack.physical.id}::pack::${encodeURIComponent(entry.path)}`,
+                    path: entry.path,
+                    status: pack.physical.status,
+                    uploaded,
+                    size: entry.size,
+                    error: pack.physical.error ?? undefined,
+                };
+            }
+        }
+        for (const logicalPath of dirtyLogicalPaths) {
+            const pieces = byLogicalPath.get(logicalPath);
+            if (!pieces || pieces.length === 0) continue;
+            const size =
+                pieces[0].logicalSize ?? pieces.reduce((sum, piece) => sum + piece.size, 0);
+            const uploaded = Math.min(
+                size,
+                pieces.reduce((sum, piece) => sum + piece.uploadedBytes, 0),
+            );
+            progress[logicalPath] = {
+                fileId: pieces[0].id,
+                path: logicalPath,
+                status: aggregateUploadPieceStatus(pieces),
+                uploaded,
+                size,
+                error: pieces.find((piece) => piece.error)?.error ?? undefined,
+            };
+        }
+
+        const activeStatus = collections.some(
+            (collection) => collection.status === "error" || collection.status === "expired",
+        )
+            ? "error"
+            : collections.length === bundle.physicalCount &&
+                collections.every((collection) => collection.status === "completed")
+              ? "completed"
+              : collections.some((collection) => collection.status === "uploading")
+                ? "uploading"
+                : bundle.status;
+
+        return {
+            progress,
+            summary,
+            status: activeStatus as UploadStatus,
+            subCollectionIds: collections.map((collection) => collection.id),
+            elapsedMs: collections.reduce((sum, collection) => sum + collection.elapsedMs, 0),
+            updatedAt: Math.max(
+                Date.parse(bundle.updatedAt),
+                ...collections.map((collection) => Date.parse(collection.updatedAt)),
+            ),
+        };
     }
 
     public updateBundleInitialization(bundleId: string, initializedCount: number) {
@@ -786,15 +938,7 @@ export class UploadRepository {
                 size,
                 pieces.reduce((sum, piece) => sum + piece.uploadedBytes, 0),
             );
-            const status = pieces.some((piece) => piece.status === "error")
-                ? "error"
-                : pieces.every((piece) => piece.status === "completed")
-                  ? "completed"
-                  : pieces.some((piece) => piece.status === "uploading")
-                    ? "uploading"
-                    : pieces.some((piece) => piece.status === "paused")
-                      ? "paused"
-                      : "pending";
+            const status = aggregateUploadPieceStatus(pieces);
             progress[logicalPath] = {
                 fileId: pieces[0].id,
                 path: logicalPath,
@@ -861,6 +1005,23 @@ export class UploadRepository {
                 undefined,
         };
     }
+}
+
+type BundlePlanJson = {
+    collections: Array<{
+        files: Array<{
+            path: string;
+            packEntries?: Array<{ path: string; size: number }>;
+        }>;
+    }>;
+};
+
+function aggregateUploadPieceStatus(pieces: UploadFileRow[]): FileUploadStatus {
+    if (pieces.some((piece) => piece.status === "error")) return "error";
+    if (pieces.every((piece) => piece.status === "completed")) return "completed";
+    if (pieces.some((piece) => piece.status === "uploading")) return "uploading";
+    if (pieces.some((piece) => piece.status === "paused")) return "paused";
+    return "pending";
 }
 
 function bundleSelectSql() {

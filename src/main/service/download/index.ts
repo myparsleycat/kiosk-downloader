@@ -92,6 +92,8 @@ export class DownloadService {
     private readonly scheduler: DownloadScheduler;
     private readonly extendedDrafts = new Map<string, LoadedExtendedCollection>();
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
+    private readonly pendingBundleProgress = new Map<string, Set<string>>();
+    private bundleProgressFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
@@ -175,6 +177,11 @@ export class DownloadService {
     }
 
     public destroy() {
+        if (this.bundleProgressFlushTimer) {
+            clearTimeout(this.bundleProgressFlushTimer);
+            this.bundleProgressFlushTimer = null;
+        }
+        this.pendingBundleProgress.clear();
         this.scheduler.destroy();
     }
 
@@ -1064,7 +1071,7 @@ export class DownloadService {
             return;
         }
         if (collection.bundleId) {
-            this.emitBundleProgressUpdate(collection.bundleId);
+            this.queueBundleProgressUpdate(collection.bundleId, fileIds);
             return;
         }
 
@@ -1118,21 +1125,80 @@ export class DownloadService {
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
-    private emitBundleProgressUpdate(bundleId: string) {
-        const item = this.repository.getItem(bundleId);
-        if (!item) {
+    private queueBundleProgressUpdate(bundleId: string, fileIds: ReadonlySet<string>) {
+        const pending = this.pendingBundleProgress.get(bundleId) ?? new Set<string>();
+        for (const fileId of fileIds) {
+            pending.add(fileId);
+        }
+        this.pendingBundleProgress.set(bundleId, pending);
+        if (this.bundleProgressFlushTimer) {
             return;
         }
-        // Progress map only (no tree) — tree stays on item-update.
-        const enriched = this.enrichItem(item, { sampleSpeeds: true });
+        this.bundleProgressFlushTimer = setTimeout(() => {
+            this.bundleProgressFlushTimer = null;
+            this.flushPendingBundleProgress();
+        }, 0);
+        this.bundleProgressFlushTimer.unref?.();
+    }
+
+    private flushPendingBundleProgress() {
+        const pending = [...this.pendingBundleProgress.entries()];
+        this.pendingBundleProgress.clear();
+        for (const [bundleId, fileIds] of pending) {
+            this.emitBundleProgressUpdate(bundleId, fileIds);
+        }
+    }
+
+    private emitBundleProgressUpdate(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
+        const snapshot = this.repository.getBundleProgressSnapshot(bundleId, dirtyFileIds);
+        if (!snapshot) {
+            return;
+        }
+        const progress: Record<string, FileProgress> = {};
+        for (const [pathKey, fileProgress] of Object.entries(snapshot.progress)) {
+            const physicalFileId = fileProgress.fileId.split("::", 1)[0];
+            const metricsSnapshot =
+                fileProgress.status === "downloading"
+                    ? this.metrics.sampleFile(physicalFileId, fileProgress.downloaded)
+                    : this.metrics.getFileSnapshot(physicalFileId, fileProgress.downloaded);
+            const liveDownloaded = Math.min(fileProgress.size, metricsSnapshot.liveDownloaded);
+            const downloaded =
+                fileProgress.status === "downloading" && fileProgress.size > 0
+                    ? Math.min(liveDownloaded, Math.floor(fileProgress.size * 0.99))
+                    : liveDownloaded;
+            progress[pathKey] = {
+                ...fileProgress,
+                downloaded,
+                speedBps:
+                    fileProgress.status === "downloading" &&
+                    liveDownloaded < fileProgress.size &&
+                    metricsSnapshot.speedBps > 0
+                        ? metricsSnapshot.speedBps
+                        : undefined,
+            };
+        }
+        const bundleSnapshot = this.metrics.getBundleSnapshot(bundleId, snapshot.subCollectionIds);
+        const speedBps =
+            snapshot.status === "downloading"
+                ? this.metrics.sampleBundle(bundleId, snapshot.subCollectionIds)
+                : 0;
+        if (snapshot.status !== "downloading") {
+            this.metrics.clearBundle(bundleId);
+        }
         const patch: DownloadProgressPatch = {
             id: bundleId,
-            progress: enriched.progress,
-            summary: enriched.summary,
-            status: enriched.status,
-            speedBps: enriched.speedBps ?? null,
-            elapsedMs: enriched.elapsedMs ?? 0,
-            updatedAt: enriched.updatedAt,
+            progress,
+            summary: {
+                ...snapshot.summary,
+                transferredBytes: Math.min(
+                    snapshot.summary.totalBytes,
+                    snapshot.summary.transferredBytes + bundleSnapshot.activeTransferredBytes,
+                ),
+            },
+            status: snapshot.status,
+            speedBps: snapshot.status === "downloading" && speedBps > 0 ? speedBps : null,
+            elapsedMs: snapshot.elapsedMs,
+            updatedAt: snapshot.updatedAt,
         };
         this.kd.ipc.sendToMainWindow("download:progress-update", patch);
         this.kd.service.transfer.syncMainWindowProgressBar();

@@ -69,6 +69,8 @@ export class UploadService {
     private readonly notifiedFailures = new Set<string>();
     /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
     private readonly draftSources = new Map<string, UploadSourceFile>();
+    private readonly pendingBundleProgress = new Map<string, Set<string>>();
+    private bundleProgressFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioUploadClient(kd);
@@ -514,6 +516,11 @@ export class UploadService {
     }
 
     public destroy() {
+        if (this.bundleProgressFlushTimer) {
+            clearTimeout(this.bundleProgressFlushTimer);
+            this.bundleProgressFlushTimer = null;
+        }
+        this.pendingBundleProgress.clear();
         this.scheduler.destroy();
         this.turnstile.destroy();
         this.clearDraftSources();
@@ -848,7 +855,7 @@ export class UploadService {
             return;
         }
         if (collection.bundleId) {
-            this.emitBundleProgressUpdate(collection.bundleId);
+            this.queueBundleProgressUpdate(collection.bundleId, fileIds);
             return;
         }
 
@@ -893,21 +900,77 @@ export class UploadService {
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
-    private emitBundleProgressUpdate(bundleId: string) {
-        const item = this.repository.getItem(bundleId);
-        if (!item) {
+    private queueBundleProgressUpdate(bundleId: string, fileIds: ReadonlySet<string>) {
+        const pending = this.pendingBundleProgress.get(bundleId) ?? new Set<string>();
+        for (const fileId of fileIds) {
+            pending.add(fileId);
+        }
+        this.pendingBundleProgress.set(bundleId, pending);
+        if (this.bundleProgressFlushTimer) {
             return;
         }
-        // Progress map only (no tree) — tree stays on item-update.
-        const enriched = this.enrichItem(item, { sampleSpeeds: true });
+        this.bundleProgressFlushTimer = setTimeout(() => {
+            this.bundleProgressFlushTimer = null;
+            this.flushPendingBundleProgress();
+        }, 0);
+        this.bundleProgressFlushTimer.unref?.();
+    }
+
+    private flushPendingBundleProgress() {
+        const pending = [...this.pendingBundleProgress.entries()];
+        this.pendingBundleProgress.clear();
+        for (const [bundleId, fileIds] of pending) {
+            this.emitBundleProgressUpdate(bundleId, fileIds);
+        }
+    }
+
+    private emitBundleProgressUpdate(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
+        const snapshot = this.repository.getBundleProgressSnapshot(bundleId, dirtyFileIds);
+        if (!snapshot) {
+            return;
+        }
+        const progress: Record<string, UploadFileProgress> = {};
+        for (const [pathKey, fileProgress] of Object.entries(snapshot.progress)) {
+            const physicalFileId = fileProgress.fileId.split("::", 1)[0];
+            const metricsSnapshot =
+                fileProgress.status === "uploading"
+                    ? this.metrics.sampleFile(physicalFileId, fileProgress.uploaded)
+                    : this.metrics.getFileSnapshot(physicalFileId, fileProgress.uploaded);
+            const uploaded = Math.min(
+                fileProgress.size,
+                Math.max(fileProgress.uploaded, metricsSnapshot.uploaded),
+            );
+            progress[pathKey] = {
+                ...fileProgress,
+                uploaded,
+                speedBps:
+                    fileProgress.status === "uploading" && metricsSnapshot.speedBps > 0
+                        ? metricsSnapshot.speedBps
+                        : undefined,
+            };
+        }
+        const bundleSnapshot = this.metrics.getBundleSnapshot(bundleId, snapshot.subCollectionIds);
+        const speedBps =
+            snapshot.status === "uploading"
+                ? this.metrics.sampleBundle(bundleId, snapshot.subCollectionIds)
+                : 0;
+        if (snapshot.status !== "uploading") {
+            this.metrics.clearBundle(bundleId);
+        }
         const patch: UploadProgressPatch = {
             id: bundleId,
-            progress: enriched.progress,
-            summary: enriched.summary,
-            status: enriched.status,
-            speedBps: enriched.speedBps ?? null,
-            elapsedMs: enriched.elapsedMs ?? 0,
-            updatedAt: enriched.updatedAt,
+            progress,
+            summary: {
+                ...snapshot.summary,
+                transferredBytes: Math.min(
+                    snapshot.summary.totalBytes,
+                    snapshot.summary.transferredBytes + bundleSnapshot.activeTransferredBytes,
+                ),
+            },
+            status: snapshot.status,
+            speedBps: snapshot.status === "uploading" && speedBps > 0 ? speedBps : null,
+            elapsedMs: snapshot.elapsedMs,
+            updatedAt: snapshot.updatedAt,
         };
         this.kd.ipc.sendToMainWindow("upload:progress-update", patch);
         this.kd.service.transfer.syncMainWindowProgressBar();

@@ -232,4 +232,156 @@ describe("UploadRepository bundles", () => {
             },
         });
     });
+
+    it("returns dirty-only bundle progress without full map", async () => {
+        const db = new DatabaseClient(":memory:");
+        await db.reconcile();
+        const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
+        const tree = {
+            type: "dir" as const,
+            id: "root",
+            name: "",
+            entries: [],
+        };
+        repo.insertBundle({
+            id: "bundle",
+            mode: "integrated",
+            name: "Bundle",
+            description: "",
+            password: "",
+            treeJson: JSON.stringify(tree),
+            planJson: JSON.stringify({ collections: [] }),
+            physicalCount: 2,
+            expires: Date.now() + 60_000,
+        });
+        for (const [ordinal, size, offset] of [
+            [0, 10, 0],
+            [1, 5, 10],
+        ] as const) {
+            repo.insertUpload({
+                created: {
+                    collectionUuid: Buffer.alloc(16, ordinal + 1),
+                    uploadToken: `token-${ordinal}`,
+                    root: { id: Buffer.alloc(16), name: "", files: [], children: [] },
+                },
+                options: {
+                    name: `Bundle (${ordinal + 1}/2)`,
+                    description: "",
+                    password: "",
+                    expires: Date.now() + 60_000,
+                },
+                files: [
+                    {
+                        path: `.parts/${ordinal}`,
+                        name: String(ordinal),
+                        size,
+                        fsPath: "/tmp/large.bin",
+                        sourceMtimeMs: 0,
+                        logicalPath: "large.bin",
+                        logicalSize: 15,
+                        sourceOffset: offset,
+                        logicalSha256: "00".repeat(32),
+                    },
+                ],
+                segmentSize: 16,
+                tree,
+                bundleId: "bundle",
+                ordinal,
+            });
+        }
+
+        const firstFile = repo.listBundleFiles("bundle")[0];
+        db.run(
+            `UPDATE "upload_file" SET "uploaded_bytes" = 10, "status" = 'uploading' WHERE "id" = ?`,
+            [firstFile.id],
+        );
+
+        const snapshot = repo.getBundleProgressSnapshot("bundle", new Set([firstFile.id]));
+        expect(snapshot).toMatchObject({
+            summary: { totalBytes: 15, totalFiles: 1, transferredBytes: 10 },
+            progress: {
+                "large.bin": { size: 15, uploaded: 10, status: "uploading" },
+            },
+        });
+        expect(Object.keys(snapshot!.progress)).toEqual(["large.bin"]);
+    });
+
+    it("returns pack logical keys for a dirty packed physical file", async () => {
+        const db = new DatabaseClient(":memory:");
+        await db.reconcile();
+        const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
+        const tree = {
+            type: "dir" as const,
+            id: "root",
+            name: "",
+            entries: [],
+        };
+        repo.insertBundle({
+            id: "packed-bundle",
+            mode: "integrated",
+            name: "Packed",
+            description: "",
+            password: "",
+            treeJson: JSON.stringify(tree),
+            planJson: JSON.stringify({
+                collections: [
+                    {
+                        files: [
+                            {
+                                path: "packs/0",
+                                packEntries: [
+                                    { path: "a.txt", size: 4 },
+                                    { path: "b.txt", size: 6 },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            }),
+            physicalCount: 1,
+            expires: Date.now() + 60_000,
+        });
+        repo.insertUpload({
+            created: {
+                collectionUuid: Buffer.alloc(16, 1),
+                uploadToken: "token",
+                root: { id: Buffer.alloc(16), name: "", files: [], children: [] },
+            },
+            options: {
+                name: "Packed (1/1)",
+                description: "",
+                password: "",
+                expires: Date.now() + 60_000,
+            },
+            files: [
+                {
+                    path: "packs/0",
+                    name: "0",
+                    size: 10,
+                    fsPath: "/tmp/pack",
+                    sourceMtimeMs: 0,
+                },
+            ],
+            segmentSize: 16,
+            tree,
+            bundleId: "packed-bundle",
+            ordinal: 0,
+        });
+
+        const packFile = repo.listBundleFiles("packed-bundle")[0];
+        db.run(
+            `UPDATE "upload_file" SET "uploaded_bytes" = 5, "status" = 'uploading' WHERE "id" = ?`,
+            [packFile.id],
+        );
+
+        const snapshot = repo.getBundleProgressSnapshot("packed-bundle", new Set([packFile.id]));
+        expect(snapshot).toMatchObject({
+            summary: { totalBytes: 10, totalFiles: 2, transferredBytes: 5 },
+            progress: {
+                "a.txt": { size: 4, uploaded: 2 },
+                "b.txt": { size: 6, uploaded: 3 },
+            },
+        });
+        expect(Object.keys(snapshot!.progress).sort()).toEqual(["a.txt", "b.txt"]);
+    });
 });

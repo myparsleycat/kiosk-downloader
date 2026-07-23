@@ -583,6 +583,160 @@ export class DownloadRepository {
         );
     }
 
+    public listBundleFiles(bundleId: string) {
+        return this.kd.lib.db.all<DownloadFileRow>(
+            `SELECT ${FILE_SELECT}
+             FROM "download_file"
+             WHERE "collection_id" IN (
+                SELECT "id" FROM "download_collection" WHERE "bundle_id" = ?
+             )`,
+            [bundleId],
+        );
+    }
+
+    /**
+     * Progress-path snapshot without parsing treeJson.
+     * `progress` contains only logical keys affected by `dirtyFileIds`.
+     */
+    public getBundleProgressSnapshot(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
+        const bundle = this.getBundle(bundleId);
+        if (!bundle) {
+            return null;
+        }
+        const collections = this.listBundleCollections(bundleId);
+        const manifest = JSON.parse(bundle.manifestJson) as {
+            selectedPaths?: string[];
+            splitFiles: Array<{
+                path: string;
+                size: number;
+                pieces: Array<{ remoteFileId: string; length: number }>;
+            }>;
+        };
+        const physicalByRemoteId = new Map<string, DownloadFileRow>();
+        const filesById = new Map<string, DownloadFileRow>();
+        for (const file of this.listBundleFiles(bundleId)) {
+            filesById.set(file.id, file);
+            if (file.selected !== 1) continue;
+            physicalByRemoteId.set(file.remoteId, file);
+        }
+
+        const mappedRemoteIds = new Set<string>();
+        const splitByLogicalPath = new Map<
+            string,
+            {
+                path: string;
+                size: number;
+                pieces: Array<{ remoteFileId: string; length: number }>;
+                files: DownloadFileRow[];
+            }
+        >();
+        const remoteIdToLogicalPaths = new Map<string, string[]>();
+
+        for (const logical of manifest.splitFiles) {
+            logical.pieces.forEach((piece) => mappedRemoteIds.add(piece.remoteFileId));
+            if (manifest.selectedPaths && !manifest.selectedPaths.includes(logical.path)) continue;
+            const files = logical.pieces
+                .map((piece) => physicalByRemoteId.get(piece.remoteFileId))
+                .filter((file): file is DownloadFileRow => file != null);
+            if (files.length === 0) continue;
+            splitByLogicalPath.set(logical.path, {
+                path: logical.path,
+                size: logical.size,
+                pieces: logical.pieces,
+                files,
+            });
+            for (const piece of logical.pieces) {
+                const paths = remoteIdToLogicalPaths.get(piece.remoteFileId) ?? [];
+                paths.push(logical.path);
+                remoteIdToLogicalPaths.set(piece.remoteFileId, paths);
+            }
+        }
+
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        for (const logical of splitByLogicalPath.values()) {
+            const downloaded = downloadedForSplit(logical, physicalByRemoteId);
+            const status = aggregateDownloadPieceStatus(logical.files);
+            summary.transferredBytes += downloaded;
+            summary.totalBytes += logical.size;
+            summary.totalFiles += 1;
+            if (status === "completed") summary.completedFiles += 1;
+        }
+        for (const file of physicalByRemoteId.values()) {
+            if (mappedRemoteIds.has(file.remoteId)) continue;
+            summary.transferredBytes += file.downloadedBytes;
+            summary.totalBytes += file.size;
+            summary.totalFiles += 1;
+            if (file.status === "completed") summary.completedFiles += 1;
+        }
+
+        const dirtyLogicalPaths = new Set<string>();
+        const dirtyPlainFileIds = new Set<string>();
+        for (const fileId of dirtyFileIds) {
+            const file = filesById.get(fileId);
+            if (!file || file.selected !== 1) continue;
+            const logicalPaths = remoteIdToLogicalPaths.get(file.remoteId);
+            if (logicalPaths) {
+                for (const logicalPath of logicalPaths) {
+                    dirtyLogicalPaths.add(logicalPath);
+                }
+                continue;
+            }
+            dirtyPlainFileIds.add(fileId);
+        }
+
+        const progress: Record<string, FileProgress> = {};
+        for (const logicalPath of dirtyLogicalPaths) {
+            const logical = splitByLogicalPath.get(logicalPath);
+            if (!logical) continue;
+            const downloaded = downloadedForSplit(logical, physicalByRemoteId);
+            progress[logical.path] = {
+                fileId: `${logical.files[0].id}::extended::${encodeURIComponent(logical.path)}`,
+                path: logical.path,
+                status: aggregateDownloadPieceStatus(logical.files),
+                downloaded,
+                size: logical.size,
+                selected: true,
+                error: logical.files.find((file) => file.error)?.error ?? undefined,
+            };
+        }
+        for (const fileId of dirtyPlainFileIds) {
+            const file = filesById.get(fileId);
+            if (!file) continue;
+            progress[file.path] = {
+                fileId: file.id,
+                path: file.path,
+                status: file.status,
+                downloaded: file.downloadedBytes,
+                size: file.size,
+                selected: true,
+                error: file.error ?? undefined,
+            };
+        }
+
+        const status = collections.some(
+            (collection) => collection.status === "error" || collection.status === "expired",
+        )
+            ? "error"
+            : collections.length > 0 &&
+                collections.every((collection) => collection.status === "completed")
+              ? bundle.status
+              : collections.some((collection) => collection.status === "downloading")
+                ? "downloading"
+                : bundle.status;
+
+        return {
+            progress,
+            summary,
+            status: status as DownloadStatus,
+            subCollectionIds: collections.map((collection) => collection.id),
+            elapsedMs: collections.reduce((sum, collection) => sum + collection.elapsedMs, 0),
+            updatedAt: Math.max(
+                Date.parse(bundle.updatedAt),
+                ...collections.map((collection) => Date.parse(collection.updatedAt)),
+            ),
+        };
+    }
+
     public markBundleStatus(bundleId: string, status: DownloadStatus, error?: string | null) {
         this.kd.lib.db.run(
             `UPDATE "download_bundle" SET "status" = ?, "updated_at" = ?, "error" = ? WHERE "id" = ?`,
@@ -1539,26 +1693,8 @@ export class DownloadRepository {
                 .map((piece) => physicalByRemoteId.get(piece.remoteFileId))
                 .filter((file): file is DownloadFileRow => file != null);
             if (files.length === 0) continue;
-            const downloaded = Math.min(
-                logical.size,
-                logical.pieces.reduce((sum, piece) => {
-                    const file = physicalByRemoteId.get(piece.remoteFileId);
-                    if (!file || file.size === 0) return sum;
-                    return (
-                        sum +
-                        Math.floor(piece.length * Math.min(1, file.downloadedBytes / file.size))
-                    );
-                }, 0),
-            );
-            const status = files.some((file) => file.status === "error")
-                ? "error"
-                : files.every((file) => file.status === "completed")
-                  ? "completed"
-                  : files.some((file) => file.status === "downloading")
-                    ? "downloading"
-                    : files.some((file) => file.status === "paused")
-                      ? "paused"
-                      : "pending";
+            const downloaded = downloadedForSplit(logical, physicalByRemoteId);
+            const status = aggregateDownloadPieceStatus(files);
             progress[logical.path] = {
                 fileId: `${files[0].id}::extended::${encodeURIComponent(logical.path)}`,
                 path: logical.path,
@@ -1629,6 +1765,31 @@ export class DownloadRepository {
                 undefined,
         };
     }
+}
+
+function downloadedForSplit(
+    logical: {
+        size: number;
+        pieces: Array<{ remoteFileId: string; length: number }>;
+    },
+    physicalByRemoteId: Map<string, DownloadFileRow>,
+) {
+    return Math.min(
+        logical.size,
+        logical.pieces.reduce((sum, piece) => {
+            const file = physicalByRemoteId.get(piece.remoteFileId);
+            if (!file || file.size === 0) return sum;
+            return sum + Math.floor(piece.length * Math.min(1, file.downloadedBytes / file.size));
+        }, 0),
+    );
+}
+
+function aggregateDownloadPieceStatus(files: DownloadFileRow[]): FileDownloadStatus {
+    if (files.some((file) => file.status === "error")) return "error";
+    if (files.every((file) => file.status === "completed")) return "completed";
+    if (files.some((file) => file.status === "downloading")) return "downloading";
+    if (files.some((file) => file.status === "paused")) return "paused";
+    return "pending";
 }
 
 function bundleSelectSql() {
