@@ -768,12 +768,10 @@ const UploadStartFooter = React.memo(function UploadStartFooter({
 }) {
   const [progress, setProgress] = React.useState<UploadPlanProgress | null>(null);
 
+  React.useEffect(() => window.api.on("upload:plan-progress", (next) => setProgress(next)), []);
+
   React.useEffect(() => {
-    if (!starting) {
-      setProgress(null);
-      return;
-    }
-    return window.api.on("upload:plan-progress", setProgress);
+    if (!starting) setProgress(null);
   }, [starting]);
 
   return (

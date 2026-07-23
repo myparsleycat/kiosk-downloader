@@ -575,12 +575,15 @@ export class UploadService {
         const resolved = await this.resolveCreateFiles(payload.tree);
         const files = mode === "compatible" ? await this.sanitizeCreateFiles(resolved) : resolved;
         const bundleId = randomUUID();
-        const sourcesByPath = new Map(files.map((file) => [file.path, file]));
 
         const persistedPlan =
             mode === "integrated"
-                ? await this.createIntegratedBundlePlan(files, sourcesByPath, bundleId)
-                : this.createCompatibleBundlePlan(files, sourcesByPath, bundleId);
+                ? await this.createIntegratedBundlePlan(files, bundleId)
+                : this.createCompatibleBundlePlan(
+                      files,
+                      new Map(files.map((file) => [file.path, file])),
+                      bundleId,
+                  );
 
         this.repository.insertBundle({
             id: bundleId,
@@ -595,7 +598,7 @@ export class UploadService {
         });
         this.clearDraftSources();
         await this.emitUpdate(bundleId);
-        await this.initializeBundle(this.repository.getBundle(bundleId)!);
+        await this.initializeBundle(this.repository.getBundle(bundleId)!, persistedPlan);
         return this.repository.getItem(bundleId);
     }
 
@@ -627,7 +630,6 @@ export class UploadService {
 
     private async createIntegratedBundlePlan(
         files: UploadSourceFile[],
-        _sourcesByPath: Map<string, UploadSourceFile>,
         bundleId: string,
     ): Promise<PersistedBundlePlan> {
         const packDir = path.join(app.getPath("userData"), "upload-packs", bundleId);
@@ -636,8 +638,8 @@ export class UploadService {
         });
     }
 
-    private async initializeBundle(bundle: UploadBundleRow) {
-        const plan = JSON.parse(bundle.planJson) as PersistedBundlePlan;
+    private async initializeBundle(bundle: UploadBundleRow, plan?: PersistedBundlePlan) {
+        const resolvedPlan = plan ?? (JSON.parse(bundle.planJson) as PersistedBundlePlan);
         const existingOrdinals = new Set(
             this.repository
                 .listBundleCollections(bundle.id)
@@ -645,9 +647,9 @@ export class UploadService {
         );
         this.turnstile.beginSession(this.kd.window.main.window);
         try {
-            for (let ordinal = 0; ordinal < plan.collections.length; ordinal += 1) {
+            for (let ordinal = 0; ordinal < resolvedPlan.collections.length; ordinal += 1) {
                 if (existingOrdinals.has(ordinal)) continue;
-                await this.createBundleCollection(bundle, plan, ordinal);
+                await this.createBundleCollection(bundle, resolvedPlan, ordinal);
                 this.repository.updateBundleInitialization(bundle.id, ordinal + 1);
                 await this.emitUpdate(bundle.id);
             }
@@ -727,7 +729,8 @@ export class UploadService {
         // Materialize all small-file packs for this collection in the worker so
         // source hashing and pack writes stay off the main event loop.
         const packFiles = collectionFiles.filter((file) => file.packEntries);
-        const materialized = await this.preparationWorker.materializePacks(packFiles);
+        const materialized =
+            packFiles.length > 0 ? await this.preparationWorker.materializePacks(packFiles) : [];
         const materializedByPath = new Map(materialized.map((file) => [file.path, file] as const));
 
         const prepared: UploadSourceFile[] = [];

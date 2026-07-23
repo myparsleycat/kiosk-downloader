@@ -14,6 +14,13 @@ import type { UploadSourceFile } from "./types";
 // electron-vite rewrites this into a Worker factory in the bundled main process.
 import createWorker from "./preparation-worker?nodeWorker";
 
+type QueuedTask = {
+    request: PreparationRequest;
+    onProgress?: PreparationProgressHandler;
+    resolve: (result: PreparationResult) => void;
+    reject: (error: unknown) => void;
+};
+
 type ActiveTask = {
     worker: Worker;
     resolve: (result: PreparationResult) => void;
@@ -22,6 +29,8 @@ type ActiveTask = {
 
 export class PreparationWorkerClient {
     private active: ActiveTask | null = null;
+    private readonly pending: QueuedTask[] = [];
+    private destroyed = false;
 
     constructor(private readonly logger: Logger) {}
 
@@ -53,23 +62,54 @@ export class PreparationWorkerClient {
     }
 
     destroy() {
-        if (!this.active) return;
-        this.active.reject(new Error("preparation worker destroyed"));
-        void this.active.worker.terminate().catch(() => {});
-        this.active = null;
+        this.destroyed = true;
+        for (const task of this.pending.splice(0)) {
+            task.reject(new Error("preparation worker destroyed"));
+        }
+        if (this.active) {
+            this.active.reject(new Error("preparation worker destroyed"));
+            void this.active.worker.terminate().catch(() => {});
+            this.active = null;
+        }
     }
 
-    private async run(
+    private run(
         request: PreparationRequest,
         onProgress?: PreparationProgressHandler,
     ): Promise<PreparationResult> {
-        if (this.active) {
-            throw new Error("이미 업로드 준비 작업이 진행 중입니다.");
-        }
-
-        const worker = createWorker({});
         return new Promise<PreparationResult>((resolve, reject) => {
-            this.active = { worker, resolve, reject };
+            if (this.destroyed) {
+                reject(new Error("preparation worker destroyed"));
+                return;
+            }
+            this.pending.push({ request, onProgress, resolve, reject });
+            void this.drain();
+        });
+    }
+
+    private async drain() {
+        if (this.active || this.destroyed) return;
+        const task = this.pending.shift();
+        if (!task) return;
+        await this.execute(task);
+        void this.drain();
+    }
+
+    private execute(task: QueuedTask): Promise<void> {
+        const { request, onProgress, resolve, reject } = task;
+        const worker = createWorker({});
+        return new Promise<void>((done) => {
+            this.active = {
+                worker,
+                resolve: (result) => {
+                    resolve(result);
+                    done();
+                },
+                reject: (error) => {
+                    reject(error);
+                    done();
+                },
+            };
 
             const cleanup = () => {
                 worker.removeAllListeners();
@@ -86,6 +126,7 @@ export class PreparationWorkerClient {
                     cleanup();
                     void worker.terminate().catch(() => {});
                     resolve(message.result);
+                    done();
                     return;
                 }
                 cleanup();
@@ -96,6 +137,7 @@ export class PreparationWorkerClient {
                         stack: message.error.stack,
                     }),
                 );
+                done();
             });
 
             worker.on("error", (error: Error) => {
@@ -110,6 +152,7 @@ export class PreparationWorkerClient {
                 );
                 cleanup();
                 reject(error);
+                done();
             });
 
             worker.on("exit", (code: number) => {
@@ -127,6 +170,7 @@ export class PreparationWorkerClient {
                 reject(
                     new Error(`업로드 준비 worker가 비정상 종료되었습니다 (exit code ${code}).`),
                 );
+                done();
             });
 
             worker.postMessage(request);
