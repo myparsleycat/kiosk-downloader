@@ -1677,11 +1677,9 @@ export class DownloadRepository {
             }>;
         };
         const physicalByRemoteId = new Map<string, DownloadFileRow>();
-        for (const collection of collections) {
-            for (const file of this.listFiles(collection.id)) {
-                if (file.selected !== 1) continue;
-                physicalByRemoteId.set(file.remoteId, file);
-            }
+        for (const file of this.listBundleFiles(bundle.id)) {
+            if (file.selected !== 1) continue;
+            physicalByRemoteId.set(file.remoteId, file);
         }
         const progress: Record<string, FileProgress> = {};
         const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
