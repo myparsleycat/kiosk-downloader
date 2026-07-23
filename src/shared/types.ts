@@ -312,6 +312,21 @@ export interface SettingUpdatePayload<K extends SettingKey = SettingKey> {
     value: AppSettings[K];
 }
 
+export type UploadPlanProgress = {
+    stage: "hashing" | "packing";
+    current: number;
+    total: number;
+};
+
+export type UploadSegmentDedupSnapshot = {
+    existsCount: number;
+    existsBytes: number;
+    conflictCount: number;
+    conflictBytes: number;
+    uploadedCount: number;
+    uploadedBytes: number;
+};
+
 export type IpcEvents = {
     "window:blur": () => void;
     "window:focus": () => void;
@@ -324,6 +339,7 @@ export type IpcEvents = {
     "upload:update": (items: UploadItem[]) => void;
     "upload:item-update": (item: UploadItem) => void;
     "upload:progress-update": (patch: UploadProgressPatch) => void;
+    "upload:plan-progress": (progress: UploadPlanProgress) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;
     "updater:status-changed": (status: UpdaterStatus) => void;
     "updater:update-available": () => void;

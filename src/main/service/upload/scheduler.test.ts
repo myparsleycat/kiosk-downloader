@@ -68,8 +68,8 @@ describe("UploadScheduler", () => {
                 onProgress?: (bytes: number) => void,
             ) => {
                 reportProgress = onProgress;
-                return new Promise<number>((resolve) => {
-                    finishUpload = resolve;
+                return new Promise<{ length: number; outcome: "uploaded" }>((resolve) => {
+                    finishUpload = (bytes) => resolve({ length: bytes, outcome: "uploaded" });
                 });
             },
         );
@@ -128,8 +128,8 @@ describe("UploadScheduler", () => {
                 onProgress?: (bytes: number) => void,
             ) => {
                 reportProgress = onProgress;
-                return new Promise<number>((resolve) => {
-                    finishUpload = resolve;
+                return new Promise<{ length: number; outcome: "uploaded" }>((resolve) => {
+                    finishUpload = (bytes) => resolve({ length: bytes, outcome: "uploaded" });
                 });
             },
         );
@@ -184,8 +184,8 @@ describe("UploadScheduler", () => {
                 onProgress?: (bytes: number) => void,
             ) => {
                 reportProgress = onProgress;
-                return new Promise<number>((resolve) => {
-                    finishUpload = resolve;
+                return new Promise<{ length: number; outcome: "uploaded" }>((resolve) => {
+                    finishUpload = (bytes) => resolve({ length: bytes, outcome: "uploaded" });
                 });
             },
         );
@@ -271,7 +271,12 @@ function createApi(
         token: string,
         signal: AbortSignal,
         onProgress?: (bytes: number) => void,
-    ) => Promise<number> = vi.fn(async (chunk: ServerFileMapping) => chunk.length),
+    ) => Promise<{ length: number; outcome: "exists" | "conflict" | "uploaded" }> = vi.fn(
+        async (chunk: ServerFileMapping) => ({
+            length: chunk.length,
+            outcome: "uploaded" as const,
+        }),
+    ),
 ) {
     const completeCollection = vi.fn(async () => undefined);
     return {
@@ -289,6 +294,17 @@ function createMetrics() {
         clearChunk: vi.fn(),
         clearFile: vi.fn(),
         clearCollection: vi.fn(),
+        recordSegmentExists: vi.fn(),
+        recordSegmentConflict: vi.fn(),
+        recordSegmentUploaded: vi.fn(),
+        getSegmentDedupSnapshot: vi.fn(() => ({
+            existsCount: 0,
+            existsBytes: 0,
+            conflictCount: 0,
+            conflictBytes: 0,
+            uploadedCount: 0,
+            uploadedBytes: 0,
+        })),
     } as unknown as UploadTransferMetrics;
 }
 
@@ -311,7 +327,7 @@ function createKioskDownloader() {
                 maybeShutdownAfterTransfer: vi.fn(async () => undefined),
             },
         },
-        logger: { error: vi.fn(), warn: vi.fn() },
+        logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn() },
     } as unknown as KioskDownloader;
 }
 

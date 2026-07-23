@@ -34,7 +34,12 @@ import {
   EXTENDED_UPLOAD_DEFAULT_LIMITS,
 } from "@shared/extended-upload-plan";
 import { basename } from "@shared/tree-rename";
-import type { ExpandPathsResult, UploadMode, UploadTreeFile } from "@shared/types";
+import type {
+  ExpandPathsResult,
+  UploadMode,
+  UploadPlanProgress,
+  UploadTreeFile,
+} from "@shared/types";
 import { formatSize } from "@shared/utils";
 import { format, isSameDay } from "date-fns";
 import { ko } from "date-fns/locale";
@@ -83,6 +88,14 @@ function removeDraftSources(paths: string[]) {
   void window.api.invoke("upload:removeDraftSources", paths);
 }
 
+function formatPlanProgressLabel(progress: UploadPlanProgress) {
+  if (progress.stage === "hashing") {
+    if (progress.total <= 0) return "파일 분석 중...";
+    return `파일 분석 중... ${progress.current}/${progress.total}`;
+  }
+  return "업로드 계획 중...";
+}
+
 export function UploadView({ onCreated }: { onCreated: (uploadId: string) => void }) {
   const files = useUploadDraft((s) => s.files);
   const name = useUploadDraft((s) => s.name);
@@ -103,6 +116,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
 
   const [expanding, setExpanding] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
+  const [planProgress, setPlanProgress] = React.useState<UploadPlanProgress | null>(null);
   const [showPassword, setShowPassword] = React.useState(true);
   const [dragOver, setDragOver] = React.useState(false);
   const [expiryOpen, setExpiryOpen] = React.useState(false);
@@ -282,9 +296,18 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     setMode(choice);
   };
 
+  React.useEffect(
+    () =>
+      window.api.on("upload:plan-progress", (progress) => {
+        setPlanProgress(progress);
+      }),
+    [],
+  );
+
   const handleStart = async () => {
     if (!canUpload) return;
     setStarting(true);
+    setPlanProgress(mode === "integrated" ? { stage: "hashing", current: 0, total: 0 } : null);
     try {
       const created = await window.api.invoke("upload:create", {
         tree: files,
@@ -320,6 +343,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
       });
     } finally {
       setStarting(false);
+      setPlanProgress(null);
     }
   };
 
@@ -580,8 +604,19 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
             onClick={handleStart}
           >
             <UploadIcon className="size-3.5" />
-            {mode === "integrated" ? "업로드 & 공유 정보 생성" : "업로드 & 링크 생성"}
+            {starting && planProgress
+              ? formatPlanProgressLabel(planProgress)
+              : mode === "integrated"
+                ? "업로드 & 공유 정보 생성"
+                : "업로드 & 링크 생성"}
           </Button>
+          {starting && planProgress ? (
+            <p className="mt-1.5 text-center text-[11px] text-muted-foreground">
+              {planProgress.stage === "hashing"
+                ? `파일 해시 계산 ${planProgress.current}/${planProgress.total}`
+                : "작은 파일 묶음 계획 중"}
+            </p>
+          ) : null}
         </div>
       </div>
 

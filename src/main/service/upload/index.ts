@@ -651,13 +651,34 @@ export class UploadService {
                 hashPaths.add(source.fsPath);
             }
         }
-        const hashesByFsPath = await hashFilesBounded(hashPaths, hashFile);
+        this.kd.ipc.sendToMainWindow("upload:plan-progress", {
+            stage: "hashing",
+            current: 0,
+            total: hashPaths.size,
+        });
+        const hashesByFsPath = await hashFilesBounded(
+            hashPaths,
+            hashFile,
+            undefined,
+            (current, total) => {
+                this.kd.ipc.sendToMainWindow("upload:plan-progress", {
+                    stage: "hashing",
+                    current,
+                    total,
+                });
+            },
+        );
         const hashesByLogicalPath = new Map<string, string>();
         for (const file of files) {
             const digest = hashesByFsPath.get(file.fsPath);
             if (digest) hashesByLogicalPath.set(file.path, digest);
         }
 
+        this.kd.ipc.sendToMainWindow("upload:plan-progress", {
+            stage: "packing",
+            current: 0,
+            total: 1,
+        });
         const physicalFiles: PersistedBundleFile[] = pieces.map((piece) => {
             const source = sourcesByPath.get(piece.sourcePath);
             if (!source) {
@@ -673,6 +694,11 @@ export class UploadService {
 
         const packDir = path.join(app.getPath("userData"), "upload-packs", bundleId);
         const artifacts = createDeterministicPackArtifacts(physicalFiles, packDir);
+        this.kd.ipc.sendToMainWindow("upload:plan-progress", {
+            stage: "packing",
+            current: 1,
+            total: 1,
+        });
         const collections = packSizedItems(
             artifacts.map((file) => ({
                 ...file,
@@ -1103,6 +1129,23 @@ export class UploadService {
                       bundle.passwordPlain ?? undefined,
                   );
         this.repository.completeBundle(bundle.id, shareValue);
+        const dedup = this.metrics.getBundleSegmentDedupSnapshot(collections.map((c) => c.id));
+        const totalSegments = dedup.existsCount + dedup.conflictCount + dedup.uploadedCount;
+        if (totalSegments > 0) {
+            this.kd.logger.info(
+                {
+                    action: "upload-bundle-segment-dedup",
+                    bundleId: bundle.id,
+                    mode: bundle.mode,
+                    ...dedup,
+                    reusedBytes: dedup.existsBytes + dedup.conflictBytes,
+                    edgePutRatio:
+                        dedup.uploadedBytes /
+                        Math.max(1, dedup.existsBytes + dedup.conflictBytes + dedup.uploadedBytes),
+                },
+                "UploadService:bundleSegmentDedup",
+            );
+        }
         await this.cleanupBundlePacks(bundle.id);
     }
 

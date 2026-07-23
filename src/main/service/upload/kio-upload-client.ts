@@ -353,7 +353,7 @@ export class KioUploadClient {
         uploadToken: string,
         signal: AbortSignal,
         onProgress?: (transferredBytes: number) => void,
-    ): Promise<number> {
+    ): Promise<{ length: number; outcome: "exists" | "conflict" | "uploaded" }> {
         const bytes = await readSegmentBytes(item);
         const hash = crypto.createHash("sha256").update(bytes).digest();
 
@@ -383,7 +383,7 @@ export class KioUploadClient {
             }
             // Hash already bound for this sequence (e.g. retry after a partial edge attempt).
             if (code === "collection:segment_hash_conflict") {
-                return item.length;
+                return { length: item.length, outcome: "conflict" };
             }
             if (
                 [
@@ -401,7 +401,7 @@ export class KioUploadClient {
 
         const segResp = asRecord(response.body);
         if (segResp?.exists) {
-            return item.length;
+            return { length: item.length, outcome: "exists" };
         }
 
         const data = asRecord(segResp?.data);
@@ -414,7 +414,7 @@ export class KioUploadClient {
         }
 
         await this.edgePut(url, edgeToken, bytes, signal, onProgress);
-        return item.length;
+        return { length: item.length, outcome: "uploaded" };
     }
 
     private async edgePut(

@@ -511,7 +511,7 @@ export class UploadScheduler {
                     }, STALL_TIMEOUT_MS);
                 };
                 try {
-                    const bytes = await this.api.uploadSegment(
+                    const result = await this.api.uploadSegment(
                         chunk,
                         persistedCollection?.uploadToken ?? "",
                         attemptController.signal,
@@ -530,8 +530,15 @@ export class UploadScheduler {
                     if (file.failed || collection.failed || file.generation !== chunk.generation) {
                         return;
                     }
-                    this.repository.markChunkCompleted(row, bytes);
-                    this.repository.addFileUploadedBytes(chunk.localFileId, bytes);
+                    if (result.outcome === "exists") {
+                        this.metrics.recordSegmentExists(chunk.collectionId, result.length);
+                    } else if (result.outcome === "conflict") {
+                        this.metrics.recordSegmentConflict(chunk.collectionId, result.length);
+                    } else {
+                        this.metrics.recordSegmentUploaded(chunk.collectionId, result.length);
+                    }
+                    this.repository.markChunkCompleted(row, result.length);
+                    this.repository.addFileUploadedBytes(chunk.localFileId, result.length);
                     file.completed.add(chunk.sequence);
                     this.metrics.completeChunk(chunk.localFileId, chunk.sequence);
                     this.markProgress(chunk.collectionId, chunk.localFileId);
@@ -668,6 +675,26 @@ export class UploadScheduler {
                 collectionId,
                 KioUploadClient.buildShareLink(Buffer.from(collection.collectionUuid, "hex")),
             );
+            const dedup = this.metrics.getSegmentDedupSnapshot(collectionId);
+            const totalSegments = dedup.existsCount + dedup.conflictCount + dedup.uploadedCount;
+            if (totalSegments > 0) {
+                this.kd.logger.info(
+                    {
+                        action: "upload-segment-dedup",
+                        collectionId,
+                        bundleId: collection.bundleId,
+                        ...dedup,
+                        reusedBytes: dedup.existsBytes + dedup.conflictBytes,
+                        edgePutRatio:
+                            dedup.uploadedBytes /
+                            Math.max(
+                                1,
+                                dedup.existsBytes + dedup.conflictBytes + dedup.uploadedBytes,
+                            ),
+                    },
+                    "UploadScheduler:segmentDedup",
+                );
+            }
             await this.emitUpdate(collectionId);
             await this.kd.service.transfer.maybeShutdownAfterTransfer();
         } catch (error) {

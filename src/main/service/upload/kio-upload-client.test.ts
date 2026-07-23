@@ -178,13 +178,13 @@ describe("KioUploadClient.uploadSegment", () => {
         const item = await createSegmentFixture();
         httpRequest.mockResolvedValueOnce(cborResponse(200, { exists: true }));
 
-        const length = await createClient().uploadSegment(
+        const result = await createClient().uploadSegment(
             item,
             "token",
             new AbortController().signal,
         );
 
-        expect(length).toBe(item.length);
+        expect(result).toEqual({ length: item.length, outcome: "exists" });
         expect(httpRequest).toHaveBeenCalledTimes(1);
         expect(String(httpRequest.mock.calls[0]?.[0])).toContain("/segment/upload");
     });
@@ -198,13 +198,13 @@ describe("KioUploadClient.uploadSegment", () => {
             }),
         );
 
-        const length = await createClient().uploadSegment(
+        const result = await createClient().uploadSegment(
             item,
             "token",
             new AbortController().signal,
         );
 
-        expect(length).toBe(item.length);
+        expect(result).toEqual({ length: item.length, outcome: "conflict" });
         expect(httpRequest).toHaveBeenCalledTimes(1);
     });
 
@@ -219,13 +219,13 @@ describe("KioUploadClient.uploadSegment", () => {
             )
             .mockResolvedValueOnce(edgeResponse(true));
 
-        const length = await createClient().uploadSegment(
+        const result = await createClient().uploadSegment(
             item,
             "token",
             new AbortController().signal,
         );
 
-        expect(length).toBe(item.length);
+        expect(result).toEqual({ length: item.length, outcome: "uploaded" });
         expect(httpRequest).toHaveBeenCalledTimes(2);
         expect(String(httpRequest.mock.calls[1]?.[0])).toBe("https://edge.example/edge/v4/upload");
     });
@@ -252,9 +252,9 @@ describe("KioUploadClient.uploadSegment", () => {
             client.uploadSegment(item, "token", new AbortController().signal),
         ).rejects.toThrow("edge PUT 실패: HTTP 400");
 
-        const length = await client.uploadSegment(item, "token", new AbortController().signal);
+        const result = await client.uploadSegment(item, "token", new AbortController().signal);
 
-        expect(length).toBe(item.length);
+        expect(result).toEqual({ length: item.length, outcome: "conflict" });
         expect(httpRequest).toHaveBeenCalledTimes(3);
         expect(String(httpRequest.mock.calls[2]?.[0])).toContain("/segment/upload");
     });

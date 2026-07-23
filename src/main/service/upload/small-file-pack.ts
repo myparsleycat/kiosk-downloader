@@ -204,11 +204,24 @@ export async function hashFilesBounded(
     filePaths: Iterable<string>,
     hashFile: (filePath: string) => Promise<string>,
     concurrency = HASH_CONCURRENCY,
+    onProgress?: (done: number, total: number) => void,
 ) {
     const unique = [...new Set(filePaths)];
+    const total = unique.length;
+    onProgress?.(0, total);
+    if (total === 0) return new Map<string, string>();
+
     const limit = pLimit(concurrency);
+    let done = 0;
     const entries = await Promise.all(
-        unique.map((filePath) => limit(async () => [filePath, await hashFile(filePath)] as const)),
+        unique.map((filePath) =>
+            limit(async () => {
+                const digest = await hashFile(filePath);
+                done += 1;
+                onProgress?.(done, total);
+                return [filePath, digest] as const;
+            }),
+        ),
     );
     return new Map(entries);
 }
