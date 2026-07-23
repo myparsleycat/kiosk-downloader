@@ -47,7 +47,7 @@ export function formatTime(seconds: number, lang?: string | null): string {
         formatDuration(duration, {
             format: ["hours", "minutes", "seconds"],
             locale,
-        }) || formatDuration({ seconds: 0 }, { format: ["seconds"], locale })
+        }) || formatDuration({ seconds: 0 }, { format: ["seconds"], zero: true, locale })
     );
 }
 
