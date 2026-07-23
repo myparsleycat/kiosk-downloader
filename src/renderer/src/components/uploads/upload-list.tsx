@@ -115,8 +115,11 @@ export function UploadList({
   const { remove, removeCompleted, dialog, removing } =
     useRemoveTransfer<UploadItem>(removeUploadOptions);
   const hasCompleted = items.some((item) => item.status === "completed");
+  const [pendingAction, setPendingAction] = React.useState(false);
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {
+    if (pendingAction) return;
+    setPendingAction(true);
     try {
       await action();
       if (success) toast.success(success);
@@ -124,6 +127,8 @@ export function UploadList({
       toast.error("작업을 완료하지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      setPendingAction(false);
     }
   };
 
@@ -354,6 +359,7 @@ function UploadDetail({
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
 
   const runAction = async (key: string, action: () => Promise<unknown>, success?: string) => {
+    if (pendingAction) return;
     setPendingAction(key);
     try {
       await action();
@@ -445,6 +451,7 @@ function UploadDetail({
                 variant="outline"
                 size="sm"
                 isLoading={pendingAction === "pause"}
+                disabled={pendingAction === "resume"}
                 onClick={() => runAction("pause", () => window.api.invoke("upload:pause", item.id))}
               >
                 <PauseIcon className="size-3.5" />
@@ -455,6 +462,7 @@ function UploadDetail({
                 variant="outline"
                 size="sm"
                 isLoading={pendingAction === "resume"}
+                disabled={pendingAction === "pause"}
                 onClick={() =>
                   runAction(
                     "resume",

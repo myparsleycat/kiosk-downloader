@@ -6,7 +6,16 @@ import type { Logger } from "../../logger";
 
 // Stub for the electron-vite `?nodeWorker` import. Each call to the factory
 // returns a fresh mock worker whose message/error/exit behavior the test
-// controls via the `currentWorker` handle.
+// controls via the `currentWorker` handle. `factoryBehavior` / `postMessageBehavior`
+// let individual tests force a synchronous throw from the worker factory or
+// from postMessage, which the client must surface as a task rejection without
+// stalling the queue.
+const { currentWorkerRef, factoryBehavior, postMessageBehavior } = vi.hoisted(() => ({
+    currentWorkerRef: { current: null as MockWorker | null },
+    factoryBehavior: { throwInFactory: null as string | null },
+    postMessageBehavior: { throwOnPost: null as string | null },
+}));
+
 let currentWorker: MockWorker;
 
 class MockWorker extends EventEmitter {
@@ -14,6 +23,9 @@ class MockWorker extends EventEmitter {
     terminated = false;
 
     postMessage(message: unknown) {
+        if (postMessageBehavior.throwOnPost) {
+            throw new Error(postMessageBehavior.throwOnPost);
+        }
         this.posted.push(message);
     }
 
@@ -25,7 +37,11 @@ class MockWorker extends EventEmitter {
 
 vi.mock("./preparation-worker?nodeWorker", () => ({
     default: () => {
+        if (factoryBehavior.throwInFactory) {
+            throw new Error(factoryBehavior.throwInFactory);
+        }
         currentWorker = new MockWorker();
+        currentWorkerRef.current = currentWorker;
         return currentWorker;
     },
 }));
@@ -53,6 +69,9 @@ describe("PreparationWorkerClient", () => {
 
     beforeEach(() => {
         client = new PreparationWorkerClient(createLogger());
+        currentWorkerRef.current = null;
+        factoryBehavior.throwInFactory = null;
+        postMessageBehavior.throwOnPost = null;
     });
 
     it("serializes two concurrent materialize requests in FIFO order", async () => {
@@ -134,5 +153,31 @@ describe("PreparationWorkerClient", () => {
     it("rejects new tasks queued after destroy", async () => {
         client.destroy();
         await expect(client.materializePacks([])).rejects.toThrow("destroyed");
+    });
+
+    it("rejects the task and keeps draining when the worker factory throws", async () => {
+        factoryBehavior.throwInFactory = "factory boom";
+        const first = client.materializePacks([]);
+        await expect(first).rejects.toThrow("factory boom");
+
+        // A later task must still run: the queue must not stall after a sync throw.
+        factoryBehavior.throwInFactory = null;
+        const second = client.materializePacks([]);
+        const secondTaskId = (currentWorker.posted[0] as { taskId: string }).taskId;
+        emitResult(currentWorker, secondTaskId, { kind: "materialized", files: [] });
+        await expect(second).resolves.toEqual([]);
+    });
+
+    it("rejects the task and keeps draining when postMessage throws", async () => {
+        postMessageBehavior.throwOnPost = "postMessage boom";
+        const first = client.materializePacks([]);
+        await expect(first).rejects.toThrow("postMessage boom");
+        expect(currentWorker.terminated).toBe(true);
+
+        postMessageBehavior.throwOnPost = null;
+        const second = client.materializePacks([]);
+        const secondTaskId = (currentWorker.posted[0] as { taskId: string }).taskId;
+        emitResult(currentWorker, secondTaskId, { kind: "materialized", files: [] });
+        await expect(second).resolves.toEqual([]);
     });
 });

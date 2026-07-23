@@ -29,6 +29,7 @@ export type TableIndexSpec = {
     name: string;
     columns: string[];
     unique?: boolean;
+    where?: string;
 };
 
 export type TableForeignKeySpec = {
@@ -288,6 +289,17 @@ export const TABLE_SPECS: TableSpec[] = [
             { name: "idx_upload_collection_status", columns: ["status"] },
             { name: "idx_upload_collection_created_at", columns: ["created_at"] },
             { name: "idx_upload_collection_bundle_id", columns: ["bundle_id"] },
+            // Last-resort guard against duplicate non-superseded physical
+            // collections for a bundle. The single-flight lock in UploadService
+            // is the primary protection; this index prevents a double-created
+            // collection from ever persisting. Partial (superseded = 0) so the
+            // supersede-then-recreate replacement flow can coexist.
+            {
+                name: "idx_upload_collection_bundle_ordinal",
+                columns: ["bundle_id", "ordinal"],
+                unique: true,
+                where: '"superseded" = 0',
+            },
         ],
         foreignKeys: [
             {

@@ -65,6 +65,7 @@ export class UploadService {
     private readonly scheduler: UploadScheduler;
     private readonly preparationWorker: PreparationWorkerClient;
     private readonly notifiedFailures = new Set<string>();
+    private readonly bundleInitializations = new Map<string, Promise<unknown>>();
     /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
     private readonly draftSources = new Map<string, UploadSourceFile>();
     private readonly pendingBundleProgress = new Map<string, Set<string>>();
@@ -430,7 +431,11 @@ export class UploadService {
             bundleId,
             stage: "resolve-failed-collection",
         };
-        return withLoggedError(
+        // Serialize against bundle initialization: both create physical
+        // collections for the same bundle and must not interleave.
+        const existing = this.bundleInitializations.get(bundleId);
+        if (existing) return existing;
+        const task = withLoggedError(
             this.kd.logger,
             "UploadService:replaceFailedCollection",
             context,
@@ -454,16 +459,31 @@ export class UploadService {
                 });
                 await this.scheduler.removeCollection(failed.id);
                 const plan = JSON.parse(bundle.planJson) as PersistedBundlePlan;
-                await this.createBundleCollection(bundle, plan, failed.ordinal);
-                Object.assign(context, { stage: "activate-replacement" });
+                // Supersede before creating the replacement so the partial unique
+                // index on (bundle_id, ordinal) WHERE superseded = 0 does not
+                // reject the new row. Roll back if creation fails so the failed
+                // collection remains visible for a later retry.
                 this.repository.supersedeCollection(failed.id);
+                try {
+                    await this.createBundleCollection(bundle, plan, failed.ordinal);
+                } catch (error) {
+                    this.repository.restoreSupersededCollection(failed.id);
+                    throw error;
+                }
+                Object.assign(context, { stage: "activate-replacement" });
                 this.repository.queueBundle(bundle.id);
                 this.notifiedFailures.delete(bundle.id);
                 await this.emitUpdate(bundle.id);
                 void this.scheduler.schedule();
                 return this.repository.getItem(bundle.id);
             },
-        );
+        ).finally(() => {
+            if (this.bundleInitializations.get(bundleId) === task) {
+                this.bundleInitializations.delete(bundleId);
+            }
+        });
+        this.bundleInitializations.set(bundleId, task);
+        return task;
     }
 
     public hasActiveTransfers() {
@@ -638,17 +658,31 @@ export class UploadService {
         });
     }
 
-    private async initializeBundle(bundle: UploadBundleRow, plan?: PersistedBundlePlan) {
+    private initializeBundle(bundle: UploadBundleRow, plan?: PersistedBundlePlan) {
+        // Single-flight per bundle: concurrent resume requests for the same
+        // bundle share one in-flight initialization so two callers cannot both
+        // decide "ordinal N is missing" and create a duplicate collection.
+        const existing = this.bundleInitializations.get(bundle.id);
+        if (existing) return existing;
+        const task = this.initializeBundleInternal(bundle, plan).finally(() => {
+            if (this.bundleInitializations.get(bundle.id) === task) {
+                this.bundleInitializations.delete(bundle.id);
+            }
+        });
+        this.bundleInitializations.set(bundle.id, task);
+        return task;
+    }
+
+    private async initializeBundleInternal(bundle: UploadBundleRow, plan?: PersistedBundlePlan) {
         const resolvedPlan = plan ?? (JSON.parse(bundle.planJson) as PersistedBundlePlan);
-        const existingOrdinals = new Set(
-            this.repository
-                .listBundleCollections(bundle.id)
-                .map((collection) => collection.ordinal),
-        );
         this.turnstile.beginSession(this.kd.window.main.window);
         try {
             for (let ordinal = 0; ordinal < resolvedPlan.collections.length; ordinal += 1) {
-                if (existingOrdinals.has(ordinal)) continue;
+                // Re-check on every iteration: even within the single-flight lock
+                // the partial unique index is the hard guard, but this avoids
+                // needless work (and a wasted turnstile/API attempt) when an
+                // ordinal was already created by an earlier completed run.
+                if (this.repository.hasBundleCollectionOrdinal(bundle.id, ordinal)) continue;
                 await this.createBundleCollection(bundle, resolvedPlan, ordinal);
                 this.repository.updateBundleInitialization(bundle.id, ordinal + 1);
                 await this.emitUpdate(bundle.id);

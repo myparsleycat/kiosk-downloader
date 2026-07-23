@@ -22,9 +22,8 @@ type QueuedTask = {
 };
 
 type ActiveTask = {
+    task: QueuedTask;
     worker: Worker;
-    resolve: (result: PreparationResult) => void;
-    reject: (error: unknown) => void;
 };
 
 export class PreparationWorkerClient {
@@ -67,7 +66,7 @@ export class PreparationWorkerClient {
             task.reject(new Error("preparation worker destroyed"));
         }
         if (this.active) {
-            this.active.reject(new Error("preparation worker destroyed"));
+            this.active.task.reject(new Error("preparation worker destroyed"));
             void this.active.worker.terminate().catch(() => {});
             this.active = null;
         }
@@ -91,29 +90,27 @@ export class PreparationWorkerClient {
         if (this.active || this.destroyed) return;
         const task = this.pending.shift();
         if (!task) return;
-        await this.execute(task);
-        void this.drain();
+        try {
+            task.resolve(await this.execute(task));
+        } catch (error) {
+            task.reject(error);
+        } finally {
+            this.active = null;
+            void this.drain();
+        }
     }
 
-    private execute(task: QueuedTask): Promise<void> {
-        const { request, onProgress, resolve, reject } = task;
+    private execute(task: QueuedTask): Promise<PreparationResult> {
+        const { request, onProgress } = task;
+        // createWorker and postMessage can throw synchronously (bad worker path
+        // in a packaged build, structured-clone failure). Wrap them so the task
+        // rejects and the queue keeps draining instead of stalling forever.
         const worker = createWorker({});
-        return new Promise<void>((done) => {
-            this.active = {
-                worker,
-                resolve: (result) => {
-                    resolve(result);
-                    done();
-                },
-                reject: (error) => {
-                    reject(error);
-                    done();
-                },
-            };
+        return new Promise<PreparationResult>((resolve, reject) => {
+            this.active = { task, worker };
 
             const cleanup = () => {
                 worker.removeAllListeners();
-                this.active = null;
             };
 
             worker.on("message", (message: PreparationWorkerMessage) => {
@@ -126,7 +123,6 @@ export class PreparationWorkerClient {
                     cleanup();
                     void worker.terminate().catch(() => {});
                     resolve(message.result);
-                    done();
                     return;
                 }
                 cleanup();
@@ -137,7 +133,6 @@ export class PreparationWorkerClient {
                         stack: message.error.stack,
                     }),
                 );
-                done();
             });
 
             worker.on("error", (error: Error) => {
@@ -152,11 +147,9 @@ export class PreparationWorkerClient {
                 );
                 cleanup();
                 reject(error);
-                done();
             });
 
             worker.on("exit", (code: number) => {
-                if (!this.active) return;
                 this.logger.error(
                     {
                         action: "upload-preparation-worker-exit",
@@ -170,10 +163,15 @@ export class PreparationWorkerClient {
                 reject(
                     new Error(`업로드 준비 worker가 비정상 종료되었습니다 (exit code ${code}).`),
                 );
-                done();
             });
 
-            worker.postMessage(request);
+            try {
+                worker.postMessage(request);
+            } catch (error) {
+                cleanup();
+                void worker.terminate().catch(() => {});
+                reject(error);
+            }
         });
     }
 }

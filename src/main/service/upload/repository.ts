@@ -187,6 +187,16 @@ export class UploadRepository {
         );
     }
 
+    public hasBundleCollectionOrdinal(bundleId: string, ordinal: number): boolean {
+        return Boolean(
+            this.kd.lib.db.get<{ id: string }>(
+                `SELECT "id" FROM "upload_collection"
+                 WHERE "bundle_id" = ? AND "ordinal" = ? AND "superseded" = 0 LIMIT 1`,
+                [bundleId, ordinal],
+            ),
+        );
+    }
+
     public getBundleByCollection(collectionId: string): UploadBundleRow | null {
         return this.kd.lib.db.get<UploadBundleRow>(
             bundleSelectSql() +
@@ -392,6 +402,13 @@ export class UploadRepository {
     public supersedeCollection(collectionId: string) {
         this.kd.lib.db.run(
             `UPDATE "upload_collection" SET "superseded" = 1, "updated_at" = ? WHERE "id" = ?`,
+            [nowIso(), collectionId],
+        );
+    }
+
+    public restoreSupersededCollection(collectionId: string) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_collection" SET "superseded" = 0, "updated_at" = ? WHERE "id" = ?`,
             [nowIso(), collectionId],
         );
     }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { KioskDownloader } from "../..";
+import type { CreateUploadRecord } from "./types";
 
 import { DatabaseClient } from "../../lib/db/client";
 import { UploadRepository } from "./repository";
@@ -383,5 +384,70 @@ describe("UploadRepository bundles", () => {
             },
         });
         expect(Object.keys(snapshot!.progress).sort()).toEqual(["a.txt", "b.txt"]);
+    });
+});
+
+describe("UploadRepository bundle-ordinal uniqueness", () => {
+    const baseUpload: CreateUploadRecord = {
+        created: {
+            collectionUuid: Buffer.alloc(16, 1),
+            uploadToken: "token",
+            root: { id: Buffer.alloc(16), name: "", files: [], children: [] },
+        },
+        options: {
+            name: "Bundle (1/1)",
+            description: "",
+            password: "",
+            expires: Date.now() + 60_000,
+        },
+        files: [],
+        segmentSize: 16,
+        tree: { type: "dir", id: "root", name: "", entries: [] },
+    };
+
+    it("rejects a second active collection with the same (bundle_id, ordinal)", async () => {
+        const db = new DatabaseClient(":memory:");
+        await db.reconcile();
+        const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
+        repo.insertBundle({
+            id: "bundle",
+            mode: "integrated",
+            name: "Bundle",
+            description: "",
+            password: "",
+            treeJson: JSON.stringify(baseUpload.tree),
+            planJson: JSON.stringify({ collections: [] }),
+            physicalCount: 1,
+            expires: Date.now() + 60_000,
+        });
+
+        repo.insertUpload({ ...baseUpload, bundleId: "bundle", ordinal: 0 });
+        expect(() =>
+            repo.insertUpload({ ...baseUpload, bundleId: "bundle", ordinal: 0 }),
+        ).toThrow();
+    });
+
+    it("allows a new active collection once the previous one is superseded", async () => {
+        const db = new DatabaseClient(":memory:");
+        await db.reconcile();
+        const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
+        repo.insertBundle({
+            id: "bundle",
+            mode: "integrated",
+            name: "Bundle",
+            description: "",
+            password: "",
+            treeJson: JSON.stringify(baseUpload.tree),
+            planJson: JSON.stringify({ collections: [] }),
+            physicalCount: 1,
+            expires: Date.now() + 60_000,
+        });
+
+        const firstId = repo.insertUpload({ ...baseUpload, bundleId: "bundle", ordinal: 0 });
+        repo.supersedeCollection(firstId);
+        // Superseded row drops out of the partial index, so the replacement inserts cleanly.
+        repo.insertUpload({ ...baseUpload, bundleId: "bundle", ordinal: 0 });
+        expect(repo.listBundleCollections("bundle")).toHaveLength(1);
+        expect(repo.hasBundleCollectionOrdinal("bundle", 0)).toBe(true);
     });
 });
