@@ -68,6 +68,10 @@ export class TransferProgressBatcher {
             this.onError(error, collectionId);
         } finally {
             this.updatesInFlight.delete(collectionId);
+            // Flush again immediately when progress arrived during the in-flight emit.
+            if ((this.dirtyFileIdsByCollection.get(collectionId)?.size ?? 0) > 0) {
+                void this.flushOnce(collectionId);
+            }
         }
     }
 

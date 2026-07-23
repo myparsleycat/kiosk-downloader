@@ -4,6 +4,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DownloadTransferMetrics } from "./metrics";
 
+describe("DownloadTransferMetrics live progress", () => {
+    it("advances live bytes on transfer before disk write batches", () => {
+        const metrics = new DownloadTransferMetrics();
+        metrics.registerFile("collection", "file", 1000);
+
+        metrics.setChunkTransferProgress("file", 0, 400);
+        expect(metrics.sampleFile("file", 1000).liveDownloaded).toBe(1400);
+        expect(metrics.getCollectionSnapshot("collection").activeTransferredBytes).toBe(400);
+
+        metrics.setChunkWriteProgress("file", 0, 200);
+        expect(metrics.sampleFile("file", 1000).liveDownloaded).toBe(1400);
+
+        metrics.setChunkWriteProgress("file", 0, 500);
+        expect(metrics.sampleFile("file", 1000).liveDownloaded).toBe(1500);
+
+        metrics.clearChunk("file", 0, 1500);
+        expect(metrics.sampleFile("file", 1500).liveDownloaded).toBe(1500);
+        expect(metrics.getCollectionSnapshot("collection").activeTransferredBytes).toBe(0);
+    });
+});
+
 describe("DownloadTransferMetrics speed EMA", () => {
     beforeEach(() => {
         vi.useFakeTimers();

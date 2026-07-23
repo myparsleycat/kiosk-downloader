@@ -126,6 +126,9 @@ export class DownloadScheduler {
             onChunkSettled: () => {
                 void this.schedule();
             },
+            onProgress: (collectionId, fileId) => {
+                this.progressBatcher.mark(collectionId, fileId);
+            },
         });
         this.transferPool = new TransferChunkPool({
             kd: this.kd,
@@ -134,6 +137,9 @@ export class DownloadScheduler {
             metrics: this.metrics,
             onChunkSettled: () => {
                 void this.schedule();
+            },
+            onProgress: (collectionId, fileId) => {
+                this.progressBatcher.mark(collectionId, fileId);
             },
         });
     }
@@ -848,9 +854,11 @@ export class DownloadScheduler {
                     {
                         onTransferProgress: (transferredBytes) => {
                             this.metrics.setChunkTransferProgress(file.id, 0, transferredBytes);
+                            this.progressBatcher.mark(collection.id, file.id);
                         },
                         onWriteProgress: (writtenBytes) => {
                             this.metrics.setChunkWriteProgress(file.id, 0, writtenBytes);
+                            this.progressBatcher.mark(collection.id, file.id);
                         },
                     },
                 );

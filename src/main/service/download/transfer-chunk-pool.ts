@@ -61,6 +61,7 @@ type TransferPoolDeps = {
     repository: DownloadRepository;
     metrics: DownloadTransferMetrics;
     onChunkSettled: () => void;
+    onProgress: (collectionId: string, fileId: string) => void;
 };
 
 function compareWorkItems(a: TransferWorkItem, b: TransferWorkItem) {
@@ -438,6 +439,7 @@ export class TransferChunkPool {
                             chunk.chunkIndex,
                             resumeOffset + transferredBytes,
                         );
+                        this.deps.onProgress(registration.collection.id, registration.file.id);
                     },
                     (phase) => this.slowChunkMonitor.setPhase(transfer.key, phase),
                 );
@@ -460,6 +462,7 @@ export class TransferChunkPool {
                                 chunk.chunkIndex,
                                 writtenBytes,
                             );
+                            this.deps.onProgress(registration.collection.id, registration.file.id);
                         },
                         onWritePhaseChange: (writing) => {
                             this.slowChunkMonitor.setPhase(
