@@ -97,6 +97,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const mode = useUploadDraft((s) => s.mode);
   const addFiles = useUploadDraft((s) => s.addFiles);
   const removeFile = useUploadDraft((s) => s.removeFile);
+  const removeFiles = useUploadDraft((s) => s.removeFiles);
   const renameFile = useUploadDraft((s) => s.renameFile);
   const clearFiles = useUploadDraft((s) => s.clearFiles);
   const setName = useUploadDraft((s) => s.setName);
@@ -279,9 +280,9 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
         setMode("integrated");
         return;
       }
-      for (const file of files.filter((candidate) => candidate.size > MAX_UPLOAD_BYTES)) {
-        removeFile(file.path);
-      }
+      removeFiles(
+        files.filter((candidate) => candidate.size > MAX_UPLOAD_BYTES).map((file) => file.path),
+      );
     }
     setMode(choice);
   };

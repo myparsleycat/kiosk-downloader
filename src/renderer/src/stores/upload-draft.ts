@@ -40,6 +40,7 @@ type UploadDraftState = {
 type UploadDraftActions = {
     addFiles: (files: UploadTreeFile[]) => void;
     removeFile: (path: string) => void;
+    removeFiles: (paths: string[]) => void;
     renameFile: (path: string, newName: string) => Promise<string | null>;
     clearFiles: () => void;
     setName: (name: string) => void;
@@ -78,9 +79,15 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
     },
 
     removeFile: (path) => {
-        const prefix = `${path}/`;
-        const files = get().files.filter((f) => f.path !== path && !f.path.startsWith(prefix));
-        void window.api.invoke("upload:removeDraftSources", [path]);
+        get().removeFiles([path]);
+    },
+
+    removeFiles: (paths) => {
+        if (paths.length === 0) return;
+        const files = get().files.filter(
+            (f) => !paths.some((path) => f.path === path || f.path.startsWith(`${path}/`)),
+        );
+        void window.api.invoke("upload:removeDraftSources", paths);
         set({ files });
     },
 
