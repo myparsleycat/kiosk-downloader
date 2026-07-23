@@ -36,12 +36,17 @@ export class PlanProgressReporter {
     report(progress: Parameters<PreparationProgressHandler>[0], force = false) {
         const now = performance.now();
         const stageChanged = progress.stage !== this.lastStage;
-        const isFinal = progress.stage !== "hashing" || progress.current === progress.total;
+        const bypassThrottle = progress.stage !== "hashing" || progress.current === progress.total;
         const signature = `${progress.stage}:${progress.current}:${progress.total}:${progress.processedBytes ?? ""}`;
         const duplicate = signature === this.lastSignature;
 
         if (!force && duplicate) return;
-        if (!force && !stageChanged && !isFinal && now - this.lastSentAt < this.minIntervalMs) {
+        if (
+            !force &&
+            !stageChanged &&
+            !bypassThrottle &&
+            now - this.lastSentAt < this.minIntervalMs
+        ) {
             return;
         }
         this.lastSentAt = now;
