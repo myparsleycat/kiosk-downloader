@@ -246,7 +246,7 @@ export function UploadList({
                       </ContextMenuItem>
                     ) : null}
                     {(item.shareLink || item.shareValue) && (
-                      <ContextMenuItem onClick={() => handleShareInfo(item)}>
+                      <ContextMenuItem onClick={() => runAction(() => handleShareInfo(item))}>
                         {item.shareValue ? <SaveIcon /> : <CopyIcon />}
                         {item.shareValue ? "공유 정보 저장" : "링크 복사"}
                       </ContextMenuItem>
