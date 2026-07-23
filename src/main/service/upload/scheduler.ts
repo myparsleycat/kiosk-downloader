@@ -108,18 +108,13 @@ export class UploadScheduler {
                     this.progressBatcher.deactivate(collectionId);
                     return;
                 }
-                let hasRunnable = false;
                 for (const fileId of activeFileIds) {
                     const file = this.files.get(fileId);
-                    if (!file || file.paused) {
-                        continue;
+                    if (file && !file.paused) {
+                        return;
                     }
-                    hasRunnable = true;
-                    this.progressBatcher.mark(collectionId, fileId);
                 }
-                if (!hasRunnable) {
-                    this.progressBatcher.deactivate(collectionId);
-                }
+                this.progressBatcher.deactivate(collectionId);
             },
             (error) => {
                 this.kd.logger.error(error, "UploadScheduler:pollProgressUpdates");

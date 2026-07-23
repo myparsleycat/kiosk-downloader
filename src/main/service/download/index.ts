@@ -1056,12 +1056,15 @@ export class DownloadService {
     }
 
     private async emitProgressUpdate(collectionId: string, fileIds: Set<string>) {
+        if (fileIds.size === 0) {
+            return;
+        }
         const collection = this.repository.getCollection(collectionId);
         if (!collection) {
             return;
         }
         if (collection.bundleId) {
-            await this.emitUpdate(collection.bundleId, { sampleSpeeds: true });
+            this.emitBundleProgressUpdate(collection.bundleId);
             return;
         }
 
@@ -1110,6 +1113,26 @@ export class DownloadService {
                     : null,
             elapsedMs: this.scheduler.getCollectionElapsedMs(collectionId),
             updatedAt: Date.parse(collection.updatedAt),
+        };
+        this.kd.ipc.sendToMainWindow("download:progress-update", patch);
+        this.kd.service.transfer.syncMainWindowProgressBar();
+    }
+
+    private emitBundleProgressUpdate(bundleId: string) {
+        const item = this.repository.getItem(bundleId);
+        if (!item) {
+            return;
+        }
+        // Progress map only (no tree) — tree stays on item-update.
+        const enriched = this.enrichItem(item, { sampleSpeeds: true });
+        const patch: DownloadProgressPatch = {
+            id: bundleId,
+            progress: enriched.progress,
+            summary: enriched.summary,
+            status: enriched.status,
+            speedBps: enriched.speedBps ?? null,
+            elapsedMs: enriched.elapsedMs ?? 0,
+            updatedAt: enriched.updatedAt,
         };
         this.kd.ipc.sendToMainWindow("download:progress-update", patch);
         this.kd.service.transfer.syncMainWindowProgressBar();

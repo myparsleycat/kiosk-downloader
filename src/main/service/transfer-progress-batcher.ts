@@ -49,7 +49,7 @@ export class TransferProgressBatcher {
             return;
         }
         const pending = this.dirtyFileIdsByCollection.get(collectionId);
-        if (!pending) {
+        if (!pending || pending.size === 0) {
             return;
         }
 

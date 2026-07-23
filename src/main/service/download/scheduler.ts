@@ -114,10 +114,6 @@ export class DownloadScheduler {
                 const activeFileIds = this.activeFilesByCollection.get(collectionId);
                 if (!activeFileIds || activeFileIds.size === 0) {
                     this.progressBatcher.deactivate(collectionId);
-                    return;
-                }
-                for (const fileId of activeFileIds) {
-                    this.progressBatcher.mark(collectionId, fileId);
                 }
             },
             (error) => this.kd.logger.error(error, "DownloadScheduler:emitProgressUpdate"),
