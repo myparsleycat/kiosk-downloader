@@ -894,7 +894,7 @@ export class UploadRepository {
 
     private buildBundleItem(bundle: UploadBundleRow): UploadItem {
         const collections = this.listBundleCollections(bundle.id);
-        const files = collections.flatMap((collection) => this.listFiles(collection.id));
+        const files = this.listBundleFiles(bundle.id);
         const progress: UploadItem["progress"] = {};
         const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
         const packedPhysicalPaths = new Set<string>();
