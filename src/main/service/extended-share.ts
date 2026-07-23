@@ -11,11 +11,12 @@ import {
     EXTENDED_SHARE_INVALID_PASSWORD_ERROR,
     EXTENDED_SHARE_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
+import { EXTENDED_SHARE_PREFIX } from "@shared/share-url";
 import { decode, encode } from "cbor-x";
 
 import { compressZstdSync, decompressZstdSync } from "../lib/zstd";
 
-export const EXTENDED_SHARE_PREFIX = "KDE1.";
+export { EXTENDED_SHARE_PREFIX };
 export const EXTENDED_SHARE_VERSION = 1;
 export const MAX_EXTENDED_SHARE_ENCODED_BYTES = 16 * 1024 * 1024;
 export const MAX_EXTENDED_SHARE_DECOMPRESSED_BYTES = 64 * 1024 * 1024;

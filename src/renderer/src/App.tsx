@@ -1,5 +1,9 @@
 import { cn } from "@renderer/lib/utils";
-import { tryDecodeShareUrlBase64, tryParseDownloadUrl } from "@shared/share-url";
+import {
+  EXTENDED_SHARE_PREFIX,
+  tryDecodeShareUrlBase64,
+  tryParseDownloadUrl,
+} from "@shared/share-url";
 import {
   DownloadIcon,
   LoaderCircleIcon,
@@ -143,7 +147,7 @@ function MainComponent() {
 
       const text = e.clipboardData?.getData("text") ?? "";
       const resolved = (tryDecodeShareUrlBase64(text) ?? text).trim();
-      if (!tryParseDownloadUrl(resolved) && !resolved.startsWith("KDE1.")) return;
+      if (!tryParseDownloadUrl(resolved) && !resolved.startsWith(EXTENDED_SHARE_PREFIX)) return;
 
       e.preventDefault();
       useNewDownloadDraft.getState().setUrl(resolved);

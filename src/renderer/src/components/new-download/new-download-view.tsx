@@ -35,7 +35,11 @@ import {
   isZipInvalidPasswordError,
   isZipPasswordRequiredError,
 } from "@shared/download-errors";
-import { tryDecodeShareUrlBase64, tryParseDownloadUrl } from "@shared/share-url";
+import {
+  EXTENDED_SHARE_PREFIX,
+  tryDecodeShareUrlBase64,
+  tryParseDownloadUrl,
+} from "@shared/share-url";
 import { applyRenamesToTree, basename } from "@shared/tree-rename";
 import { formatSize } from "@shared/utils";
 import { setZipEntries } from "@shared/zip-tree";
@@ -260,7 +264,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const loadCollection = React.useCallback(
     async (trimmedUrl: string, loadPassword?: string) => {
       const parsed = tryParseDownloadUrl(trimmedUrl);
-      const extended = trimmedUrl.startsWith("KDE1.");
+      const extended = trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX);
       if (!parsed && !extended) {
         return;
       }
@@ -350,7 +354,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     if (
       passwordRequired !== true ||
       !password.trim() ||
-      (!tryParseDownloadUrl(trimmedUrl) && !trimmedUrl.startsWith("KDE1."))
+      (!tryParseDownloadUrl(trimmedUrl) && !trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX))
     ) {
       return;
     }
@@ -361,7 +365,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   React.useEffect(() => {
     const trimmedUrl = url.trim();
     const parsed = tryParseDownloadUrl(trimmedUrl);
-    const identity = parsed?.id ?? (trimmedUrl.startsWith("KDE1.") ? trimmedUrl : null);
+    const identity =
+      parsed?.id ?? (trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX) ? trimmedUrl : null);
 
     if (!identity) {
       loadSeqRef.current += 1;
@@ -460,7 +465,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   };
 
   const currentShareId =
-    tryParseDownloadUrl(url.trim())?.id ?? (url.trim().startsWith("KDE1.") ? url.trim() : null);
+    tryParseDownloadUrl(url.trim())?.id ??
+    (url.trim().startsWith(EXTENDED_SHARE_PREFIX) ? url.trim() : null);
   const collectionSynced =
     collection !== null &&
     (collection.provider === "extended"
@@ -557,7 +563,10 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                     onPaste={(e) => {
                       const value = e.clipboardData.getData("text").trim();
                       const resolved = tryDecodeShareUrlBase64(value) ?? value;
-                      if (!tryParseDownloadUrl(resolved) && !resolved.startsWith("KDE1.")) {
+                      if (
+                        !tryParseDownloadUrl(resolved) &&
+                        !resolved.startsWith(EXTENDED_SHARE_PREFIX)
+                      ) {
                         return;
                       }
                       e.preventDefault();
