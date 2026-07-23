@@ -1325,30 +1325,41 @@ export class DownloadService {
         const coordinator = this.reassemblyCoordinators.get(collection.bundleId);
         if (!coordinator) return;
         if (!coordinator.isPieceManaged(collection.id, file.remoteId)) return;
+        const bundleId = collection.bundleId;
         void coordinator
             .onPieceFileSettled(collection.id, file.remoteId)
             .then((result) => {
                 if (result.publishedPaths.length > 0) {
-                    void this.emitUpdate(collection.bundleId!);
+                    void this.emitUpdate(bundleId);
                 }
             })
             .catch(async (error) => {
                 this.kd.logger.error(
                     {
                         action: "bundle-reassembly",
-                        bundleId: collection.bundleId!,
+                        bundleId,
                         message: error instanceof Error ? error.message : String(error),
                     },
                     "DownloadService:handleFileFinalized",
                 );
                 await coordinator.teardown();
-                this.reassemblyCoordinators.delete(collection.bundleId!);
+                this.reassemblyCoordinators.delete(bundleId);
                 this.repository.markBundleStatus(
-                    collection.bundleId!,
+                    bundleId,
                     "error",
                     error instanceof Error ? error.message : String(error),
                 );
-                void this.emitUpdate(collection.bundleId!);
+                void this.emitUpdate(bundleId);
+            })
+            .catch((error) => {
+                this.kd.logger.error(
+                    {
+                        action: "bundle-reassembly-cleanup",
+                        bundleId,
+                        message: error instanceof Error ? error.message : String(error),
+                    },
+                    "DownloadService:handleFileFinalized",
+                );
             });
     }
 
