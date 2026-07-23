@@ -22,8 +22,11 @@ export async function reassembleExtendedFile(options: {
             if (piece.offset !== nextOffset) {
                 throw new Error("분할 파일 조각 범위가 연속적이지 않습니다.");
             }
-            const stat = await fse.stat(piece.path);
             const sourceOffset = piece.sourceOffset ?? 0;
+            const stat = await fse.stat(piece.path).catch(() => null);
+            if (!stat) {
+                throw new Error("분할 파일 조각이 준비되지 않았습니다.");
+            }
             if (sourceOffset + piece.size > stat.size) {
                 throw new Error("분할 파일 조각 크기가 일치하지 않습니다.");
             }

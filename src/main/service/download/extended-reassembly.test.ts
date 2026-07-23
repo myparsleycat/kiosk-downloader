@@ -60,6 +60,20 @@ describe("reassembleExtendedFile", () => {
         expect(await fse.pathExists(finalPath)).toBe(false);
     });
 
+    it("reports a clear error when a piece file is missing", async () => {
+        const dir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-test-"));
+        testDirs.push(dir);
+
+        await expect(
+            reassembleExtendedFile({
+                pieces: [{ path: path.join(dir, "missing"), offset: 0, size: 4 }],
+                partPath: path.join(dir, "staging", "result.part"),
+                finalPath: path.join(dir, "output", "result.bin"),
+                expectedSize: 4,
+            }),
+        ).rejects.toThrow("준비되지 않았습니다");
+    });
+
     it("publishes a verified zero-byte internally renamed file", async () => {
         const dir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-test-"));
         testDirs.push(dir);
