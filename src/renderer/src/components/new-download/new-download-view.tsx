@@ -556,7 +556,9 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                     onPaste={(e) => {
                       const value = e.clipboardData.getData("text").trim();
                       const resolved = tryDecodeShareUrlBase64(value) ?? value;
-                      if (!tryParseDownloadUrl(resolved)) return;
+                      if (!tryParseDownloadUrl(resolved) && !resolved.startsWith("KDE1.")) {
+                        return;
+                      }
                       e.preventDefault();
                       setUrl(resolved);
                     }}

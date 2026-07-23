@@ -142,11 +142,11 @@ function MainComponent() {
       }
 
       const text = e.clipboardData?.getData("text") ?? "";
-      const resolved = tryDecodeShareUrlBase64(text) ?? text;
-      if (!tryParseDownloadUrl(resolved.trim())) return;
+      const resolved = (tryDecodeShareUrlBase64(text) ?? text).trim();
+      if (!tryParseDownloadUrl(resolved) && !resolved.startsWith("KDE1.")) return;
 
       e.preventDefault();
-      useNewDownloadDraft.getState().setUrl(resolved.trim());
+      useNewDownloadDraft.getState().setUrl(resolved);
       setTab("new");
     };
 
