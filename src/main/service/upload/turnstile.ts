@@ -263,7 +263,10 @@ export class TurnstileSolver {
     public endSession() {
         this.sessionActive = false;
         this.sessionParent = undefined;
-        void this.destroyWindow(this.activeWindow);
+        const window = this.activeWindow;
+        this.activeWindow = null;
+        this.activeSession = null;
+        void this.destroyWindow(window);
     }
 
     // Open (or reuse) a modal child window on the kio.ac origin, render/reset a
@@ -300,7 +303,10 @@ export class TurnstileSolver {
     public destroy() {
         this.sessionActive = false;
         this.sessionParent = undefined;
-        void this.destroyWindow(this.activeWindow);
+        const window = this.activeWindow;
+        this.activeWindow = null;
+        this.activeSession = null;
+        void this.destroyWindow(window);
     }
 
     private async ensureWindow(
