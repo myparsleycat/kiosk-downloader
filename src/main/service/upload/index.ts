@@ -1,18 +1,14 @@
-import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Readable } from "node:stream";
 
 import { formatCompatShareText } from "@shared/compat-share-text";
 import { buildDirTreeFromFiles } from "@shared/dir-tree";
 import {
-    createExtendedUploadPieces,
     createExtendedUploadPlan,
     EXTENDED_UPLOAD_DEFAULT_LIMITS,
-    packSizedItems,
     type ExtendedUploadMode,
 } from "@shared/extended-upload-plan";
-import { validateNodeName } from "@shared/tree-rename";
 import type {
     CreateUploadPayload,
     ExpandPathsResult,
@@ -40,20 +36,14 @@ import { toOsProgressTransfer } from "../os-progress-bar";
 import { showSaveDialog } from "../util";
 import { KioUploadClient } from "./kio-upload-client";
 import { UploadTransferMetrics } from "./metrics";
+import { pieceToPersistedFile } from "./preparation-core";
+import { PreparationWorkerClient } from "./preparation-worker-client";
 import { UploadRepository } from "./repository";
 import { UploadScheduler } from "./scheduler";
-import {
-    createDeterministicPackArtifacts,
-    hashFilesBounded,
-    isPackCandidate,
-    materializeSmallFilePack,
-    PACK_ALGORITHM_VERSION,
-    PACK_POLICY_V2,
-    type PersistedBundleFile,
-    type PersistedBundlePlan,
-} from "./small-file-pack";
+import { type PersistedBundlePlan } from "./small-file-pack";
 import { TurnstileSolver } from "./turnstile";
 import { UPLOAD_SEGMENT_SIZE } from "./types";
+import { isKioskCompatiblePath } from "./upload-path";
 
 const KDS_FILTERS = [{ name: "Kiosk Extended Share", extensions: ["kds"] }];
 const COMPAT_SHARE_FILTERS = [{ name: "Text", extensions: ["txt"] }];
@@ -73,6 +63,7 @@ export class UploadService {
     private readonly metrics = new UploadTransferMetrics();
     private readonly turnstile: TurnstileSolver;
     private readonly scheduler: UploadScheduler;
+    private readonly preparationWorker: PreparationWorkerClient;
     private readonly notifiedFailures = new Set<string>();
     /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
     private readonly draftSources = new Map<string, UploadSourceFile>();
@@ -96,6 +87,7 @@ export class UploadService {
                 await this.emitProgressUpdate(id, fileIds);
             },
         );
+        this.preparationWorker = new PreparationWorkerClient(kd.logger);
     }
 
     public async solveTurnstile(): Promise<string> {
@@ -528,6 +520,7 @@ export class UploadService {
             this.bundleProgressFlushTimer = null;
         }
         this.pendingBundleProgress.clear();
+        this.preparationWorker.destroy();
         this.scheduler.destroy();
         this.turnstile.destroy();
         this.clearDraftSources();
@@ -634,89 +627,13 @@ export class UploadService {
 
     private async createIntegratedBundlePlan(
         files: UploadSourceFile[],
-        sourcesByPath: Map<string, UploadSourceFile>,
+        _sourcesByPath: Map<string, UploadSourceFile>,
         bundleId: string,
     ): Promise<PersistedBundlePlan> {
-        const pieces = createExtendedUploadPieces(files, "integrated");
-        const hashPaths = new Set<string>();
-        for (const piece of pieces) {
-            const source = sourcesByPath.get(piece.sourcePath);
-            if (!source) {
-                throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${piece.sourcePath}`);
-            }
-            if (
-                piece.pieceCount > 1 ||
-                isPackCandidate({ size: piece.length, logicalSize: piece.sourceSize })
-            ) {
-                hashPaths.add(source.fsPath);
-            }
-        }
-        this.kd.ipc.sendToMainWindow("upload:plan-progress", {
-            stage: "hashing",
-            current: 0,
-            total: hashPaths.size,
-        });
-        const hashesByFsPath = await hashFilesBounded(
-            hashPaths,
-            hashFile,
-            undefined,
-            (current, total) => {
-                this.kd.ipc.sendToMainWindow("upload:plan-progress", {
-                    stage: "hashing",
-                    current,
-                    total,
-                });
-            },
-        );
-        const hashesByLogicalPath = new Map<string, string>();
-        for (const file of files) {
-            const digest = hashesByFsPath.get(file.fsPath);
-            if (digest) hashesByLogicalPath.set(file.path, digest);
-        }
-
-        this.kd.ipc.sendToMainWindow("upload:plan-progress", {
-            stage: "packing",
-            current: 0,
-            total: 1,
-        });
-        const physicalFiles: PersistedBundleFile[] = pieces.map((piece) => {
-            const source = sourcesByPath.get(piece.sourcePath);
-            if (!source) {
-                throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${piece.sourcePath}`);
-            }
-            return pieceToPersistedFile(
-                source,
-                piece,
-                bundleId,
-                hashesByLogicalPath.get(piece.sourcePath),
-            );
-        });
-
         const packDir = path.join(app.getPath("userData"), "upload-packs", bundleId);
-        const artifacts = createDeterministicPackArtifacts(physicalFiles, packDir);
-        this.kd.ipc.sendToMainWindow("upload:plan-progress", {
-            stage: "packing",
-            current: 1,
-            total: 1,
+        return this.preparationWorker.planIntegrated({ bundleId, packDir, files }, (progress) => {
+            this.kd.ipc.sendToMainWindow("upload:plan-progress", progress);
         });
-        const collections = packSizedItems(
-            artifacts.map((file) => ({
-                ...file,
-                size: file.size,
-                sortKey: file.packEntries
-                    ? `pack:${file.path}`
-                    : `direct:${file.logicalPath ?? file.path}:${file.sourceOffset ?? 0}:${file.size}`,
-            })),
-            EXTENDED_UPLOAD_DEFAULT_LIMITS,
-        );
-
-        return {
-            version: PACK_ALGORITHM_VERSION,
-            packPolicy: { ...PACK_POLICY_V2 },
-            collections: collections.map((collection) => ({
-                files: collection.items.map(({ sortKey: _sortKey, ...file }) => file),
-            })),
-        };
     }
 
     private async initializeBundle(bundle: UploadBundleRow) {
@@ -806,10 +723,21 @@ export class UploadService {
         plan: PersistedBundlePlan,
         ordinal: number,
     ) {
+        const collectionFiles = plan.collections[ordinal].files;
+        // Materialize all small-file packs for this collection in the worker so
+        // source hashing and pack writes stay off the main event loop.
+        const packFiles = collectionFiles.filter((file) => file.packEntries);
+        const materialized = await this.preparationWorker.materializePacks(packFiles);
+        const materializedByPath = new Map(materialized.map((file) => [file.path, file] as const));
+
         const prepared: UploadSourceFile[] = [];
-        for (const [fileIndex, file] of plan.collections[ordinal].files.entries()) {
+        for (const [fileIndex, file] of collectionFiles.entries()) {
             if (file.packEntries) {
-                prepared.push(await materializeSmallFilePack(file));
+                const materializedFile = materializedByPath.get(file.path);
+                if (!materializedFile) {
+                    throw new Error(`묶음 파일 생성 결과를 찾을 수 없습니다: ${file.path}`);
+                }
+                prepared.push(materializedFile);
                 continue;
             }
             const logicalPath = file.logicalPath ?? file.path;
@@ -822,12 +750,14 @@ export class UploadService {
                 continue;
             }
 
+            if (!file.logicalSha256) {
+                throw new Error(`통합 업로드 해시가 누락되었습니다: ${logicalPath}`);
+            }
             const physicalPath = `kde_${bundle.id.replaceAll("-", "")}/${ordinal}_${fileIndex}`;
             prepared.push({
                 ...file,
                 path: physicalPath,
                 name: path.basename(physicalPath),
-                logicalSha256: file.logicalSha256 ?? (await hashFile(file.fsPath)),
             });
         }
         return prepared;
@@ -1234,48 +1164,6 @@ export class UploadService {
             );
         });
     }
-}
-
-async function hashFile(filePath: string) {
-    const hash = createHash("sha256");
-    for await (const chunk of createReadStream(filePath)) {
-        hash.update(chunk as Buffer);
-    }
-    return hash.digest("hex");
-}
-
-function pieceToPersistedFile(
-    source: UploadSourceFile,
-    piece: {
-        sourcePath: string;
-        sourceSize: number;
-        sourceIndex: number;
-        pieceIndex: number;
-        pieceCount: number;
-        offset: number;
-        length: number;
-    },
-    bundleId: string,
-    logicalSha256?: string,
-): PersistedBundleFile {
-    const physicalPath =
-        piece.pieceCount === 1
-            ? piece.sourcePath
-            : `.__kde_${bundleId}/${piece.sourceIndex}.${piece.pieceIndex}`;
-    return {
-        ...source,
-        path: physicalPath,
-        name: path.basename(physicalPath),
-        size: piece.length,
-        sourceOffset: piece.offset,
-        logicalPath: piece.sourcePath,
-        logicalSize: piece.sourceSize,
-        logicalSha256,
-    };
-}
-
-function isKioskCompatiblePath(filePath: string) {
-    return filePath.split("/").every((segment) => validateNodeName(segment) == null);
 }
 
 const IGNORED_FOLDER_SCAN_BASENAMES = new Set([".ds_store", "thumbs.db", "desktop.ini"]);

@@ -316,6 +316,10 @@ export type UploadPlanProgress = {
     stage: "hashing" | "packing";
     current: number;
     total: number;
+    /** Bytes processed so far during hashing. Only present on the hashing stage. */
+    processedBytes?: number;
+    /** Total bytes to hash across all hashing candidates. Only present on the hashing stage. */
+    totalBytes?: number;
 };
 
 export type UploadSegmentDedupSnapshot = {

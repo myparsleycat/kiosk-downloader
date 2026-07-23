@@ -89,7 +89,8 @@ export function createDeterministicPackArtifacts(
     }
 
     const instances = assignPackInstances(candidates);
-    const leaves = partitionByHashPrefix(instances, 0);
+    const totalBytes = instances.reduce((sum, instance) => sum + instance.file.size, 0);
+    const leaves = partitionByHashPrefix(instances, 0, totalBytes);
     const packed = leaves.flatMap((leaf): PersistedBundleFile[] => {
         if (leaf.length === 1) return [leaf[0]!.file];
         return [materializePackArtifact(leaf, packDir)];
@@ -261,10 +262,13 @@ function assignPackInstances(candidates: PersistedBundleFile[]): PackInstance[] 
     return instances;
 }
 
-function partitionByHashPrefix(instances: PackInstance[], depth: number): PackInstance[][] {
+function partitionByHashPrefix(
+    instances: PackInstance[],
+    depth: number,
+    totalBytes: number,
+): PackInstance[][] {
     if (instances.length === 0) return [];
-    const total = instances.reduce((sum, instance) => sum + instance.file.size, 0);
-    if (total <= SMALL_FILE_PACK_BYTES) return [instances];
+    if (totalBytes <= SMALL_FILE_PACK_BYTES) return [instances];
     // Guard the pack cap as a hard invariant even on a (cryptographically
     // improbable) placement-key collision at the full 256-bit depth: fall back
     // to direct uploads rather than emit an oversized leaf.
@@ -272,18 +276,28 @@ function partitionByHashPrefix(instances: PackInstance[], depth: number): PackIn
 
     const zero: PackInstance[] = [];
     const one: PackInstance[] = [];
+    let zeroBytes = 0;
+    let oneBytes = 0;
     for (const instance of instances) {
-        if (getPlacementBit(instance.placementKey, depth) === 0) zero.push(instance);
-        else one.push(instance);
+        if (getPlacementBit(instance.placementKey, depth) === 0) {
+            zero.push(instance);
+            zeroBytes += instance.file.size;
+        } else {
+            one.push(instance);
+            oneBytes += instance.file.size;
+        }
     }
 
     // A shared prefix bit is normal, not a collision — keep descending into the
     // non-empty side. Only a fully-exhausted digest at MAX_TRIE_DEPTH forces a
     // multi-instance leaf, which is unreachable for unique placement keys.
-    if (zero.length === 0) return partitionByHashPrefix(one, depth + 1);
-    if (one.length === 0) return partitionByHashPrefix(zero, depth + 1);
+    if (zero.length === 0) return partitionByHashPrefix(one, depth + 1, oneBytes);
+    if (one.length === 0) return partitionByHashPrefix(zero, depth + 1, zeroBytes);
 
-    return [...partitionByHashPrefix(zero, depth + 1), ...partitionByHashPrefix(one, depth + 1)];
+    return [
+        ...partitionByHashPrefix(zero, depth + 1, zeroBytes),
+        ...partitionByHashPrefix(one, depth + 1, oneBytes),
+    ];
 }
 
 function materializePackArtifact(leaf: PackInstance[], packDir: string): PersistedBundleFile {

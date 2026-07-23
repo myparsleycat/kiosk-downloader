@@ -123,25 +123,34 @@ export function packSizedItems<T>(
     const sorted = items.toSorted(compare);
 
     for (const item of sorted) {
-        const collection = collections
-            .filter(
-                (candidate) =>
-                    candidate.items.length < limits.maxFiles &&
-                    candidate.totalSize + item.size <= limits.maxBytes,
-            )
-            .reduce<SizedPackCollection<T> | undefined>((best, candidate) => {
-                if (!best) return candidate;
-                const candidateRemaining = limits.maxBytes - candidate.totalSize - item.size;
-                const bestRemaining = limits.maxBytes - best.totalSize - item.size;
-                if (candidateRemaining !== bestRemaining) {
-                    return candidateRemaining < bestRemaining ? candidate : best;
-                }
-                return candidate.index < best.index ? candidate : best;
-            }, undefined);
+        let best: SizedPackCollection<T> | undefined;
+        let bestRemaining = 0;
+        for (const candidate of collections) {
+            if (candidate.items.length >= limits.maxFiles) continue;
+            if (candidate.totalSize + item.size > limits.maxBytes) continue;
 
-        if (collection) {
-            collection.items.push(item);
-            collection.totalSize += item.size;
+            const candidateRemaining = limits.maxBytes - candidate.totalSize - item.size;
+            if (!best) {
+                best = candidate;
+                bestRemaining = candidateRemaining;
+                continue;
+            }
+            if (candidateRemaining !== bestRemaining) {
+                if (candidateRemaining < bestRemaining) {
+                    best = candidate;
+                    bestRemaining = candidateRemaining;
+                }
+                continue;
+            }
+            if (candidate.index < best.index) {
+                best = candidate;
+                bestRemaining = candidateRemaining;
+            }
+        }
+
+        if (best) {
+            best.items.push(item);
+            best.totalSize += item.size;
             continue;
         }
 
