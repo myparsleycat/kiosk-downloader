@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type {
     DirNode,
     TransferProgressSummary,
+    UploadFileProgress,
     UploadItem,
     UploadStatus,
     FileUploadStatus,
@@ -11,6 +12,7 @@ import type {
 import type { KioskDownloader } from "../..";
 import type {
     CreateUploadRecord,
+    UploadBundleRow,
     UploadChunkRow,
     UploadCollectionRow,
     UploadFileRow,
@@ -61,8 +63,8 @@ export class UploadRepository {
                  ("id", "name", "description", "password_plain", "share_id", "share_link",
                   "collection_uuid", "upload_token", "tree_json", "expires", "status",
                   "segment_size",
-                  "created_at", "updated_at", "elapsed_ms", "error")
-                 VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'queued', ?, ?, ?, 0, NULL)`,
+                  "created_at", "updated_at", "elapsed_ms", "error", "bundle_id", "ordinal", "superseded")
+                 VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'queued', ?, ?, ?, 0, NULL, ?, ?, 0)`,
                 [
                     collectionId,
                     record.options.name.slice(0, 100),
@@ -75,6 +77,8 @@ export class UploadRepository {
                     record.segmentSize,
                     timestamp,
                     timestamp,
+                    record.bundleId ?? null,
+                    record.ordinal ?? 0,
                 ],
             );
 
@@ -82,8 +86,9 @@ export class UploadRepository {
                 tx.run(
                     `INSERT INTO "upload_file"
                      ("id", "collection_id", "remote_id", "path", "name", "size", "fs_path", "source_mtime_ms",
-                      "status", "uploaded_bytes", "paused_by_user", "created_at", "updated_at", "error")
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL)`,
+                      "status", "uploaded_bytes", "paused_by_user", "created_at", "updated_at", "error",
+                      "logical_path", "source_offset", "logical_size", "logical_sha256")
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL, ?, ?, ?, ?)`,
                     [
                         file.id,
                         collectionId,
@@ -95,6 +100,10 @@ export class UploadRepository {
                         file.sourceMtimeMs,
                         timestamp,
                         timestamp,
+                        file.logicalPath ?? file.path,
+                        file.sourceOffset ?? 0,
+                        file.logicalSize ?? file.size,
+                        file.logicalSha256 ?? null,
                     ],
                 );
             }
@@ -107,12 +116,305 @@ export class UploadRepository {
         const collections = this.kd.lib.db.all<UploadCollectionRow>(
             collectionSelectSql() + ` ORDER BY "created_at" DESC`,
         );
-        return collections.map((collection) => this.buildItem(collection));
+        return [
+            ...this.listBundles().map((bundle) => this.buildBundleItem(bundle)),
+            ...collections
+                .filter((collection) => !collection.bundleId)
+                .map((collection) => this.buildItem(collection)),
+        ].sort((left, right) => right.createdAt - left.createdAt);
     }
 
     public getItem(collectionId: string): UploadItem | null {
+        const bundle = this.getBundle(collectionId);
+        if (bundle) {
+            return this.buildBundleItem(bundle);
+        }
         const collection = this.getCollection(collectionId);
         return collection ? this.buildItem(collection) : null;
+    }
+
+    public insertBundle(record: {
+        id: string;
+        mode: UploadBundleRow["mode"];
+        name: string;
+        description: string;
+        password: string;
+        treeJson: string;
+        planJson: string;
+        physicalCount: number;
+        expires: number;
+    }) {
+        const timestamp = nowIso();
+        this.kd.lib.db.run(
+            `INSERT INTO "upload_bundle"
+             ("id", "mode", "name", "description", "password_plain", "tree_json", "plan_json",
+              "physical_count", "initialized_count", "share_value", "status", "expires",
+              "created_at", "updated_at", "error")
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'paused', ?, ?, ?, NULL)`,
+            [
+                record.id,
+                record.mode,
+                record.name,
+                record.description,
+                record.password || null,
+                record.treeJson,
+                record.planJson,
+                record.physicalCount,
+                record.expires,
+                timestamp,
+                timestamp,
+            ],
+        );
+    }
+
+    public listBundles(): UploadBundleRow[] {
+        return this.kd.lib.db.all<UploadBundleRow>(
+            bundleSelectSql() + ` ORDER BY "created_at" DESC`,
+        );
+    }
+
+    public getBundle(bundleId: string): UploadBundleRow | null {
+        return this.kd.lib.db.get<UploadBundleRow>(bundleSelectSql() + ` WHERE "id" = ? LIMIT 1`, [
+            bundleId,
+        ]);
+    }
+
+    public listBundleCollections(bundleId: string): UploadCollectionRow[] {
+        return this.kd.lib.db.all<UploadCollectionRow>(
+            collectionSelectSql() +
+                ` WHERE "bundle_id" = ? AND "superseded" = 0 ORDER BY "ordinal" ASC`,
+            [bundleId],
+        );
+    }
+
+    public hasBundleCollectionOrdinal(bundleId: string, ordinal: number): boolean {
+        return Boolean(
+            this.kd.lib.db.get<{ id: string }>(
+                `SELECT "id" FROM "upload_collection"
+                 WHERE "bundle_id" = ? AND "ordinal" = ? AND "superseded" = 0 LIMIT 1`,
+                [bundleId, ordinal],
+            ),
+        );
+    }
+
+    public getBundleByCollection(collectionId: string): UploadBundleRow | null {
+        return this.kd.lib.db.get<UploadBundleRow>(
+            bundleSelectSql() +
+                ` WHERE "id" = (SELECT "bundle_id" FROM "upload_collection" WHERE "id" = ?) LIMIT 1`,
+            [collectionId],
+        );
+    }
+
+    public listBundleFiles(bundleId: string): UploadFileRow[] {
+        return this.kd.lib.db.all<UploadFileRow>(
+            fileSelectSql() +
+                ` WHERE "collection_id" IN (
+                    SELECT "id" FROM "upload_collection"
+                    WHERE "bundle_id" = ? AND "superseded" = 0
+                ) ORDER BY "logical_path" ASC, "source_offset" ASC`,
+            [bundleId],
+        );
+    }
+
+    /**
+     * Progress-path snapshot without parsing treeJson.
+     * `progress` contains only logical keys affected by `dirtyFileIds`.
+     */
+    public getBundleProgressSnapshot(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
+        const bundle = this.getBundle(bundleId);
+        if (!bundle) {
+            return null;
+        }
+        const collections = this.listBundleCollections(bundleId);
+        const files = this.listBundleFiles(bundleId);
+        const filesById = new Map(files.map((file) => [file.id, file]));
+        const plan = JSON.parse(bundle.planJson) as BundlePlanJson;
+        const packedPhysicalPaths = new Set<string>();
+        const packByPhysicalId = new Map<
+            string,
+            { physical: UploadFileRow; entries: Array<{ path: string; size: number }> }
+        >();
+
+        for (const [ordinal, plannedCollection] of plan.collections.entries()) {
+            const collection = collections.find((candidate) => candidate.ordinal === ordinal);
+            if (!collection) continue;
+            for (const plannedFile of plannedCollection.files) {
+                if (!plannedFile.packEntries) continue;
+                packedPhysicalPaths.add(`${collection.id}\0${plannedFile.path}`);
+                const physical = files.find(
+                    (file) => file.collectionId === collection.id && file.path === plannedFile.path,
+                );
+                if (!physical) continue;
+                packByPhysicalId.set(physical.id, {
+                    physical,
+                    entries: plannedFile.packEntries,
+                });
+            }
+        }
+
+        const byLogicalPath = new Map<string, UploadFileRow[]>();
+        for (const file of files) {
+            if (packedPhysicalPaths.has(`${file.collectionId}\0${file.path}`)) continue;
+            const logicalPath = file.logicalPath ?? file.path;
+            const entries = byLogicalPath.get(logicalPath) ?? [];
+            entries.push(file);
+            byLogicalPath.set(logicalPath, entries);
+        }
+
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        for (const { physical, entries } of packByPhysicalId.values()) {
+            for (const entry of entries) {
+                const uploaded =
+                    physical.size > 0
+                        ? Math.floor(
+                              entry.size * Math.min(1, physical.uploadedBytes / physical.size),
+                          )
+                        : 0;
+                summary.transferredBytes += uploaded;
+                summary.totalBytes += entry.size;
+                summary.totalFiles += 1;
+                if (physical.status === "completed") summary.completedFiles += 1;
+            }
+        }
+        for (const pieces of byLogicalPath.values()) {
+            const size =
+                pieces[0].logicalSize ?? pieces.reduce((sum, piece) => sum + piece.size, 0);
+            const uploaded = Math.min(
+                size,
+                pieces.reduce((sum, piece) => sum + piece.uploadedBytes, 0),
+            );
+            const status = aggregateUploadPieceStatus(pieces);
+            summary.transferredBytes += uploaded;
+            summary.totalBytes += size;
+            summary.totalFiles += 1;
+            if (status === "completed") summary.completedFiles += 1;
+        }
+
+        const dirtyLogicalPaths = new Set<string>();
+        const dirtyPackIds = new Set<string>();
+        for (const fileId of dirtyFileIds) {
+            if (packByPhysicalId.has(fileId)) {
+                dirtyPackIds.add(fileId);
+                continue;
+            }
+            const file = filesById.get(fileId);
+            if (!file) continue;
+            dirtyLogicalPaths.add(file.logicalPath ?? file.path);
+        }
+
+        const progress: Record<string, UploadFileProgress> = {};
+        for (const physicalId of dirtyPackIds) {
+            const pack = packByPhysicalId.get(physicalId);
+            if (!pack) continue;
+            for (const entry of pack.entries) {
+                const uploaded =
+                    pack.physical.size > 0
+                        ? Math.floor(
+                              entry.size *
+                                  Math.min(1, pack.physical.uploadedBytes / pack.physical.size),
+                          )
+                        : 0;
+                progress[entry.path] = {
+                    fileId: `${pack.physical.id}::pack::${encodeURIComponent(entry.path)}`,
+                    path: entry.path,
+                    status: pack.physical.status,
+                    uploaded,
+                    size: entry.size,
+                    error: pack.physical.error ?? undefined,
+                };
+            }
+        }
+        for (const logicalPath of dirtyLogicalPaths) {
+            const pieces = byLogicalPath.get(logicalPath);
+            if (!pieces || pieces.length === 0) continue;
+            const size =
+                pieces[0].logicalSize ?? pieces.reduce((sum, piece) => sum + piece.size, 0);
+            const uploaded = Math.min(
+                size,
+                pieces.reduce((sum, piece) => sum + piece.uploadedBytes, 0),
+            );
+            progress[logicalPath] = {
+                fileId: pieces[0].id,
+                path: logicalPath,
+                status: aggregateUploadPieceStatus(pieces),
+                uploaded,
+                size,
+                error: pieces.find((piece) => piece.error)?.error ?? undefined,
+            };
+        }
+
+        const activeStatus = collections.some(
+            (collection) => collection.status === "error" || collection.status === "expired",
+        )
+            ? "error"
+            : collections.length === bundle.physicalCount &&
+                collections.every((collection) => collection.status === "completed")
+              ? "completed"
+              : collections.some((collection) => collection.status === "uploading")
+                ? "uploading"
+                : bundle.status;
+
+        return {
+            progress,
+            summary,
+            status: activeStatus as UploadStatus,
+            subCollectionIds: collections.map((collection) => collection.id),
+            elapsedMs: collections.reduce((sum, collection) => sum + collection.elapsedMs, 0),
+            updatedAt: Math.max(
+                Date.parse(bundle.updatedAt),
+                ...collections.map((collection) => Date.parse(collection.updatedAt)),
+            ),
+        };
+    }
+
+    public updateBundleInitialization(bundleId: string, initializedCount: number) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_bundle"
+             SET "initialized_count" = ?, "status" = ?, "updated_at" = ?, "error" = NULL
+             WHERE "id" = ?`,
+            [initializedCount, initializedCount > 0 ? "queued" : "paused", nowIso(), bundleId],
+        );
+    }
+
+    public queueBundle(bundleId: string) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_bundle" SET "status" = 'queued', "updated_at" = ?, "error" = NULL WHERE "id" = ?`,
+            [nowIso(), bundleId],
+        );
+    }
+
+    public markBundleStatus(bundleId: string, status: UploadStatus, error?: string | null) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_bundle" SET "status" = ?, "updated_at" = ?, "error" = ? WHERE "id" = ?`,
+            [status, nowIso(), error ?? null, bundleId],
+        );
+    }
+
+    public completeBundle(bundleId: string, shareValue: string) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_bundle"
+             SET "status" = 'completed', "share_value" = ?, "updated_at" = ?, "error" = NULL
+             WHERE "id" = ?`,
+            [shareValue, nowIso(), bundleId],
+        );
+    }
+
+    public supersedeCollection(collectionId: string) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_collection" SET "superseded" = 1, "updated_at" = ? WHERE "id" = ?`,
+            [nowIso(), collectionId],
+        );
+    }
+
+    public restoreSupersededCollection(collectionId: string) {
+        this.kd.lib.db.run(
+            `UPDATE "upload_collection" SET "superseded" = 0, "updated_at" = ? WHERE "id" = ?`,
+            [nowIso(), collectionId],
+        );
+    }
+
+    public deleteBundle(bundleId: string) {
+        this.kd.lib.db.run(`DELETE FROM "upload_bundle" WHERE "id" = ?`, [bundleId]);
     }
 
     public getCollection(collectionId: string): UploadCollectionRow | null {
@@ -125,24 +427,51 @@ export class UploadRepository {
     public listRunnableCollections(): UploadCollectionRow[] {
         return this.kd.lib.db.all<UploadCollectionRow>(
             collectionSelectSql() +
-                ` WHERE "status" IN ('queued', 'uploading') ORDER BY "created_at" ASC`,
+                ` WHERE "status" IN ('queued', 'uploading')
+                    AND "superseded" = 0
+                    AND (
+                        "bundle_id" IS NULL
+                        OR EXISTS (
+                            SELECT 1 FROM "upload_bundle" ready
+                            WHERE ready."id" = "upload_collection"."bundle_id"
+                              AND ready."initialized_count" = ready."physical_count"
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM "upload_collection" previous
+                                  WHERE previous."bundle_id" = ready."id"
+                                    AND ready."mode" = 'integrated'
+                                    AND previous."superseded" = 0
+                                    AND previous."ordinal" < "upload_collection"."ordinal"
+                                    AND previous."status" != 'completed'
+                              )
+                        )
+                    )
+                  ORDER BY "created_at" ASC`,
         );
     }
 
     public listOsProgressRows() {
         return this.kd.lib.db.all<{
             id: string;
+            bundleId: string | null;
             status: UploadStatus;
             transferredBytes: number;
             totalBytes: number;
         }>(
             `SELECT c."id" AS "id",
+                    c."bundle_id" AS "bundleId",
                     c."status" AS "status",
                     COALESCE(SUM(f."uploaded_bytes"), 0) AS "transferredBytes",
                     COALESCE(SUM(f."size"), 0) AS "totalBytes"
              FROM "upload_collection" c
              LEFT JOIN "upload_file" f ON f."collection_id" = c."id"
-             WHERE c."status" NOT IN ('completed', 'expired')
+             LEFT JOIN "upload_bundle" b ON b."id" = c."bundle_id"
+             WHERE c."superseded" = 0
+               AND (
+                   (c."bundle_id" IS NULL AND c."status" NOT IN ('completed', 'expired'))
+                   OR
+                   (c."bundle_id" IS NOT NULL AND b."status" NOT IN ('completed', 'expired'))
+               )
              GROUP BY c."id"
              ORDER BY c."created_at" ASC`,
         );
@@ -562,6 +891,173 @@ export class UploadRepository {
             error: collection.error ?? undefined,
         };
     }
+
+    private buildBundleItem(bundle: UploadBundleRow): UploadItem {
+        const collections = this.listBundleCollections(bundle.id);
+        const files = this.listBundleFiles(bundle.id);
+        const progress: UploadItem["progress"] = {};
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        const packedPhysicalPaths = new Set<string>();
+        const plan = JSON.parse(bundle.planJson) as {
+            collections: Array<{
+                files: Array<{
+                    path: string;
+                    packEntries?: Array<{ path: string; size: number }>;
+                }>;
+            }>;
+        };
+        for (const [ordinal, plannedCollection] of plan.collections.entries()) {
+            const collection = collections.find((candidate) => candidate.ordinal === ordinal);
+            if (!collection) continue;
+            for (const plannedFile of plannedCollection.files) {
+                if (!plannedFile.packEntries) continue;
+                packedPhysicalPaths.add(`${collection.id}\0${plannedFile.path}`);
+                const physical = files.find(
+                    (file) => file.collectionId === collection.id && file.path === plannedFile.path,
+                );
+                for (const entry of plannedFile.packEntries) {
+                    const uploaded = physical
+                        ? Math.floor(
+                              entry.size * Math.min(1, physical.uploadedBytes / physical.size),
+                          )
+                        : 0;
+                    const status = physical?.status ?? "pending";
+                    progress[entry.path] = {
+                        fileId: physical
+                            ? `${physical.id}::pack::${encodeURIComponent(entry.path)}`
+                            : `${bundle.id}:${ordinal}:${entry.path}`,
+                        path: entry.path,
+                        status,
+                        uploaded,
+                        size: entry.size,
+                        error: physical?.error ?? undefined,
+                    };
+                    summary.transferredBytes += uploaded;
+                    summary.totalBytes += entry.size;
+                    summary.totalFiles += 1;
+                    if (status === "completed") summary.completedFiles += 1;
+                }
+            }
+        }
+        const byLogicalPath = new Map<string, UploadFileRow[]>();
+        for (const file of files) {
+            if (packedPhysicalPaths.has(`${file.collectionId}\0${file.path}`)) continue;
+            const logicalPath = file.logicalPath ?? file.path;
+            const entries = byLogicalPath.get(logicalPath) ?? [];
+            entries.push(file);
+            byLogicalPath.set(logicalPath, entries);
+        }
+
+        for (const [logicalPath, pieces] of byLogicalPath) {
+            const size =
+                pieces[0].logicalSize ?? pieces.reduce((sum, piece) => sum + piece.size, 0);
+            const uploaded = Math.min(
+                size,
+                pieces.reduce((sum, piece) => sum + piece.uploadedBytes, 0),
+            );
+            const status = aggregateUploadPieceStatus(pieces);
+            progress[logicalPath] = {
+                fileId: pieces[0].id,
+                path: logicalPath,
+                status,
+                uploaded,
+                size,
+                error: pieces.find((piece) => piece.error)?.error ?? undefined,
+            };
+            summary.transferredBytes += uploaded;
+            summary.totalBytes += size;
+            summary.totalFiles += 1;
+            if (status === "completed") summary.completedFiles += 1;
+        }
+
+        const activeStatus = collections.some(
+            (collection) => collection.status === "error" || collection.status === "expired",
+        )
+            ? "error"
+            : collections.length === bundle.physicalCount &&
+                collections.every((collection) => collection.status === "completed")
+              ? "completed"
+              : collections.some((collection) => collection.status === "uploading")
+                ? "uploading"
+                : bundle.status;
+        const elapsedMs = collections.reduce((sum, collection) => sum + collection.elapsedMs, 0);
+
+        return {
+            id: bundle.id,
+            name: bundle.name,
+            description: bundle.description,
+            passwordProtected: bundle.passwordPlain != null,
+            expires: bundle.expires,
+            shareLink: null,
+            shareValue: bundle.shareValue,
+            shareKind: bundle.mode === "integrated" ? "extended" : "compatibility-list",
+            tree: parseTree(bundle.treeJson),
+            progress,
+            summary,
+            status: activeStatus,
+            mode: bundle.mode,
+            phase:
+                bundle.initializedCount < bundle.physicalCount
+                    ? "initializing"
+                    : activeStatus === "completed"
+                      ? "completed"
+                      : "uploading",
+            physicalCollectionCount: bundle.physicalCount,
+            initializedCollectionCount: bundle.initializedCount,
+            requiresReplacement: collections.some(
+                (collection) => collection.status === "error" || collection.status === "expired",
+            ),
+            createdAt: Date.parse(bundle.createdAt),
+            updatedAt: Math.max(
+                Date.parse(bundle.updatedAt),
+                ...collections.map((collection) => Date.parse(collection.updatedAt)),
+            ),
+            elapsedMs,
+            error:
+                collections.find(
+                    (collection) =>
+                        collection.status === "error" || collection.status === "expired",
+                )?.error ??
+                bundle.error ??
+                undefined,
+        };
+    }
+}
+
+type BundlePlanJson = {
+    collections: Array<{
+        files: Array<{
+            path: string;
+            packEntries?: Array<{ path: string; size: number }>;
+        }>;
+    }>;
+};
+
+function aggregateUploadPieceStatus(pieces: UploadFileRow[]): FileUploadStatus {
+    if (pieces.some((piece) => piece.status === "error")) return "error";
+    if (pieces.every((piece) => piece.status === "completed")) return "completed";
+    if (pieces.some((piece) => piece.status === "uploading")) return "uploading";
+    if (pieces.some((piece) => piece.status === "paused")) return "paused";
+    return "pending";
+}
+
+function bundleSelectSql() {
+    return `SELECT "id",
+                   "mode",
+                   "name",
+                   "description",
+                   "password_plain" AS "passwordPlain",
+                   "tree_json" AS "treeJson",
+                   "plan_json" AS "planJson",
+                   "physical_count" AS "physicalCount",
+                   "initialized_count" AS "initializedCount",
+                   "share_value" AS "shareValue",
+                   "status",
+                   "expires",
+                   "created_at" AS "createdAt",
+                   "updated_at" AS "updatedAt",
+                   "error"
+            FROM "upload_bundle"`;
 }
 
 function collectionSelectSql() {
@@ -580,7 +1076,10 @@ function collectionSelectSql() {
                    "created_at" AS "createdAt",
                    "updated_at" AS "updatedAt",
                    "elapsed_ms" AS "elapsedMs",
-                   "error"
+                   "error",
+                   "bundle_id" AS "bundleId",
+                   "ordinal",
+                   "superseded"
             FROM "upload_collection"`;
 }
 
@@ -598,6 +1097,10 @@ function fileSelectSql() {
                    "paused_by_user" AS "pausedByUser",
                    "created_at" AS "createdAt",
                    "updated_at" AS "updatedAt",
-                   "error"
+                   "error",
+                   "logical_path" AS "logicalPath",
+                   "source_offset" AS "sourceOffset",
+                   "logical_size" AS "logicalSize",
+                   "logical_sha256" AS "logicalSha256"
             FROM "upload_file"`;
 }

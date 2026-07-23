@@ -20,7 +20,7 @@ import type {
 } from "./types";
 
 import { TransferProgressBatcher } from "../transfer-progress-batcher";
-import { getStagingPartPath, PartFileWriter } from "./part-file";
+import { getBundleTempDirName, getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
 import { TransferChunkPool, parseTransferNodeKey } from "./transfer-chunk-pool";
 import { openZipFileEntry } from "./zip-index";
@@ -103,6 +103,10 @@ export class DownloadScheduler {
             collectionId: string,
             fileIds: Set<string>,
         ) => Promise<void>,
+        private readonly onFileFinalized?: (
+            collection: DownloadCollectionRow,
+            file: DownloadFileRow,
+        ) => void,
     ) {
         this.progressBatcher = new TransferProgressBatcher(
             async (collectionId, fileIds) => {
@@ -110,10 +114,6 @@ export class DownloadScheduler {
                 const activeFileIds = this.activeFilesByCollection.get(collectionId);
                 if (!activeFileIds || activeFileIds.size === 0) {
                     this.progressBatcher.deactivate(collectionId);
-                    return;
-                }
-                for (const fileId of activeFileIds) {
-                    this.progressBatcher.mark(collectionId, fileId);
                 }
             },
             (error) => this.kd.logger.error(error, "DownloadScheduler:emitProgressUpdate"),
@@ -126,6 +126,9 @@ export class DownloadScheduler {
             onChunkSettled: () => {
                 void this.schedule();
             },
+            onProgress: (collectionId, fileId) => {
+                this.progressBatcher.mark(collectionId, fileId);
+            },
         });
         this.transferPool = new TransferChunkPool({
             kd: this.kd,
@@ -134,6 +137,9 @@ export class DownloadScheduler {
             metrics: this.metrics,
             onChunkSettled: () => {
                 void this.schedule();
+            },
+            onProgress: (collectionId, fileId) => {
+                this.progressBatcher.mark(collectionId, fileId);
             },
         });
     }
@@ -238,7 +244,7 @@ export class DownloadScheduler {
             }),
         );
         await fse
-            .remove(path.join(collection.savePath, ".kiosk-part", collection.id))
+            .remove(path.join(collection.savePath, getBundleTempDirName(collection.id)))
             .catch(() => undefined);
     }
 
@@ -848,9 +854,11 @@ export class DownloadScheduler {
                     {
                         onTransferProgress: (transferredBytes) => {
                             this.metrics.setChunkTransferProgress(file.id, 0, transferredBytes);
+                            this.progressBatcher.mark(collection.id, file.id);
                         },
                         onWriteProgress: (writtenBytes) => {
                             this.metrics.setChunkWriteProgress(file.id, 0, writtenBytes);
+                            this.progressBatcher.mark(collection.id, file.id);
                         },
                     },
                 );
@@ -1147,6 +1155,7 @@ export class DownloadScheduler {
         // Mark complete before slow staging cleanup so the UI does not sit at 100%.
         this.repository.completeFile(file.id);
         this.progressBatcher.mark(collection.id, file.id);
+        this.onFileFinalized?.(collection, file);
     }
 
     private async cleanupZipEntryStaging(partPath: string) {

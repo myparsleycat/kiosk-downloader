@@ -7,7 +7,7 @@ describe("TransferProgressBatcher", () => {
         vi.useRealTimers();
     });
 
-    it("coalesces dirty files and still emits empty progress ticks", async () => {
+    it("coalesces dirty files and skips empty progress ticks", async () => {
         vi.useFakeTimers();
         const flush = vi.fn<(collectionId: string, fileIds: Set<string>) => Promise<void>>(
             async () => undefined,
@@ -19,9 +19,8 @@ describe("TransferProgressBatcher", () => {
         await vi.advanceTimersByTimeAsync(500);
         await vi.advanceTimersByTimeAsync(500);
 
-        expect(flush).toHaveBeenCalledTimes(2);
+        expect(flush).toHaveBeenCalledTimes(1);
         expect([...flush.mock.calls[0][1]]).toEqual(["one", "two"]);
-        expect(flush.mock.calls[1][1].size).toBe(0);
         batcher.destroy();
     });
 
@@ -49,12 +48,18 @@ describe("TransferProgressBatcher", () => {
 
         release?.();
         await Promise.resolve();
-        await vi.advanceTimersByTimeAsync(500);
-        await vi.advanceTimersByTimeAsync(500);
-
+        await Promise.resolve();
+        expect(flush).toHaveBeenCalledTimes(2);
         expect([...flush.mock.calls[1][1]]).toEqual(["two"]);
-        expect([...flush.mock.calls[2][1]]).toEqual(["two"]);
         expect(onError).toHaveBeenCalledTimes(1);
+
+        // Failed ids stay dirty, but retry waits for the next poll tick.
+        await Promise.resolve();
+        expect(flush).toHaveBeenCalledTimes(2);
+
+        await vi.advanceTimersByTimeAsync(500);
+        expect(flush).toHaveBeenCalledTimes(3);
+        expect([...flush.mock.calls[2][1]]).toEqual(["two"]);
         batcher.destroy();
     });
 });

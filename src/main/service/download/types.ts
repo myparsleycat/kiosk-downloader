@@ -59,6 +59,23 @@ export type DownloadCollectionRow = {
     error: string | null;
     asciiFilenames: number;
     provider: DownloadProvider;
+    bundleId: string | null;
+    ordinal: number;
+};
+
+export type DownloadBundleRow = {
+    id: string;
+    sourceInput: string;
+    passwordPlain: string | null;
+    name: string;
+    treeJson: string;
+    manifestJson: string;
+    savePath: string;
+    status: DownloadStatus;
+    expires: number;
+    createdAt: string;
+    updatedAt: string;
+    error: string | null;
 };
 
 export type DownloadFileRow = {
@@ -102,6 +119,8 @@ export type CreateDownloadRecord = {
     selectedPaths: string[];
     asciiFilenames: boolean;
     zipPasswords?: Record<string, string>;
+    bundleId?: string;
+    ordinal?: number;
 };
 
 export type TransferFileSourceMeta = {

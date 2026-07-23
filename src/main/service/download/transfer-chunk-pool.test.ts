@@ -35,6 +35,7 @@ function createHarness(request: ReturnType<typeof vi.fn>) {
         repository: repository as never,
         metrics: metrics as never,
         onChunkSettled: vi.fn(),
+        onProgress: vi.fn(),
     });
     return { pool, logger, repository };
 }

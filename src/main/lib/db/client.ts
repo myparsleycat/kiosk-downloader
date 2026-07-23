@@ -159,6 +159,7 @@ function buildIndexSql(tableName: string, index: TableIndexSpec) {
         "ON",
         quoteIdentifier(tableName),
         `(${index.columns.map(quoteIdentifier).join(", ")})`,
+        index.where ? `WHERE ${index.where}` : null,
     ]
         .filter(Boolean)
         .join(" ");

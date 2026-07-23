@@ -18,6 +18,7 @@ import { isZipExtractMode, listZipNodes } from "@shared/zip-tree";
 import type { KioskDownloader } from "../..";
 import type {
     CreateDownloadRecord,
+    DownloadBundleRow,
     DownloadChunkRow,
     DownloadCollectionRow,
     DownloadFileRow,
@@ -47,7 +48,9 @@ const COLLECTION_SELECT = `"id",
                     "elapsed_ms" AS "elapsedMs",
                     "error",
                     "ascii_filenames" AS "asciiFilenames",
-                    COALESCE("provider", 'kiosk') AS "provider"`;
+                    COALESCE("provider", 'kiosk') AS "provider",
+                    "bundle_id" AS "bundleId",
+                    "ordinal"`;
 
 const FILE_SELECT = `"id",
                     "collection_id" AS "collectionId",
@@ -349,8 +352,8 @@ export class DownloadRepository {
                  ("id", "share_id", "source_url", "password_plain", "name", "root_id",
                   "segment_size", "expires", "tree_json", "save_path", "status",
                   "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames",
-                  "provider")
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?)`,
+                  "provider", "bundle_id", "ordinal")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?, ?, ?)`,
                 [
                     collectionId,
                     record.loaded.collection.shareId,
@@ -366,6 +369,8 @@ export class DownloadRepository {
                     timestamp,
                     record.asciiFilenames ? 1 : 0,
                     record.loaded.provider,
+                    record.bundleId ?? null,
+                    record.ordinal ?? 0,
                 ],
             );
 
@@ -441,8 +446,8 @@ export class DownloadRepository {
                  ("id", "share_id", "source_url", "password_plain", "name", "root_id",
                   "segment_size", "expires", "tree_json", "save_path", "status",
                   "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames",
-                  "provider")
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+                  "provider", "bundle_id", "ordinal")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, 0)`,
                 [
                     collectionId,
                     payload.collection.shareId,
@@ -505,12 +510,231 @@ export class DownloadRepository {
              FROM "download_collection"
              ORDER BY "created_at" DESC`,
         );
-        return collections.map((collection) => this.buildItem(collection));
+        return [
+            ...this.listBundles().map((bundle) => this.buildBundleItem(bundle)),
+            ...collections
+                .filter((collection) => !collection.bundleId)
+                .map((collection) => this.buildItem(collection)),
+        ].sort((left, right) => right.createdAt - left.createdAt);
     }
 
     public getItem(collectionId: string) {
+        const bundle = this.getBundle(collectionId);
+        if (bundle) return this.buildBundleItem(bundle);
         const collection = this.getCollection(collectionId);
         return collection ? this.buildItem(collection) : null;
+    }
+
+    public insertBundle(record: {
+        id: string;
+        sourceInput: string;
+        password?: string;
+        name: string;
+        treeJson: string;
+        manifestJson: string;
+        savePath: string;
+        expires: number;
+    }) {
+        const timestamp = nowIso();
+        this.kd.lib.db.run(
+            `INSERT INTO "download_bundle"
+             ("id", "source_input", "password_plain", "name", "tree_json", "manifest_json",
+              "save_path", "status", "expires", "created_at", "updated_at", "error")
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, NULL)`,
+            [
+                record.id,
+                record.sourceInput,
+                record.password || null,
+                record.name,
+                record.treeJson,
+                record.manifestJson,
+                record.savePath,
+                record.expires,
+                timestamp,
+                timestamp,
+            ],
+        );
+    }
+
+    public listBundles() {
+        return this.kd.lib.db.all<DownloadBundleRow>(bundleSelectSql());
+    }
+
+    public getBundle(bundleId: string) {
+        return this.kd.lib.db.get<DownloadBundleRow>(
+            bundleSelectSql() + ` WHERE "id" = ? LIMIT 1`,
+            [bundleId],
+        );
+    }
+
+    public getBundleByCollection(collectionId: string) {
+        return this.kd.lib.db.get<DownloadBundleRow>(
+            bundleSelectSql() +
+                ` WHERE "id" = (SELECT "bundle_id" FROM "download_collection" WHERE "id" = ?) LIMIT 1`,
+            [collectionId],
+        );
+    }
+
+    public listBundleCollections(bundleId: string) {
+        return this.kd.lib.db.all<DownloadCollectionRow>(
+            `SELECT ${COLLECTION_SELECT}
+             FROM "download_collection" WHERE "bundle_id" = ? ORDER BY "ordinal" ASC`,
+            [bundleId],
+        );
+    }
+
+    public listBundleFiles(bundleId: string) {
+        return this.kd.lib.db.all<DownloadFileRow>(
+            `SELECT ${FILE_SELECT}
+             FROM "download_file"
+             WHERE "collection_id" IN (
+                SELECT "id" FROM "download_collection" WHERE "bundle_id" = ?
+             )`,
+            [bundleId],
+        );
+    }
+
+    /**
+     * Progress-path snapshot without parsing treeJson.
+     * `progress` contains only logical keys affected by `dirtyFileIds`.
+     */
+    public getBundleProgressSnapshot(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
+        const bundle = this.getBundle(bundleId);
+        if (!bundle) {
+            return null;
+        }
+        const collections = this.listBundleCollections(bundleId);
+        const manifest = JSON.parse(bundle.manifestJson) as {
+            selectedPaths?: string[];
+            splitFiles: Array<{
+                path: string;
+                size: number;
+                pieces: Array<{ remoteFileId: string; length: number }>;
+            }>;
+        };
+        const physicalByRemoteId = new Map<string, DownloadFileRow>();
+        const filesById = new Map<string, DownloadFileRow>();
+        for (const file of this.listBundleFiles(bundleId)) {
+            filesById.set(file.id, file);
+            if (file.selected !== 1) continue;
+            physicalByRemoteId.set(file.remoteId, file);
+        }
+
+        const mappedRemoteIds = new Set<string>();
+        const splitByLogicalPath = new Map<
+            string,
+            {
+                path: string;
+                size: number;
+                pieces: Array<{ remoteFileId: string; length: number }>;
+                files: DownloadFileRow[];
+            }
+        >();
+        const remoteIdToLogicalPaths = new Map<string, string[]>();
+
+        for (const logical of manifest.splitFiles) {
+            logical.pieces.forEach((piece) => mappedRemoteIds.add(piece.remoteFileId));
+            if (manifest.selectedPaths && !manifest.selectedPaths.includes(logical.path)) continue;
+            const files = logical.pieces
+                .map((piece) => physicalByRemoteId.get(piece.remoteFileId))
+                .filter((file): file is DownloadFileRow => file != null);
+            if (files.length === 0) continue;
+            splitByLogicalPath.set(logical.path, {
+                path: logical.path,
+                size: logical.size,
+                pieces: logical.pieces,
+                files,
+            });
+            for (const piece of logical.pieces) {
+                const paths = remoteIdToLogicalPaths.get(piece.remoteFileId) ?? [];
+                paths.push(logical.path);
+                remoteIdToLogicalPaths.set(piece.remoteFileId, paths);
+            }
+        }
+
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        for (const logical of splitByLogicalPath.values()) {
+            const downloaded = downloadedForSplit(logical, physicalByRemoteId);
+            const status = aggregateDownloadPieceStatus(logical.files);
+            summary.transferredBytes += downloaded;
+            summary.totalBytes += logical.size;
+            summary.totalFiles += 1;
+            if (status === "completed") summary.completedFiles += 1;
+        }
+        for (const file of physicalByRemoteId.values()) {
+            if (mappedRemoteIds.has(file.remoteId)) continue;
+            summary.transferredBytes += file.downloadedBytes;
+            summary.totalBytes += file.size;
+            summary.totalFiles += 1;
+            if (file.status === "completed") summary.completedFiles += 1;
+        }
+
+        const dirtyLogicalPaths = new Set<string>();
+        const dirtyPlainFileIds = new Set<string>();
+        for (const fileId of dirtyFileIds) {
+            const file = filesById.get(fileId);
+            if (!file || file.selected !== 1) continue;
+            const logicalPaths = remoteIdToLogicalPaths.get(file.remoteId);
+            if (logicalPaths) {
+                for (const logicalPath of logicalPaths) {
+                    dirtyLogicalPaths.add(logicalPath);
+                }
+                continue;
+            }
+            dirtyPlainFileIds.add(fileId);
+        }
+
+        const progress: Record<string, FileProgress> = {};
+        for (const logicalPath of dirtyLogicalPaths) {
+            const logical = splitByLogicalPath.get(logicalPath);
+            if (!logical) continue;
+            const downloaded = downloadedForSplit(logical, physicalByRemoteId);
+            progress[logical.path] = {
+                fileId: `${logical.files[0].id}::extended::${encodeURIComponent(logical.path)}`,
+                path: logical.path,
+                status: aggregateDownloadPieceStatus(logical.files),
+                downloaded,
+                size: logical.size,
+                selected: true,
+                error: logical.files.find((file) => file.error)?.error ?? undefined,
+            };
+        }
+        for (const fileId of dirtyPlainFileIds) {
+            const file = filesById.get(fileId);
+            if (!file) continue;
+            progress[file.path] = {
+                fileId: file.id,
+                path: file.path,
+                status: file.status,
+                downloaded: file.downloadedBytes,
+                size: file.size,
+                selected: true,
+                error: file.error ?? undefined,
+            };
+        }
+
+        return {
+            progress,
+            summary,
+            status: computeBundleStatus(collections, bundle.status),
+            subCollectionIds: collections.map((collection) => collection.id),
+            elapsedMs: collections.reduce((sum, collection) => sum + collection.elapsedMs, 0),
+            updatedAt: Math.max(
+                Date.parse(bundle.updatedAt),
+                ...collections.map((collection) => Date.parse(collection.updatedAt)),
+            ),
+        };
+    }
+
+    public markBundleStatus(bundleId: string, status: DownloadStatus, error?: string | null) {
+        this.kd.lib.db.run(
+            `UPDATE "download_bundle" SET "status" = ?, "updated_at" = ?, "error" = ? WHERE "id" = ?`,
+            [status, nowIso(), error ?? null, bundleId],
+        );
+    }
+
+    public deleteBundle(bundleId: string) {
+        this.kd.lib.db.run(`DELETE FROM "download_bundle" WHERE "id" = ?`, [bundleId]);
     }
 
     public getCollection(collectionId: string) {
@@ -535,11 +759,13 @@ export class DownloadRepository {
     public listOsProgressRows() {
         return this.kd.lib.db.all<{
             id: string;
+            bundleId: string | null;
             status: DownloadStatus;
             transferredBytes: number;
             totalBytes: number;
         }>(
             `SELECT c."id" AS "id",
+                    c."bundle_id" AS "bundleId",
                     c."status" AS "status",
                     COALESCE(SUM(CASE WHEN f."selected" = 1 THEN f."downloaded_bytes" ELSE 0 END), 0)
                         AS "transferredBytes",
@@ -547,7 +773,9 @@ export class DownloadRepository {
                         AS "totalBytes"
              FROM "download_collection" c
              LEFT JOIN "download_file" f ON f."collection_id" = c."id"
-             WHERE c."status" NOT IN ('completed', 'expired')
+             LEFT JOIN "download_bundle" b ON b."id" = c."bundle_id"
+             WHERE (c."bundle_id" IS NULL AND c."status" NOT IN ('completed', 'expired'))
+                OR (c."bundle_id" IS NOT NULL AND b."status" NOT IN ('completed', 'expired'))
              GROUP BY c."id"
              ORDER BY c."created_at" ASC`,
         );
@@ -1426,4 +1654,156 @@ export class DownloadRepository {
             error: collection.error ?? undefined,
         };
     }
+
+    private buildBundleItem(bundle: DownloadBundleRow): DownloadItem {
+        const collections = this.listBundleCollections(bundle.id);
+        const manifest = JSON.parse(bundle.manifestJson) as {
+            selectedPaths?: string[];
+            splitFiles: Array<{
+                path: string;
+                size: number;
+                pieces: Array<{ remoteFileId: string; length: number }>;
+            }>;
+        };
+        const physicalByRemoteId = new Map<string, DownloadFileRow>();
+        for (const file of this.listBundleFiles(bundle.id)) {
+            if (file.selected !== 1) continue;
+            physicalByRemoteId.set(file.remoteId, file);
+        }
+        const progress: Record<string, FileProgress> = {};
+        const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        const mappedRemoteIds = new Set<string>();
+        for (const logical of manifest.splitFiles) {
+            logical.pieces.forEach((piece) => mappedRemoteIds.add(piece.remoteFileId));
+            if (manifest.selectedPaths && !manifest.selectedPaths.includes(logical.path)) continue;
+            const files = logical.pieces
+                .map((piece) => physicalByRemoteId.get(piece.remoteFileId))
+                .filter((file): file is DownloadFileRow => file != null);
+            if (files.length === 0) continue;
+            const downloaded = downloadedForSplit(logical, physicalByRemoteId);
+            const status = aggregateDownloadPieceStatus(files);
+            progress[logical.path] = {
+                fileId: `${files[0].id}::extended::${encodeURIComponent(logical.path)}`,
+                path: logical.path,
+                status,
+                downloaded,
+                size: logical.size,
+                selected: true,
+                error: files.find((file) => file.error)?.error ?? undefined,
+            };
+            summary.transferredBytes += downloaded;
+            summary.totalBytes += logical.size;
+            summary.totalFiles += 1;
+            if (status === "completed") summary.completedFiles += 1;
+        }
+        for (const file of physicalByRemoteId.values()) {
+            if (mappedRemoteIds.has(file.remoteId)) continue;
+            progress[file.path] = {
+                fileId: file.id,
+                path: file.path,
+                status: file.status,
+                downloaded: file.downloadedBytes,
+                size: file.size,
+                selected: true,
+                error: file.error ?? undefined,
+            };
+            summary.transferredBytes += file.downloadedBytes;
+            summary.totalBytes += file.size;
+            summary.totalFiles += 1;
+            if (file.status === "completed") summary.completedFiles += 1;
+        }
+        return {
+            id: bundle.id,
+            collection: {
+                shareId: bundle.id,
+                name: bundle.name,
+                expires: bundle.expires,
+                segmentSize: collections[0]?.segmentSize ?? 16 * 1024 * 1024,
+                passwordProtected: bundle.passwordPlain != null,
+                provider: "extended",
+                tree: parseTree(bundle.treeJson),
+            },
+            savePath: bundle.savePath,
+            progress,
+            summary,
+            status: computeBundleStatus(collections, bundle.status),
+            createdAt: Date.parse(bundle.createdAt),
+            updatedAt: Math.max(
+                Date.parse(bundle.updatedAt),
+                ...collections.map((collection) => Date.parse(collection.updatedAt)),
+            ),
+            elapsedMs: collections.reduce((sum, collection) => sum + collection.elapsedMs, 0),
+            error:
+                collections.find(
+                    (collection) =>
+                        collection.status === "error" || collection.status === "expired",
+                )?.error ??
+                bundle.error ??
+                undefined,
+        };
+    }
+}
+
+function computeBundleStatus(
+    collections: Array<{ status: DownloadStatus }>,
+    bundleStatus: DownloadStatus,
+): DownloadStatus {
+    if (
+        collections.some(
+            (collection) => collection.status === "error" || collection.status === "expired",
+        )
+    ) {
+        return "error";
+    }
+    if (
+        collections.length > 0 &&
+        collections.every((collection) => collection.status === "completed")
+    ) {
+        return bundleStatus;
+    }
+    if (collections.some((collection) => collection.status === "downloading")) {
+        return "downloading";
+    }
+    return bundleStatus;
+}
+
+function downloadedForSplit(
+    logical: {
+        size: number;
+        pieces: Array<{ remoteFileId: string; length: number }>;
+    },
+    physicalByRemoteId: Map<string, DownloadFileRow>,
+) {
+    return Math.min(
+        logical.size,
+        logical.pieces.reduce((sum, piece) => {
+            const file = physicalByRemoteId.get(piece.remoteFileId);
+            if (!file || file.size === 0) return sum;
+            return sum + Math.floor(piece.length * Math.min(1, file.downloadedBytes / file.size));
+        }, 0),
+    );
+}
+
+function aggregateDownloadPieceStatus(files: DownloadFileRow[]): FileDownloadStatus {
+    if (files.some((file) => file.status === "error")) return "error";
+    if (files.every((file) => file.status === "completed")) return "completed";
+    if (files.some((file) => file.status === "downloading")) return "downloading";
+    if (files.some((file) => file.status === "paused")) return "paused";
+    return "pending";
+}
+
+function bundleSelectSql() {
+    return `SELECT "id",
+                   "source_input" AS "sourceInput",
+                   "password_plain" AS "passwordPlain",
+                   "name",
+                   "tree_json" AS "treeJson",
+                   "manifest_json" AS "manifestJson",
+                   "save_path" AS "savePath",
+                   "status",
+                   "expires",
+                   "created_at" AS "createdAt",
+                   "updated_at" AS "updatedAt",
+                   "error"
+            FROM "download_bundle"`;
 }

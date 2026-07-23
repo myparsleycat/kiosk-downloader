@@ -12,6 +12,14 @@ import {
 } from "@renderer/components/ui/alert-dialog";
 import { Button } from "@renderer/components/ui/button";
 import { Calendar } from "@renderer/components/ui/calendar";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@renderer/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel } from "@renderer/components/ui/field";
 import { Input } from "@renderer/components/ui/input";
 import { InputGroup, InputGroupInput } from "@renderer/components/ui/input-group";
@@ -21,9 +29,17 @@ import { Separator } from "@renderer/components/ui/separator";
 import { cn } from "@renderer/lib/utils";
 import { clampExpiry, mergeDateAndTime, useUploadDraft } from "@renderer/stores/upload-draft";
 import { buildDirTreeFromFiles, validateDirTreeFilePaths } from "@shared/dir-tree";
+import {
+  createExtendedUploadPlan,
+  EXTENDED_UPLOAD_DEFAULT_LIMITS,
+} from "@shared/extended-upload-plan";
 import { basename } from "@shared/tree-rename";
-import type { ExpandPathsResult, UploadTreeFile } from "@shared/types";
-import { MAX_UPLOAD_FILES } from "@shared/types";
+import type {
+  ExpandPathsResult,
+  UploadMode,
+  UploadPlanProgress,
+  UploadTreeFile,
+} from "@shared/types";
 import { formatSize } from "@shared/utils";
 import { format, isSameDay } from "date-fns";
 import { ko } from "date-fns/locale";
@@ -48,7 +64,8 @@ const MAX_NAME = 100;
 const MAX_DESCRIPTION = 2500;
 const MAX_PASSWORD = 100;
 const MAX_EXPIRY_DAYS = 30;
-const MAX_UPLOAD_BYTES = 50 * 1024 ** 3;
+const MAX_UPLOAD_BYTES = EXTENDED_UPLOAD_DEFAULT_LIMITS.maxBytes;
+const MAX_UPLOAD_FILES = EXTENDED_UPLOAD_DEFAULT_LIMITS.maxFiles;
 
 function mergeUploadFiles(
   existing: UploadTreeFile[],
@@ -77,14 +94,17 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const description = useUploadDraft((s) => s.description);
   const password = useUploadDraft((s) => s.password);
   const expiresAt = useUploadDraft((s) => s.expiresAt);
+  const mode = useUploadDraft((s) => s.mode);
   const addFiles = useUploadDraft((s) => s.addFiles);
   const removeFile = useUploadDraft((s) => s.removeFile);
+  const removeFiles = useUploadDraft((s) => s.removeFiles);
   const renameFile = useUploadDraft((s) => s.renameFile);
   const clearFiles = useUploadDraft((s) => s.clearFiles);
   const setName = useUploadDraft((s) => s.setName);
   const setDescription = useUploadDraft((s) => s.setDescription);
   const setPassword = useUploadDraft((s) => s.setPassword);
   const setExpiresAt = useUploadDraft((s) => s.setExpiresAt);
+  const setMode = useUploadDraft((s) => s.setMode);
   const resetDraft = useUploadDraft((s) => s.resetDraft);
 
   const [expanding, setExpanding] = React.useState(false);
@@ -92,12 +112,24 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const [showPassword, setShowPassword] = React.useState(true);
   const [dragOver, setDragOver] = React.useState(false);
   const [expiryOpen, setExpiryOpen] = React.useState(false);
-  const [countOverflowOpen, setCountOverflowOpen] = React.useState(false);
+  const [modeDialogOpen, setModeDialogOpen] = React.useState(false);
+  const [modeChoice, setModeChoice] = React.useState<Exclude<UploadMode, "standard"> | null>(null);
+  const [modeDialogSummary, setModeDialogSummary] = React.useState({
+    files: 0,
+    bytes: 0,
+    compatibleCollections: 0,
+  });
+  const [oversizeDialogOpen, setOversizeDialogOpen] = React.useState(false);
   const [renameTarget, setRenameTarget] = React.useState<RenameTarget | null>(null);
   const [renameError, setRenameError] = React.useState<string | null>(null);
   const renameTargetRef = React.useRef(renameTarget);
   renameTargetRef.current = renameTarget;
-  const countOverflowResolverRef = React.useRef<((confirmed: boolean) => void) | null>(null);
+  const modeResolverRef = React.useRef<
+    ((choice: Exclude<UploadMode, "standard"> | null) => void) | null
+  >(null);
+  const oversizeResolverRef = React.useRef<
+    ((choice: "integrated" | "exclude" | "cancel") => void) | null
+  >(null);
 
   const expiryDate = new Date(expiresAt);
   const expiryTime = format(expiryDate, "HH:mm:ss");
@@ -120,59 +152,102 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const tree = React.useMemo(() => buildDirTreeFromFiles(files), [files]);
   const totalFiles = files.length;
   const totalBytes = files.reduce((a, f) => a + f.size, 0);
+  const extendedRequired = totalFiles > MAX_UPLOAD_FILES || totalBytes > MAX_UPLOAD_BYTES;
+  const plannedCollections = React.useMemo(() => {
+    // integrated 모드는 content hash 기반 packing 후에야 collection 수가 확정되므로
+    // 업로드 전 계획값을 표시하지 않는다. compatible만 정확값을 사용한다.
+    if (!extendedRequired || mode !== "compatible") return 1;
+    const planned = createExtendedUploadPlan(files, mode);
+    return planned.ok ? planned.collections.length : 0;
+  }, [extendedRequired, files, mode]);
+
+  React.useEffect(() => {
+    if (!extendedRequired && mode !== "standard") setMode("standard");
+  }, [extendedRequired, mode, setMode]);
 
   const canUpload = totalFiles > 0 && name.trim().length > 0 && !starting;
 
-  const askCountOverflow = () => {
-    setCountOverflowOpen(true);
-    return new Promise<boolean>((resolve) => {
-      countOverflowResolverRef.current = resolve;
+  const askMode = (nextFiles: UploadTreeFile[]) => {
+    const compatible = createExtendedUploadPlan(nextFiles, "compatible");
+    setModeDialogSummary({
+      files: nextFiles.length,
+      bytes: nextFiles.reduce((sum, file) => sum + file.size, 0),
+      compatibleCollections: compatible.ok ? compatible.collections.length : 0,
+    });
+    setModeChoice(null);
+    setModeDialogOpen(true);
+    return new Promise<Exclude<UploadMode, "standard"> | null>((resolve) => {
+      modeResolverRef.current = resolve;
     });
   };
 
-  const resolveCountOverflow = (confirmed: boolean) => {
-    const resolve = countOverflowResolverRef.current;
+  const resolveMode = (choice: Exclude<UploadMode, "standard"> | null) => {
+    const resolve = modeResolverRef.current;
     if (!resolve) return;
-    countOverflowResolverRef.current = null;
-    setCountOverflowOpen(false);
-    resolve(confirmed);
+    modeResolverRef.current = null;
+    setModeDialogOpen(false);
+    resolve(choice);
   };
 
-  const handleAddExpanded = async (load: (maxFiles: number) => Promise<ExpandPathsResult>) => {
+  const askOversize = () => {
+    setOversizeDialogOpen(true);
+    return new Promise<"integrated" | "exclude" | "cancel">((resolve) => {
+      oversizeResolverRef.current = resolve;
+    });
+  };
+
+  const resolveOversize = (choice: "integrated" | "exclude" | "cancel") => {
+    const resolve = oversizeResolverRef.current;
+    if (!resolve) return;
+    oversizeResolverRef.current = null;
+    setOversizeDialogOpen(false);
+    resolve(choice);
+  };
+
+  const handleAddExpanded = async (load: () => Promise<ExpandPathsResult>) => {
     setExpanding(true);
     // Let the loading spinner paint before the heavy IPC / store update.
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     let incomingPaths: string[] = [];
     try {
-      const remainingSlots = Math.max(0, MAX_UPLOAD_FILES - files.length);
-      if (remainingSlots === 0) {
-        toast.warning("하나의 컬렉션엔 최대 1000개의 파일만 추가 할 수 있습니다");
-        return;
-      }
-
-      const result = await load(remainingSlots);
+      const result = await load();
       if (result.files.length === 0) return;
 
       incomingPaths = newIncomingPaths(files, result.files);
       const merged = mergeUploadFiles(files, result.files);
       validateDirTreeFilePaths(merged);
       const mergedBytes = merged.reduce((sum, file) => sum + file.size, 0);
-      if (mergedBytes > MAX_UPLOAD_BYTES) {
-        toast.warning("최대 50 GiB 까지만 추가할 수 있습니다");
-        removeDraftSources(incomingPaths);
-        return;
-      }
-
-      if (result.truncated) {
+      const requiresExtended = merged.length > MAX_UPLOAD_FILES || mergedBytes > MAX_UPLOAD_BYTES;
+      let nextMode = mode;
+      if (requiresExtended && nextMode === "standard") {
         setExpanding(false);
-        const confirmed = await askCountOverflow();
-        if (!confirmed) {
+        const choice = await askMode(merged);
+        if (!choice) {
           removeDraftSources(incomingPaths);
           return;
         }
+        nextMode = choice;
       }
 
-      addFiles(result.files);
+      let accepted = result.files;
+      if (nextMode === "compatible" && merged.some((file) => file.size > MAX_UPLOAD_BYTES)) {
+        setExpanding(false);
+        const choice = await askOversize();
+        if (choice === "cancel") {
+          removeDraftSources(incomingPaths);
+          return;
+        }
+        if (choice === "integrated") nextMode = "integrated";
+        else {
+          removeFiles(
+            merged.filter((file) => file.size > MAX_UPLOAD_BYTES).map((file) => file.path),
+          );
+          accepted = result.files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+        }
+      }
+
+      setMode(nextMode);
+      addFiles(accepted);
     } catch (error) {
       removeDraftSources(incomingPaths);
       toast.error("파일을 불러오지 못했습니다", {
@@ -184,11 +259,11 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   };
 
   const handleFilePicker = () => {
-    void handleAddExpanded((maxFiles) => window.api.invoke("upload:pickFiles", maxFiles));
+    void handleAddExpanded(() => window.api.invoke("upload:pickFiles"));
   };
 
   const handleFolderPicker = () => {
-    void handleAddExpanded((maxFiles) => window.api.invoke("upload:pickFolder", maxFiles));
+    void handleAddExpanded(() => window.api.invoke("upload:pickFolder"));
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -197,15 +272,30 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     // Must read DataTransfer synchronously — it is invalidated after this handler returns.
     const dropped = collectDroppedFiles(e.dataTransfer);
     if (dropped.length === 0) return;
-    void handleAddExpanded((maxFiles) => window.api.expandDroppedFiles(dropped, maxFiles));
+    void handleAddExpanded(() => window.api.expandDroppedFiles(dropped));
+  };
+
+  const handleModeChange = async () => {
+    const choice = await askMode(files);
+    if (!choice) return;
+    if (choice === "compatible" && files.some((file) => file.size > MAX_UPLOAD_BYTES)) {
+      const oversizeChoice = await askOversize();
+      if (oversizeChoice === "cancel") return;
+      if (oversizeChoice === "integrated") {
+        setMode("integrated");
+        return;
+      }
+      removeFiles(
+        files.filter((candidate) => candidate.size > MAX_UPLOAD_BYTES).map((file) => file.path),
+      );
+    }
+    setMode(choice);
   };
 
   const handleStart = async () => {
     if (!canUpload) return;
     setStarting(true);
     try {
-      const turnstileToken = await window.api.invoke("upload:solveTurnstile");
-
       const created = await window.api.invoke("upload:create", {
         tree: files,
         options: {
@@ -214,16 +304,24 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
           password: password || "",
           expires: expiresAt,
         },
-        turnstileToken,
+        mode,
       });
 
       if (!created) {
         throw new Error("업로드를 만들지 못했습니다.");
       }
 
-      toast.success("업로드가 시작되었습니다", {
-        description: `${name.trim()} · ${files.length}개 파일`,
-      });
+      if (created.phase === "initializing" && created.status === "paused") {
+        toast.warning("확장 업로드 초기화가 중단되었습니다", {
+          description: created.error
+            ? `${created.error} 업로드 목록에서 시작을 눌러 다시 시도할 수 있습니다.`
+            : "업로드 목록에서 시작을 눌러 남은 초기화를 이어갈 수 있습니다.",
+        });
+      } else {
+        toast.success("업로드가 시작되었습니다", {
+          description: `${name.trim()} · ${files.length}개 파일`,
+        });
+      }
       resetDraft();
       onCreated(created.id);
     } catch (error) {
@@ -237,23 +335,90 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
 
   return (
     <div className="flex h-full">
+      <Dialog
+        open={modeDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) resolveMode(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>확장 업로드 사용</DialogTitle>
+            <DialogDescription>
+              {modeDialogSummary.files}개 · {formatSize(modeDialogSummary.bytes)}를 업로드하려면
+              여러 컬렉션이 필요합니다.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <button
+              type="button"
+              className={cn(
+                "rounded-lg border p-3 text-left transition-colors",
+                modeChoice === "integrated" ? "border-primary bg-primary/5" : "hover:bg-muted/50",
+              )}
+              onClick={() => setModeChoice("integrated")}
+            >
+              <span className="block text-sm font-medium">통합 공유</span>
+              <span className="mt-1 block text-xs text-muted-foreground">
+                Kiosk Downloader 전용 · 대형 파일 자동 재조립 · 공유 정보 1개
+              </span>
+              <span className="mt-2 block text-xs tabular-nums">
+                파일 분석 후 컬렉션 수와 보안 인증 횟수가 결정됩니다
+              </span>
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded-lg border p-3 text-left transition-colors",
+                modeChoice === "compatible" ? "border-primary bg-primary/5" : "hover:bg-muted/50",
+              )}
+              onClick={() => setModeChoice("compatible")}
+            >
+              <span className="block text-sm font-medium">호환 공유</span>
+              <span className="mt-1 block text-xs text-muted-foreground">
+                웹 다운로드 지원 · 표준 Kiosk 링크 여러 개
+              </span>
+              <span className="mt-2 block text-xs tabular-nums">
+                {modeDialogSummary.compatibleCollections > 0
+                  ? `${modeDialogSummary.compatibleCollections}개 컬렉션 · 같은 횟수의 보안 인증`
+                  : "50 GiB 초과 파일을 먼저 처리해야 합니다"}
+              </span>
+            </button>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => resolveMode(null)}>
+              취소
+            </Button>
+            <Button disabled={!modeChoice} onClick={() => modeChoice && resolveMode(modeChoice)}>
+              계속
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <AlertDialog
-        open={countOverflowOpen}
+        open={oversizeDialogOpen}
         onOpenChange={(open) => {
           if (open) return;
-          resolveCountOverflow(false);
+          resolveOversize("cancel");
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>파일 개수 제한</AlertDialogTitle>
+            <AlertDialogTitle>호환 공유에서 지원하지 않는 대형 파일</AlertDialogTitle>
             <AlertDialogDescription>
-              하나의 컬렉션엔 최대 1000개의 파일만 추가 할 수 있습니다. 초과분은 제외됩니다.
+              50 GiB를 초과한 파일은 표준 Kiosk에서 다운로드할 수 없습니다. 통합 공유로 전환하거나
+              해당 파일을 제외하세요.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => resolveCountOverflow(false)}>취소</AlertDialogCancel>
-            <AlertDialogAction onClick={() => resolveCountOverflow(true)}>확인</AlertDialogAction>
+          <AlertDialogFooter className="flex-wrap sm:justify-end">
+            <AlertDialogCancel onClick={() => resolveOversize("cancel")}>취소</AlertDialogCancel>
+            <Button variant="outline" onClick={() => resolveOversize("exclude")}>
+              파일 제외하고 계속
+            </Button>
+            <AlertDialogAction onClick={() => resolveOversize("integrated")}>
+              통합 공유로 전환
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -396,20 +561,35 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
                 </span>
               </div>
             </div>
+
+            {extendedRequired && mode !== "standard" && (
+              <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-medium">
+                      확장 업로드 · {mode === "integrated" ? "통합 공유" : "호환 공유"}
+                    </div>
+                    <div className="mt-1 text-muted-foreground">
+                      {mode === "integrated"
+                        ? "파일 분석 후 컬렉션 수와 보안 인증 횟수가 결정됩니다"
+                        : `예상 ${plannedCollections}개 컬렉션 · ${plannedCollections}회의 보안 인증`}
+                    </div>
+                  </div>
+                  <Button size="xs" variant="ghost" onClick={() => void handleModeChange()}>
+                    모드 변경
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         </ScrollArea>
 
-        <div className="border-t p-3">
-          <Button
-            className="w-full"
-            disabled={!canUpload}
-            isLoading={starting}
-            onClick={handleStart}
-          >
-            <UploadIcon className="size-3.5" />
-            업로드 & 링크 생성
-          </Button>
-        </div>
+        <UploadStartFooter
+          mode={mode}
+          starting={starting}
+          disabled={!canUpload}
+          onStart={handleStart}
+        />
       </div>
 
       <div className="flex flex-1 flex-col overflow-hidden">
@@ -572,3 +752,51 @@ function DropZone({
     </div>
   );
 }
+
+function formatPlanProgressLabel(progress: UploadPlanProgress) {
+  if (progress.stage === "hashing") {
+    if (progress.total <= 0) return "파일 분석 중...";
+    return `파일 분석 중... ${progress.current}/${progress.total}`;
+  }
+  return "업로드 계획 중...";
+}
+
+const UploadStartFooter = React.memo(function UploadStartFooter({
+  mode,
+  starting,
+  disabled,
+  onStart,
+}: {
+  mode: UploadMode;
+  starting: boolean;
+  disabled: boolean;
+  onStart: () => void;
+}) {
+  const [progress, setProgress] = React.useState<UploadPlanProgress | null>(null);
+
+  React.useEffect(() => window.api.on("upload:plan-progress", (next) => setProgress(next)), []);
+
+  React.useEffect(() => {
+    if (!starting) setProgress(null);
+  }, [starting]);
+
+  return (
+    <div className="border-t p-3">
+      <Button className="w-full" disabled={disabled} isLoading={starting} onClick={onStart}>
+        <UploadIcon className="size-3.5" />
+        {starting && progress
+          ? formatPlanProgressLabel(progress)
+          : mode === "integrated"
+            ? "업로드 & 공유 정보 생성"
+            : "업로드 & 링크 생성"}
+      </Button>
+      {starting && progress ? (
+        <p className="mt-1.5 text-center text-[11px] text-muted-foreground">
+          {progress.stage === "hashing"
+            ? `파일 해시 계산 ${progress.current}/${progress.total}`
+            : "작은 파일 묶음 계획 중"}
+        </p>
+      ) : null}
+    </div>
+  );
+});

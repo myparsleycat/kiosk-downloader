@@ -53,6 +53,14 @@ const api = {
             maxFiles,
         ) as Promise<ExpandPathsResult>;
     },
+    /** Resolve a dropped share file in preload and decode it in main. Absolute paths never reach the renderer. */
+    readDroppedShareFile: (files: File[]): Promise<{ shareInput: string } | null> => {
+        const paths = resolveDroppedPaths(files);
+        if (paths.length === 0) return Promise.resolve(null);
+        return ipcRenderer.invoke("download:readShareFile", paths[0]) as Promise<{
+            shareInput: string;
+        } | null>;
+    },
 };
 
 if (process.contextIsolated) {

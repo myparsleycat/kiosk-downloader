@@ -67,3 +67,47 @@ describe("getSafeRelativePath", () => {
         expect(relative.split(path.sep)).toEqual(["keep", "Untitled", "file.txt"]);
     });
 });
+
+describe("sanitizeUploadFiles", () => {
+    it("replaces invalid characters even when asciiFilenames is off", () => {
+        expect(
+            fs.sanitizeUploadFiles(
+                [
+                    {
+                        path: "Unreal/123774119/오빠~ 여름에 입을 비키니 입어봤는데 어때? - 로리 채널 000.png",
+                        name: "오빠~ 여름에 입을 비키니 입어봤는데 어때? - 로리 채널 000.png",
+                    },
+                ],
+                false,
+            ),
+        ).toEqual([
+            {
+                path: "Unreal/123774119/오빠~ 여름에 입을 비키니 입어봤는데 어때_ - 로리 채널 000.png",
+                name: "오빠~ 여름에 입을 비키니 입어봤는데 어때_ - 로리 채널 000.png",
+            },
+        ]);
+    });
+
+    it("transliterates when asciiFilenames is on", () => {
+        expect(
+            fs.sanitizeUploadFiles([{ path: "폴더/파일:이름.txt", name: "파일:이름.txt" }], true),
+        ).toEqual([{ path: "PolDeo/PaIl_ILeum.txt", name: "PaIl_ILeum.txt" }]);
+    });
+
+    it("deduplicates colliding sanitized upload paths", () => {
+        expect(
+            fs.sanitizeUploadFiles(
+                [
+                    { path: "dir/a?.txt", name: "a?.txt" },
+                    { path: "dir/a_.txt", name: "a_.txt" },
+                    { path: "dir/b:c.txt", name: "b:c.txt" },
+                ],
+                false,
+            ),
+        ).toEqual([
+            { path: "dir/a_.txt", name: "a_.txt" },
+            { path: "dir/a__2.txt", name: "a__2.txt" },
+            { path: "dir/b_c.txt", name: "b_c.txt" },
+        ]);
+    });
+});

@@ -1,14 +1,42 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { performance } from "node:perf_hooks";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DownloadTransferMetrics } from "./metrics";
 
+describe("DownloadTransferMetrics live progress", () => {
+    it("advances live bytes on transfer before disk write batches", () => {
+        const metrics = new DownloadTransferMetrics();
+        metrics.registerFile("collection", "file", 1000);
+
+        metrics.setChunkTransferProgress("file", 0, 400);
+        expect(metrics.sampleFile("file", 1000).liveDownloaded).toBe(1400);
+        expect(metrics.getCollectionSnapshot("collection").activeTransferredBytes).toBe(400);
+
+        metrics.setChunkWriteProgress("file", 0, 200);
+        expect(metrics.sampleFile("file", 1000).liveDownloaded).toBe(1400);
+
+        metrics.setChunkWriteProgress("file", 0, 500);
+        expect(metrics.sampleFile("file", 1000).liveDownloaded).toBe(1500);
+
+        metrics.clearChunk("file", 0, 1500);
+        expect(metrics.sampleFile("file", 1500).liveDownloaded).toBe(1500);
+        expect(metrics.getCollectionSnapshot("collection").activeTransferredBytes).toBe(0);
+    });
+});
+
 describe("DownloadTransferMetrics speed EMA", () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+        vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+    });
+
     afterEach(() => {
         vi.useRealTimers();
+        vi.restoreAllMocks();
     });
 
     it("stays at 0 during warmup then seeds from the first measurable rate", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();
@@ -28,7 +56,6 @@ describe("DownloadTransferMetrics speed EMA", () => {
     });
 
     it("decays EMA toward 0 when transferred bytes stall", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();
@@ -48,7 +75,6 @@ describe("DownloadTransferMetrics speed EMA", () => {
     });
 
     it("resets speed after clearFile", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();
@@ -66,7 +92,6 @@ describe("DownloadTransferMetrics speed EMA", () => {
     });
 
     it("clears cached speed after a sampling gap longer than the speed window", () => {
-        vi.useFakeTimers();
         vi.setSystemTime(0);
 
         const metrics = new DownloadTransferMetrics();

@@ -152,6 +152,33 @@ export class FS {
             .join(path.sep);
     }
 
+    public sanitizeUploadRelativePath(input: string, asciiFilenames: boolean) {
+        return normalizePath(input)
+            .split("/")
+            .filter(Boolean)
+            .map((part) => this.sanitizeDownloadPathSegment(part, { asciiFilenames }))
+            .join("/");
+    }
+
+    public sanitizeUploadFiles<T extends { path: string; name: string }>(
+        files: T[],
+        asciiFilenames: boolean,
+    ): T[] {
+        const seen = new Set<string>();
+        return files.map((file) => {
+            let nextPath = this.sanitizeUploadRelativePath(file.path, asciiFilenames) || "Untitled";
+            if (seen.has(nextPath)) {
+                nextPath = uniquifyUploadPath(nextPath, seen);
+            }
+            seen.add(nextPath);
+            return {
+                ...file,
+                path: nextPath,
+                name: path.posix.basename(nextPath),
+            };
+        });
+    }
+
     public sanitizePath(input: string) {
         return input
             .split(path.sep)
@@ -270,5 +297,19 @@ export class FS {
         }
 
         return result;
+    }
+}
+
+function uniquifyUploadPath(filePath: string, seen: Set<string>) {
+    const dir = path.posix.dirname(filePath);
+    const parent = dir === "." ? "" : dir;
+    const name = path.posix.basename(filePath);
+    const ext = path.posix.extname(name);
+    const stem = ext ? name.slice(0, -ext.length) : name;
+    for (let index = 2; ; index += 1) {
+        const candidate = parent ? `${parent}/${stem}_${index}${ext}` : `${stem}_${index}${ext}`;
+        if (!seen.has(candidate)) {
+            return candidate;
+        }
     }
 }

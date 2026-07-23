@@ -1,7 +1,7 @@
 import { cn } from "@renderer/lib/utils";
 import type { UploadItem, UploadStatus } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
-import { ClockIcon, CopyIcon, FolderIcon, LockIcon, TimerIcon } from "lucide-react";
+import { ClockIcon, CopyIcon, FolderIcon, LockIcon, SaveIcon, TimerIcon } from "lucide-react";
 import { toast } from "sonner";
 
 export function UploadCard({
@@ -49,26 +49,35 @@ export function UploadCard({
               {item.name}
             </span>
           </div>
-          {item.shareLink && (
+          {(item.shareLink || item.shareValue) && (
             <div className="mt-0.5 flex items-center gap-0.5 truncate font-mono text-[10px]">
-              <CopyIcon className="size-2.5 shrink-0 text-muted-foreground" />
+              {item.shareValue ? (
+                <SaveIcon className="size-2.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <CopyIcon className="size-2.5 shrink-0 text-muted-foreground" />
+              )}
               <span
                 role="button"
-                title="링크 복사"
+                title={item.shareValue ? "공유 정보 저장" : "링크 복사"}
                 className="cursor-pointer truncate text-primary underline underline-offset-2"
                 onClick={async (e) => {
                   e.stopPropagation();
                   try {
+                    if (item.shareValue) {
+                      const result = await window.api.invoke("upload:saveShareInfo", item.id);
+                      if (result) toast.success("공유 정보를 저장했습니다");
+                      return;
+                    }
                     await window.api.invoke("upload:copyLink", item.id);
                     toast.success("링크를 복사했습니다");
                   } catch (error) {
-                    toast.error("복사하지 못했습니다", {
+                    toast.error(item.shareValue ? "저장하지 못했습니다" : "복사하지 못했습니다", {
                       description: error instanceof Error ? error.message : String(error),
                     });
                   }
                 }}
               >
-                {item.shareLink}
+                {item.shareValue ? "확장 공유 정보" : item.shareLink}
               </span>
             </div>
           )}
@@ -110,6 +119,9 @@ export function UploadCard({
       </div>
 
       <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
+        {item.mode && item.mode !== "standard" && (
+          <span>{item.mode === "integrated" ? "확장 · 통합 공유" : "확장 · 호환 공유"}</span>
+        )}
         <span className="flex items-center gap-0.5">
           <ClockIcon className="size-2.5" />
           {new Date(item.expires).toLocaleDateString("ko-KR", {

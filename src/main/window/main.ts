@@ -142,6 +142,17 @@ export class MainWindow {
             this.window = null;
         });
 
+        this.window.webContents.on("render-process-gone", (_event, details) => {
+            this.kd.logger.error(
+                { reason: details.reason, exitCode: details.exitCode },
+                "MainWindow:render-process-gone",
+            );
+        });
+
+        this.window.webContents.on("unresponsive", () => {
+            this.kd.logger.warn("MainWindow:unresponsive");
+        });
+
         this.window.webContents.setWindowOpenHandler((details) => {
             void openExternal(details.url);
             return { action: "deny" };

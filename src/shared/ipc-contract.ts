@@ -32,6 +32,7 @@ export type IpcHandlers = {
     "download:pauseCollection": DownloadService["pauseCollection"];
     "download:pauseFile": DownloadService["pauseFile"];
     "download:probeCollection": DownloadService["probeCollection"];
+    "download:readShareFile": DownloadService["readShareFile"];
     "download:remove": DownloadService["remove"];
     "download:resumeCollection": DownloadService["resumeCollection"];
     "download:resumeFile": DownloadService["resumeFile"];
@@ -47,6 +48,8 @@ export type IpcHandlers = {
     "updater:openDownloadPage": () => Promise<void>;
     "upload:clearDraftSources": UploadService["clearDraftSources"];
     "upload:copyLink": UploadService["copyLink"];
+    "upload:copyPassword": UploadService["copyPassword"];
+    "upload:saveShareInfo": UploadService["saveShareInfo"];
     "upload:create": UploadService["create"];
     "upload:expandPaths": UploadService["expandPaths"];
     "upload:list": UploadService["list"];
@@ -55,6 +58,7 @@ export type IpcHandlers = {
     "upload:pickFiles": (maxFiles?: number) => Promise<ExpandPathsResult>;
     "upload:pickFolder": (maxFiles?: number) => Promise<ExpandPathsResult>;
     "upload:remove": UploadService["remove"];
+    "upload:replaceFailedCollection": UploadService["replaceFailedCollection"];
     "upload:removeDraftSources": UploadService["removeDraftSources"];
     "upload:renameDraftSources": (payload: { from: string; to: string }) => void;
     "upload:resume": UploadService["resumeUpload"];

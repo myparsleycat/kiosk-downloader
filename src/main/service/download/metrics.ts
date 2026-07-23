@@ -5,11 +5,14 @@ import { TransferSpeedSampler } from "../transfer-speed";
 const SPEED_WINDOW_MS = 2000;
 
 export class DownloadTransferMetrics {
-    // Progress is based on written bytes; speed is based on cumulative transferred bytes.
+    // Live progress uses max(written, transferred) per in-flight chunk so the UI
+    // advances on network receive, not only after disk write batches.
+    // Speed still samples cumulative transferred bytes.
     private readonly writtenByChunk = new Map<string, number>();
-    private readonly writtenByFile = new Map<string, number>();
-    private readonly writtenByCollection = new Map<string, number>();
     private readonly transferredByChunk = new Map<string, number>();
+    private readonly liveByChunk = new Map<string, number>();
+    private readonly liveByFile = new Map<string, number>();
+    private readonly liveByCollection = new Map<string, number>();
     private readonly transferredByFile = new Map<string, number>();
     private readonly transferredByCollection = new Map<string, number>();
     private readonly collectionByFile = new Map<string, string>();
@@ -33,9 +36,8 @@ export class DownloadTransferMetrics {
 
     public setChunkWriteProgress(fileId: string, chunkIndex: number, writtenBytes: number) {
         const key = this.chunkKey(fileId, chunkIndex);
-        const previous = this.writtenByChunk.get(key) ?? 0;
         this.writtenByChunk.set(key, writtenBytes);
-        this.setWrittenSum(fileId, (this.writtenByFile.get(fileId) ?? 0) + writtenBytes - previous);
+        this.syncChunkLive(fileId, key);
     }
 
     public setChunkTransferProgress(fileId: string, chunkIndex: number, transferredBytes: number) {
@@ -53,15 +55,15 @@ export class DownloadTransferMetrics {
 
         this.transferredByChunk.set(key, normalized);
         this.addTransferredBytes(fileId, delta);
+        this.syncChunkLive(fileId, key);
     }
 
     public clearChunk(fileId: string, chunkIndex: number, persistedDownloaded?: number) {
         const key = this.chunkKey(fileId, chunkIndex);
-        const previous = this.writtenByChunk.get(key) ?? 0;
         const previousTransferred = this.transferredByChunk.get(key) ?? 0;
         this.writtenByChunk.delete(key);
         this.transferredByChunk.delete(key);
-        this.setWrittenSum(fileId, (this.writtenByFile.get(fileId) ?? 0) - previous);
+        this.setLiveSum(fileId, key, 0);
         if (persistedDownloaded === undefined && previousTransferred > 0) {
             this.addTransferredBytes(fileId, -previousTransferred);
         }
@@ -71,14 +73,10 @@ export class DownloadTransferMetrics {
     }
 
     public clearFile(fileId: string) {
-        this.setWrittenSum(fileId, 0);
-        for (const key of this.writtenByChunk.keys()) {
+        for (const key of [...this.liveByChunk.keys()]) {
             if (key.startsWith(`${fileId}:`)) {
+                this.setLiveSum(fileId, key, 0);
                 this.writtenByChunk.delete(key);
-            }
-        }
-        for (const key of this.transferredByChunk.keys()) {
-            if (key.startsWith(`${fileId}:`)) {
                 this.transferredByChunk.delete(key);
             }
         }
@@ -107,7 +105,7 @@ export class DownloadTransferMetrics {
 
     public getCollectionSnapshot(collectionId: string) {
         return {
-            activeTransferredBytes: this.writtenByCollection.get(collectionId) ?? 0,
+            activeTransferredBytes: this.liveByCollection.get(collectionId) ?? 0,
             speedBps: this.collectionSpeed.get(collectionId),
         };
     }
@@ -119,9 +117,31 @@ export class DownloadTransferMetrics {
         );
     }
 
+    public sampleBundle(bundleId: string, subCollectionIds: string[]) {
+        const total = subCollectionIds.reduce(
+            (sum, id) => sum + (this.transferredByCollection.get(id) ?? 0),
+            0,
+        );
+        return this.collectionSpeed.sample(bundleId, total);
+    }
+
+    public getBundleSnapshot(bundleId: string, subCollectionIds: string[]) {
+        return {
+            activeTransferredBytes: subCollectionIds.reduce(
+                (sum, id) => sum + (this.liveByCollection.get(id) ?? 0),
+                0,
+            ),
+            speedBps: this.collectionSpeed.get(bundleId),
+        };
+    }
+
+    public clearBundle(bundleId: string) {
+        this.collectionSpeed.clear(bundleId);
+    }
+
     public clearCollection(collectionId: string) {
         this.collectionSpeed.clear(collectionId);
-        this.writtenByCollection.delete(collectionId);
+        this.liveByCollection.delete(collectionId);
         this.transferredByCollection.delete(collectionId);
     }
 
@@ -135,24 +155,38 @@ export class DownloadTransferMetrics {
         }
     }
 
-    private setWrittenSum(fileId: string, bytes: number) {
-        const previous = this.writtenByFile.get(fileId) ?? 0;
+    private syncChunkLive(fileId: string, key: string) {
+        this.setLiveSum(
+            fileId,
+            key,
+            Math.max(this.writtenByChunk.get(key) ?? 0, this.transferredByChunk.get(key) ?? 0),
+        );
+    }
+
+    private setLiveSum(fileId: string, key: string, bytes: number) {
+        const previous = this.liveByChunk.get(key) ?? 0;
         if (bytes > 0) {
-            this.writtenByFile.set(fileId, bytes);
+            this.liveByChunk.set(key, bytes);
         } else {
-            this.writtenByFile.delete(fileId);
+            this.liveByChunk.delete(key);
+        }
+
+        const fileBytes = (this.liveByFile.get(fileId) ?? 0) + bytes - previous;
+        if (fileBytes > 0) {
+            this.liveByFile.set(fileId, fileBytes);
+        } else {
+            this.liveByFile.delete(fileId);
         }
 
         const collectionId = this.collectionByFile.get(fileId);
         if (!collectionId) {
             return;
         }
-        const collectionBytes =
-            (this.writtenByCollection.get(collectionId) ?? 0) + bytes - previous;
+        const collectionBytes = (this.liveByCollection.get(collectionId) ?? 0) + bytes - previous;
         if (collectionBytes > 0) {
-            this.writtenByCollection.set(collectionId, collectionBytes);
+            this.liveByCollection.set(collectionId, collectionBytes);
         } else {
-            this.writtenByCollection.delete(collectionId);
+            this.liveByCollection.delete(collectionId);
         }
     }
 
@@ -179,6 +213,6 @@ export class DownloadTransferMetrics {
     }
 
     private getTotalBytes(fileId: string) {
-        return (this.persistedByFile.get(fileId) ?? 0) + (this.writtenByFile.get(fileId) ?? 0);
+        return (this.persistedByFile.get(fileId) ?? 0) + (this.liveByFile.get(fileId) ?? 0);
     }
 }
