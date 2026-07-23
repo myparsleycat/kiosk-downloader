@@ -7,6 +7,10 @@ import {
     timingSafeEqual,
 } from "node:crypto";
 
+import {
+    EXTENDED_SHARE_INVALID_PASSWORD_ERROR,
+    EXTENDED_SHARE_PASSWORD_REQUIRED_ERROR,
+} from "@shared/download-errors";
 import { decode, encode } from "cbor-x";
 
 import { compressZstdSync, decompressZstdSync } from "../lib/zstd";
@@ -229,7 +233,7 @@ async function encryptBody(header: Buffer, body: Buffer, password: string) {
 
 async function decryptBody(header: Buffer, body: Buffer, password?: string) {
     if (!password) {
-        throw new Error("Password is required for this extended share information.");
+        throw new Error(EXTENDED_SHARE_PASSWORD_REQUIRED_ERROR);
     }
     if (body.length < SALT_BYTES + NONCE_BYTES + TAG_BYTES) {
         throw new Error("Invalid extended share information.");
@@ -245,7 +249,7 @@ async function decryptBody(header: Buffer, body: Buffer, password?: string) {
         decipher.setAuthTag(tag);
         return Buffer.concat([decipher.update(encrypted), decipher.final()]);
     } catch {
-        throw new Error("Incorrect password or corrupted extended share information.");
+        throw new Error(EXTENDED_SHARE_INVALID_PASSWORD_ERROR);
     }
 }
 

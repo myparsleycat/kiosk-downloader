@@ -30,6 +30,8 @@ import {
   isCollectionExpiresNever,
   isCollectionInvalidPasswordError,
   isCollectionPasswordRequiredError,
+  isExtendedShareInvalidPasswordError,
+  isExtendedSharePasswordRequiredError,
   isZipInvalidPasswordError,
   isZipPasswordRequiredError,
 } from "@shared/download-errors";
@@ -287,10 +289,9 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           return;
         }
 
-        const errorCause = getIpcErrorCause(error);
         if (
           loadPassword &&
-          (isCollectionInvalidPasswordError(error) || errorCause.includes("Incorrect password"))
+          (isCollectionInvalidPasswordError(error) || isExtendedShareInvalidPasswordError(error))
         ) {
           setPasswordInvalid(true);
           setCollection(null);
@@ -300,7 +301,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
         if (
           !loadPassword &&
-          (isCollectionPasswordRequiredError(error) || errorCause.includes("Password is required"))
+          (isCollectionPasswordRequiredError(error) || isExtendedSharePasswordRequiredError(error))
         ) {
           setProbedShareId(parsed?.id ?? trimmedUrl);
           setPasswordRequired(true);
