@@ -1374,6 +1374,14 @@ export class DownloadService {
         const splitRemoteIds = new Set(
             manifest.splitFiles.flatMap((file) => file.pieces.map((piece) => piece.remoteFileId)),
         );
+        const filesByCollectionId = new Map<string, DownloadFileRow[]>();
+        const fileByCollectionRemoteId = new Map<string, DownloadFileRow>();
+        for (const file of this.repository.listBundleFiles(bundle.id)) {
+            const files = filesByCollectionId.get(file.collectionId);
+            if (files) files.push(file);
+            else filesByCollectionId.set(file.collectionId, [file]);
+            fileByCollectionRemoteId.set(`${file.collectionId}\0${file.remoteId}`, file);
+        }
         const coordinator = this.reassemblyCoordinators.get(bundle.id);
         const managedSplitPaths = coordinator?.getManagedSplitPaths() ?? new Set<string>();
 
@@ -1395,14 +1403,11 @@ export class DownloadService {
                 );
                 const selected = pieces.every((piece) => {
                     const collection = collectionByOrdinal.get(piece.sourceIndex);
-                    return collection
-                        ? this.repository
-                              .listFiles(collection.id)
-                              .some(
-                                  (file) =>
-                                      file.remoteId === piece.remoteFileId && file.selected === 1,
-                              )
-                        : false;
+                    if (!collection) return false;
+                    return (
+                        fileByCollectionRemoteId.get(`${collection.id}\0${piece.remoteFileId}`)
+                            ?.selected === 1
+                    );
                 });
                 if (!selected) continue;
 
@@ -1420,10 +1425,10 @@ export class DownloadService {
                     pieces: pieces.map((piece) => {
                         const collection = collectionByOrdinal.get(piece.sourceIndex);
                         const file = collection
-                            ? this.repository
-                                  .listFiles(collection.id)
-                                  .find((candidate) => candidate.remoteId === piece.remoteFileId)
-                            : null;
+                            ? fileByCollectionRemoteId.get(
+                                  `${collection.id}\0${piece.remoteFileId}`,
+                              )
+                            : undefined;
                         if (!collection || !file) {
                             throw new Error(`분할 파일 조각을 찾을 수 없습니다: ${splitFile.path}`);
                         }
@@ -1447,7 +1452,7 @@ export class DownloadService {
             }
 
             for (const collection of collections) {
-                for (const file of this.repository.listFiles(collection.id)) {
+                for (const file of filesByCollectionId.get(collection.id) ?? []) {
                     if (file.selected !== 1 || splitRemoteIds.has(file.remoteId)) continue;
                     const relativePath = this.kd.lib.fs.getSafeRelativePath(
                         toDisplayPath(file.path, manifest.renames),
