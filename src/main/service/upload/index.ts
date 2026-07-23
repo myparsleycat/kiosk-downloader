@@ -6,8 +6,10 @@ import type { Readable } from "node:stream";
 import { formatCompatShareText } from "@shared/compat-share-text";
 import { buildDirTreeFromFiles } from "@shared/dir-tree";
 import {
+    createExtendedUploadPieces,
     createExtendedUploadPlan,
     EXTENDED_UPLOAD_DEFAULT_LIMITS,
+    packSizedItems,
     type ExtendedUploadMode,
 } from "@shared/extended-upload-plan";
 import { validateNodeName } from "@shared/tree-rename";
@@ -41,8 +43,13 @@ import { UploadTransferMetrics } from "./metrics";
 import { UploadRepository } from "./repository";
 import { UploadScheduler } from "./scheduler";
 import {
-    createSmallFilePackPlan,
+    createDeterministicPackArtifacts,
+    hashFilesBounded,
+    isPackCandidate,
     materializeSmallFilePack,
+    PACK_ALGORITHM_VERSION,
+    PACK_POLICY_V2,
+    type PersistedBundleFile,
     type PersistedBundlePlan,
 } from "./small-file-pack";
 import { TurnstileSolver } from "./turnstile";
@@ -574,58 +581,13 @@ export class UploadService {
     private async createBundle(payload: CreateUploadPayload, mode: ExtendedUploadMode) {
         const resolved = await this.resolveCreateFiles(payload.tree);
         const files = mode === "compatible" ? await this.sanitizeCreateFiles(resolved) : resolved;
-        const planned = createExtendedUploadPlan(files, mode);
-        if (!planned.ok) {
-            throw new Error(
-                `호환 공유에서는 50 GiB를 초과한 파일을 업로드할 수 없습니다: ${planned.oversizedFiles
-                    .map((file) => file.path)
-                    .join(", ")}`,
-            );
-        }
-
         const bundleId = randomUUID();
-        const hashes = new Map<string, string>();
-        for (const piece of planned.collections.flatMap((collection) => collection.pieces)) {
-            if (piece.pieceCount === 1 || hashes.has(piece.sourcePath)) continue;
-            const source = files.find((file) => file.path === piece.sourcePath);
-            if (!source)
-                throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${piece.sourcePath}`);
-            hashes.set(piece.sourcePath, await hashFile(source.fsPath));
-        }
-
         const sourcesByPath = new Map(files.map((file) => [file.path, file]));
-        const directPlan: PersistedBundlePlan = {
-            collections: planned.collections.map((collection) => ({
-                files: collection.pieces.map((piece) => {
-                    const source = sourcesByPath.get(piece.sourcePath);
-                    if (!source) {
-                        throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${piece.sourcePath}`);
-                    }
-                    const physicalPath =
-                        piece.pieceCount === 1
-                            ? piece.sourcePath
-                            : `.__kde_${bundleId}/${piece.sourceIndex}.${piece.pieceIndex}`;
-                    return {
-                        ...source,
-                        path: physicalPath,
-                        name: path.basename(physicalPath),
-                        size: piece.length,
-                        sourceOffset: piece.offset,
-                        logicalPath: piece.sourcePath,
-                        logicalSize: piece.sourceSize,
-                        logicalSha256: hashes.get(piece.sourcePath),
-                    };
-                }),
-            })),
-        };
+
         const persistedPlan =
             mode === "integrated"
-                ? createSmallFilePackPlan(
-                      directPlan,
-                      bundleId,
-                      path.join(app.getPath("userData"), "upload-packs", bundleId),
-                  )
-                : directPlan;
+                ? await this.createIntegratedBundlePlan(files, sourcesByPath, bundleId)
+                : this.createCompatibleBundlePlan(files, sourcesByPath, bundleId);
 
         this.repository.insertBundle({
             id: bundleId,
@@ -642,6 +604,93 @@ export class UploadService {
         await this.emitUpdate(bundleId);
         await this.initializeBundle(this.repository.getBundle(bundleId)!);
         return this.repository.getItem(bundleId);
+    }
+
+    private createCompatibleBundlePlan(
+        files: UploadSourceFile[],
+        sourcesByPath: Map<string, UploadSourceFile>,
+        bundleId: string,
+    ): PersistedBundlePlan {
+        const planned = createExtendedUploadPlan(files, "compatible");
+        if (!planned.ok) {
+            throw new Error(
+                `호환 공유에서는 50 GiB를 초과한 파일을 업로드할 수 없습니다: ${planned.oversizedFiles
+                    .map((file) => file.path)
+                    .join(", ")}`,
+            );
+        }
+        return {
+            collections: planned.collections.map((collection) => ({
+                files: collection.pieces.map((piece) => {
+                    const source = sourcesByPath.get(piece.sourcePath);
+                    if (!source) {
+                        throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${piece.sourcePath}`);
+                    }
+                    return pieceToPersistedFile(source, piece, bundleId);
+                }),
+            })),
+        };
+    }
+
+    private async createIntegratedBundlePlan(
+        files: UploadSourceFile[],
+        sourcesByPath: Map<string, UploadSourceFile>,
+        bundleId: string,
+    ): Promise<PersistedBundlePlan> {
+        const pieces = createExtendedUploadPieces(files, "integrated");
+        const hashPaths = new Set<string>();
+        for (const piece of pieces) {
+            const source = sourcesByPath.get(piece.sourcePath);
+            if (!source) {
+                throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${piece.sourcePath}`);
+            }
+            if (
+                piece.pieceCount > 1 ||
+                isPackCandidate({ size: piece.length, logicalSize: piece.sourceSize })
+            ) {
+                hashPaths.add(source.fsPath);
+            }
+        }
+        const hashesByFsPath = await hashFilesBounded(hashPaths, hashFile);
+        const hashesByLogicalPath = new Map<string, string>();
+        for (const file of files) {
+            const digest = hashesByFsPath.get(file.fsPath);
+            if (digest) hashesByLogicalPath.set(file.path, digest);
+        }
+
+        const physicalFiles: PersistedBundleFile[] = pieces.map((piece) => {
+            const source = sourcesByPath.get(piece.sourcePath);
+            if (!source) {
+                throw new Error(`업로드 원본 경로를 찾을 수 없습니다: ${piece.sourcePath}`);
+            }
+            return pieceToPersistedFile(
+                source,
+                piece,
+                bundleId,
+                hashesByLogicalPath.get(piece.sourcePath),
+            );
+        });
+
+        const packDir = path.join(app.getPath("userData"), "upload-packs", bundleId);
+        const artifacts = createDeterministicPackArtifacts(physicalFiles, packDir);
+        const collections = packSizedItems(
+            artifacts.map((file) => ({
+                ...file,
+                size: file.size,
+                sortKey: file.packEntries
+                    ? `pack:${file.path}`
+                    : `direct:${file.logicalPath ?? file.path}:${file.sourceOffset ?? 0}:${file.size}`,
+            })),
+            EXTENDED_UPLOAD_DEFAULT_LIMITS,
+        );
+
+        return {
+            version: PACK_ALGORITHM_VERSION,
+            packPolicy: { ...PACK_POLICY_V2 },
+            collections: collections.map((collection) => ({
+                files: collection.items.map(({ sortKey: _sortKey, ...file }) => file),
+            })),
+        };
     }
 
     private async initializeBundle(bundle: UploadBundleRow) {
@@ -1106,7 +1155,9 @@ export class UploadService {
                     ...plannedFile.packEntries.map((entry) => ({
                         path: entry.path,
                         size: entry.size,
-                        sha256: undefined,
+                        sha256: entry.contentSha256
+                            ? Buffer.from(entry.contentSha256, "hex")
+                            : undefined,
                         pieces: [
                             {
                                 sourceIndex: ordinal,
@@ -1147,6 +1198,36 @@ async function hashFile(filePath: string) {
         hash.update(chunk as Buffer);
     }
     return hash.digest("hex");
+}
+
+function pieceToPersistedFile(
+    source: UploadSourceFile,
+    piece: {
+        sourcePath: string;
+        sourceSize: number;
+        sourceIndex: number;
+        pieceIndex: number;
+        pieceCount: number;
+        offset: number;
+        length: number;
+    },
+    bundleId: string,
+    logicalSha256?: string,
+): PersistedBundleFile {
+    const physicalPath =
+        piece.pieceCount === 1
+            ? piece.sourcePath
+            : `.__kde_${bundleId}/${piece.sourceIndex}.${piece.pieceIndex}`;
+    return {
+        ...source,
+        path: physicalPath,
+        name: path.basename(physicalPath),
+        size: piece.length,
+        sourceOffset: piece.offset,
+        logicalPath: piece.sourcePath,
+        logicalSize: piece.sourceSize,
+        logicalSha256,
+    };
 }
 
 function isKioskCompatiblePath(filePath: string) {

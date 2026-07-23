@@ -49,6 +49,17 @@ export type ExtendedUploadPlanResult =
           oversizedFiles: ExtendedUploadSourceFile[];
       };
 
+export type SizedPackItem<T> = T & {
+    size: number;
+    sortKey: string;
+};
+
+export type SizedPackCollection<T> = {
+    index: number;
+    totalSize: number;
+    items: T[];
+};
+
 export function createExtendedUploadPlan(
     files: ExtendedUploadSourceFile[],
     mode: ExtendedUploadMode,
@@ -62,16 +73,82 @@ export function createExtendedUploadPlan(
         return { ok: false, mode, collections: [], oversizedFiles };
     }
 
-    const pieces = files.flatMap((file, sourceIndex) =>
-        createPieces(file, sourceIndex, mode, limits.maxBytes),
-    );
+    const pieces = createExtendedUploadPieces(files, mode, limits.maxBytes);
 
     return {
         ok: true,
         mode,
-        collections: packPieces(pieces, limits),
+        collections: packExtendedPieces(pieces, limits),
         oversizedFiles: [],
     };
+}
+
+export function createExtendedUploadPieces(
+    files: ExtendedUploadSourceFile[],
+    mode: ExtendedUploadMode,
+    maxBytes: number = EXTENDED_UPLOAD_DEFAULT_LIMITS.maxBytes,
+): ExtendedUploadPiece[] {
+    files.forEach(validateSourceFile);
+    return files.flatMap((file, sourceIndex) => createPieces(file, sourceIndex, mode, maxBytes));
+}
+
+export function packExtendedPieces(
+    pieces: ExtendedUploadPiece[],
+    limits: ExtendedUploadLimits = EXTENDED_UPLOAD_DEFAULT_LIMITS,
+): ExtendedUploadCollection[] {
+    validateLimits(limits);
+    return packSizedItems(
+        pieces.map((piece) => ({
+            ...piece,
+            size: piece.length,
+            sortKey: `${piece.sourcePath}\0${piece.offset}\0${piece.sourceIndex}`,
+        })),
+        limits,
+        comparePieces,
+    ).map((collection) => ({
+        index: collection.index,
+        totalSize: collection.totalSize,
+        pieces: collection.items,
+    }));
+}
+
+/** Best-fit decreasing bin-pack by `size`, with deterministic `sortKey` ties. */
+export function packSizedItems<T>(
+    items: Array<SizedPackItem<T>>,
+    limits: ExtendedUploadLimits,
+    compare: (left: SizedPackItem<T>, right: SizedPackItem<T>) => number = compareSizedItems,
+): Array<SizedPackCollection<T>> {
+    validateLimits(limits);
+    const collections: Array<SizedPackCollection<T>> = [];
+    const sorted = items.toSorted(compare);
+
+    for (const item of sorted) {
+        const collection = collections
+            .filter(
+                (candidate) =>
+                    candidate.items.length < limits.maxFiles &&
+                    candidate.totalSize + item.size <= limits.maxBytes,
+            )
+            .reduce<SizedPackCollection<T> | undefined>((best, candidate) => {
+                if (!best) return candidate;
+                const candidateRemaining = limits.maxBytes - candidate.totalSize - item.size;
+                const bestRemaining = limits.maxBytes - best.totalSize - item.size;
+                if (candidateRemaining !== bestRemaining) {
+                    return candidateRemaining < bestRemaining ? candidate : best;
+                }
+                return candidate.index < best.index ? candidate : best;
+            }, undefined);
+
+        if (collection) {
+            collection.items.push(item);
+            collection.totalSize += item.size;
+            continue;
+        }
+
+        collections.push({ index: collections.length, totalSize: item.size, items: [item] });
+    }
+
+    return collections;
 }
 
 function createPieces(
@@ -98,41 +175,20 @@ function createPieces(
     });
 }
 
-function packPieces(pieces: ExtendedUploadPiece[], limits: ExtendedUploadLimits) {
-    const collections: ExtendedUploadCollection[] = [];
-    const sortedPieces = pieces.toSorted(comparePieces);
-
-    for (const piece of sortedPieces) {
-        const collection = collections
-            .filter(
-                (candidate) =>
-                    candidate.pieces.length < limits.maxFiles &&
-                    candidate.totalSize + piece.length <= limits.maxBytes,
-            )
-            .reduce<ExtendedUploadCollection | undefined>((best, candidate) => {
-                if (!best) return candidate;
-                const candidateRemaining = limits.maxBytes - candidate.totalSize - piece.length;
-                const bestRemaining = limits.maxBytes - best.totalSize - piece.length;
-                return candidateRemaining < bestRemaining ? candidate : best;
-            }, undefined);
-
-        if (collection) {
-            collection.pieces.push(piece);
-            collection.totalSize += piece.length;
-            continue;
-        }
-
-        collections.push({ index: collections.length, totalSize: piece.length, pieces: [piece] });
-    }
-
-    return collections;
-}
-
-function comparePieces(left: ExtendedUploadPiece, right: ExtendedUploadPiece) {
+function comparePieces(
+    left: SizedPackItem<ExtendedUploadPiece>,
+    right: SizedPackItem<ExtendedUploadPiece>,
+) {
     if (left.length !== right.length) return right.length - left.length;
     if (left.sourcePath !== right.sourcePath) return left.sourcePath < right.sourcePath ? -1 : 1;
     if (left.offset !== right.offset) return left.offset - right.offset;
     return left.sourceIndex - right.sourceIndex;
+}
+
+function compareSizedItems<T>(left: SizedPackItem<T>, right: SizedPackItem<T>) {
+    if (left.size !== right.size) return right.size - left.size;
+    if (left.sortKey === right.sortKey) return 0;
+    return left.sortKey < right.sortKey ? -1 : 1;
 }
 
 function validateLimits(limits: ExtendedUploadLimits) {

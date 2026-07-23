@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
     createExtendedUploadPlan,
     EXTENDED_UPLOAD_DEFAULT_LIMITS,
+    packSizedItems,
     type ExtendedUploadSourceFile,
 } from "./extended-upload-plan";
 
@@ -142,6 +143,22 @@ describe("extended upload planning", () => {
         ).toEqual([
             ["a.bin", "b.bin"],
             ["z.bin", "c.bin"],
+        ]);
+    });
+
+    it("breaks remaining-capacity ties with the lowest collection index", () => {
+        const collections = packSizedItems(
+            [
+                { id: "a", size: 5, sortKey: "a" },
+                { id: "b", size: 5, sortKey: "b" },
+                { id: "c", size: 5, sortKey: "c" },
+            ],
+            { maxFiles: 10, maxBytes: 10 },
+        );
+
+        expect(collections.map((collection) => collection.items.map((item) => item.id))).toEqual([
+            ["a", "b"],
+            ["c"],
         ]);
     });
 });
