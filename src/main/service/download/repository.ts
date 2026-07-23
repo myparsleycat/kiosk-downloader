@@ -713,21 +713,10 @@ export class DownloadRepository {
             };
         }
 
-        const status = collections.some(
-            (collection) => collection.status === "error" || collection.status === "expired",
-        )
-            ? "error"
-            : collections.length > 0 &&
-                collections.every((collection) => collection.status === "completed")
-              ? bundle.status
-              : collections.some((collection) => collection.status === "downloading")
-                ? "downloading"
-                : bundle.status;
-
         return {
             progress,
             summary,
-            status: status as DownloadStatus,
+            status: computeBundleStatus(collections, bundle.status),
             subCollectionIds: collections.map((collection) => collection.id),
             elapsedMs: collections.reduce((sum, collection) => sum + collection.elapsedMs, 0),
             updatedAt: Math.max(
@@ -1723,16 +1712,6 @@ export class DownloadRepository {
             summary.totalFiles += 1;
             if (file.status === "completed") summary.completedFiles += 1;
         }
-        const status = collections.some(
-            (collection) => collection.status === "error" || collection.status === "expired",
-        )
-            ? "error"
-            : collections.length > 0 &&
-                collections.every((collection) => collection.status === "completed")
-              ? bundle.status
-              : collections.some((collection) => collection.status === "downloading")
-                ? "downloading"
-                : bundle.status;
         return {
             id: bundle.id,
             collection: {
@@ -1747,7 +1726,7 @@ export class DownloadRepository {
             savePath: bundle.savePath,
             progress,
             summary,
-            status,
+            status: computeBundleStatus(collections, bundle.status),
             createdAt: Date.parse(bundle.createdAt),
             updatedAt: Math.max(
                 Date.parse(bundle.updatedAt),
@@ -1763,6 +1742,29 @@ export class DownloadRepository {
                 undefined,
         };
     }
+}
+
+function computeBundleStatus(
+    collections: Array<{ status: DownloadStatus }>,
+    bundleStatus: DownloadStatus,
+): DownloadStatus {
+    if (
+        collections.some(
+            (collection) => collection.status === "error" || collection.status === "expired",
+        )
+    ) {
+        return "error";
+    }
+    if (
+        collections.length > 0 &&
+        collections.every((collection) => collection.status === "completed")
+    ) {
+        return bundleStatus;
+    }
+    if (collections.some((collection) => collection.status === "downloading")) {
+        return "downloading";
+    }
+    return bundleStatus;
 }
 
 function downloadedForSplit(
