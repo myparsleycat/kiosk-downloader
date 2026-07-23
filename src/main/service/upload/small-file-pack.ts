@@ -265,10 +265,10 @@ function partitionByHashPrefix(instances: PackInstance[], depth: number): PackIn
     if (instances.length === 0) return [];
     const total = instances.reduce((sum, instance) => sum + instance.file.size, 0);
     if (total <= SMALL_FILE_PACK_BYTES) return [instances];
-    // Placement keys are 256-bit SHA-256 digests, and occurrence disambiguates
-    // identical content, so each instance has a unique key. MAX_TRIE_DEPTH is the
-    // full digest width: reaching it implies identical keys, which cannot happen.
-    if (depth >= MAX_TRIE_DEPTH) return [instances];
+    // Guard the pack cap as a hard invariant even on a (cryptographically
+    // improbable) placement-key collision at the full 256-bit depth: fall back
+    // to direct uploads rather than emit an oversized leaf.
+    if (depth >= MAX_TRIE_DEPTH) return instances.map((instance) => [instance]);
 
     const zero: PackInstance[] = [];
     const one: PackInstance[] = [];

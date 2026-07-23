@@ -125,7 +125,6 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const [modeDialogSummary, setModeDialogSummary] = React.useState({
     files: 0,
     bytes: 0,
-    integratedCollections: 0,
     compatibleCollections: 0,
   });
   const [oversizeDialogOpen, setOversizeDialogOpen] = React.useState(false);
@@ -163,7 +162,9 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const totalBytes = files.reduce((a, f) => a + f.size, 0);
   const extendedRequired = totalFiles > MAX_UPLOAD_FILES || totalBytes > MAX_UPLOAD_BYTES;
   const plannedCollections = React.useMemo(() => {
-    if (!extendedRequired || mode === "standard") return 1;
+    // integrated 모드는 content hash 기반 packing 후에야 collection 수가 확정되므로
+    // 업로드 전 계획값을 표시하지 않는다. compatible만 정확값을 사용한다.
+    if (!extendedRequired || mode !== "compatible") return 1;
     const planned = createExtendedUploadPlan(files, mode);
     return planned.ok ? planned.collections.length : 0;
   }, [extendedRequired, files, mode]);
@@ -175,12 +176,10 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const canUpload = totalFiles > 0 && name.trim().length > 0 && !starting;
 
   const askMode = (nextFiles: UploadTreeFile[]) => {
-    const integrated = createExtendedUploadPlan(nextFiles, "integrated");
     const compatible = createExtendedUploadPlan(nextFiles, "compatible");
     setModeDialogSummary({
       files: nextFiles.length,
       bytes: nextFiles.reduce((sum, file) => sum + file.size, 0),
-      integratedCollections: integrated.ok ? integrated.collections.length : 0,
       compatibleCollections: compatible.ok ? compatible.collections.length : 0,
     });
     setModeChoice(null);
@@ -377,7 +376,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
                 Kiosk Downloader 전용 · 대형 파일 자동 재조립 · 공유 정보 1개
               </span>
               <span className="mt-2 block text-xs tabular-nums">
-                최대 {modeDialogSummary.integratedCollections}개 컬렉션 · 같은 횟수의 보안 인증
+                파일 분석 후 컬렉션 수와 보안 인증 횟수가 결정됩니다
               </span>
             </button>
             <button
@@ -585,7 +584,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
                     </div>
                     <div className="mt-1 text-muted-foreground">
                       {mode === "integrated"
-                        ? `최대 ${plannedCollections}개 컬렉션 · 같은 횟수의 보안 인증`
+                        ? "파일 분석 후 컬렉션 수와 보안 인증 횟수가 결정됩니다"
                         : `예상 ${plannedCollections}개 컬렉션 · ${plannedCollections}회의 보안 인증`}
                     </div>
                   </div>
