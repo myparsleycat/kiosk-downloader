@@ -238,7 +238,12 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
           return;
         }
         if (choice === "integrated") nextMode = "integrated";
-        else accepted = result.files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+        else {
+          removeFiles(
+            merged.filter((file) => file.size > MAX_UPLOAD_BYTES).map((file) => file.path),
+          );
+          accepted = result.files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+        }
       }
 
       setMode(nextMode);
