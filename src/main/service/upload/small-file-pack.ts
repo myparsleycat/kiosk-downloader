@@ -5,7 +5,6 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import fse from "fs-extra";
-import pLimit from "p-limit";
 
 import type { UploadSourceFile } from "./types";
 
@@ -211,19 +210,25 @@ export async function hashFilesBounded(
     onProgress?.(0, total);
     if (total === 0) return new Map<string, string>();
 
-    const limit = pLimit(concurrency);
+    const results = new Map<string, string>();
+    let cursor = 0;
     let done = 0;
-    const entries = await Promise.all(
-        unique.map((filePath) =>
-            limit(async () => {
-                const digest = await hashFile(filePath);
+    const workerCount = Math.min(concurrency, total);
+    // Fixed worker pool: only `workerCount` closures exist at once, so a corpus
+    // near the manifest limit does not materialize one promise per file up front.
+    await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+            while (true) {
+                const index = cursor++;
+                const filePath = unique[index];
+                if (filePath === undefined) return;
+                results.set(filePath, await hashFile(filePath));
                 done += 1;
                 onProgress?.(done, total);
-                return [filePath, digest] as const;
-            }),
-        ),
+            }
+        }),
     );
-    return new Map(entries);
+    return results;
 }
 
 function assignPackInstances(candidates: PersistedBundleFile[]): PackInstance[] {
@@ -259,9 +264,11 @@ function assignPackInstances(candidates: PersistedBundleFile[]): PackInstance[] 
 function partitionByHashPrefix(instances: PackInstance[], depth: number): PackInstance[][] {
     if (instances.length === 0) return [];
     const total = instances.reduce((sum, instance) => sum + instance.file.size, 0);
-    if (total <= SMALL_FILE_PACK_BYTES || depth >= MAX_TRIE_DEPTH) {
-        return [instances];
-    }
+    if (total <= SMALL_FILE_PACK_BYTES) return [instances];
+    // Placement keys are 256-bit SHA-256 digests, and occurrence disambiguates
+    // identical content, so each instance has a unique key. MAX_TRIE_DEPTH is the
+    // full digest width: reaching it implies identical keys, which cannot happen.
+    if (depth >= MAX_TRIE_DEPTH) return [instances];
 
     const zero: PackInstance[] = [];
     const one: PackInstance[] = [];
@@ -270,10 +277,11 @@ function partitionByHashPrefix(instances: PackInstance[], depth: number): PackIn
         else one.push(instance);
     }
 
-    // Pathological hash collision: force direct uploads rather than infinite split.
-    if (zero.length === 0 || one.length === 0) {
-        return instances.map((instance) => [instance]);
-    }
+    // A shared prefix bit is normal, not a collision — keep descending into the
+    // non-empty side. Only a fully-exhausted digest at MAX_TRIE_DEPTH forces a
+    // multi-instance leaf, which is unreachable for unique placement keys.
+    if (zero.length === 0) return partitionByHashPrefix(one, depth + 1);
+    if (one.length === 0) return partitionByHashPrefix(zero, depth + 1);
 
     return [...partitionByHashPrefix(zero, depth + 1), ...partitionByHashPrefix(one, depth + 1)];
 }

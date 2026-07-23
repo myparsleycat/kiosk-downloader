@@ -1146,6 +1146,7 @@ export class UploadService {
                 "UploadService:bundleSegmentDedup",
             );
         }
+        this.metrics.clearSegmentDedup(collections.map((c) => c.id));
         await this.cleanupBundlePacks(bundle.id);
     }
 

@@ -146,6 +146,12 @@ export class UploadTransferMetrics {
         this.collectionSpeed.clear(bundleId);
     }
 
+    public clearSegmentDedup(collectionIds: Iterable<string>) {
+        for (const collectionId of collectionIds) {
+            this.segmentDedupByCollection.delete(collectionId);
+        }
+    }
+
     public recordSegmentExists(collectionId: string, bytes: number) {
         const counters = this.ensureSegmentDedup(collectionId);
         counters.existsCount += 1;

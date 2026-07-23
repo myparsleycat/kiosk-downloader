@@ -377,7 +377,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
                 Kiosk Downloader 전용 · 대형 파일 자동 재조립 · 공유 정보 1개
               </span>
               <span className="mt-2 block text-xs tabular-nums">
-                {modeDialogSummary.integratedCollections}개 컬렉션 · 같은 횟수의 보안 인증
+                최대 {modeDialogSummary.integratedCollections}개 컬렉션 · 같은 횟수의 보안 인증
               </span>
             </button>
             <button
@@ -584,7 +584,9 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
                       확장 업로드 · {mode === "integrated" ? "통합 공유" : "호환 공유"}
                     </div>
                     <div className="mt-1 text-muted-foreground">
-                      예상 {plannedCollections}개 컬렉션 · {plannedCollections}회의 보안 인증
+                      {mode === "integrated"
+                        ? `최대 ${plannedCollections}개 컬렉션 · 같은 횟수의 보안 인증`
+                        : `예상 ${plannedCollections}개 컬렉션 · ${plannedCollections}회의 보안 인증`}
                     </div>
                   </div>
                   <Button size="xs" variant="ghost" onClick={() => void handleModeChange()}>

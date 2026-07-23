@@ -48,11 +48,39 @@ function packDigests(artifacts: PersistedBundleFile[]) {
         .filter((file) => file.packEntries)
         .map((file) => ({
             path: file.path,
-            entries: file.packEntries!.map((entry) => entry.contentSha256 ?? "").toSorted((a, b) =>
-                a < b ? -1 : a > b ? 1 : 0,
-            ),
+            entries: file
+                .packEntries!.map((entry) => entry.contentSha256 ?? "")
+                .toSorted((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
         }))
         .toSorted((left, right) => (left.path < right.path ? -1 : 1));
+}
+
+// Mirrors the module-private placement key derivation so the test can pick
+// inputs whose first trie bit collides without relying on internal exports.
+const PLACEMENT_DOMAIN = "KDE-PACK-V2";
+
+function placementFirstBit(contentSha256: string, size: number, occurrence: number) {
+    const hash = createHash("sha256");
+    hash.update(PLACEMENT_DOMAIN);
+    hash.update(Buffer.from([0]));
+    hash.update(Buffer.from(contentSha256, "hex"));
+    const sizeBuf = Buffer.alloc(8);
+    sizeBuf.writeBigUInt64BE(BigInt(size));
+    hash.update(sizeBuf);
+    const occBuf = Buffer.alloc(4);
+    occBuf.writeUInt32BE(occurrence);
+    hash.update(occBuf);
+    return (hash.digest()[0]! >> 7) & 1;
+}
+
+function pickSharedFirstBitSources(count: number, size: number) {
+    const byBit: [PersistedBundleFile[], PersistedBundleFile[]] = [[], []];
+    for (let index = 0; byBit[0].length < count && byBit[1].length < count; index += 1) {
+        const name = `shared-${index}`;
+        const sha = createHash("sha256").update(name).digest("hex");
+        byBit[placementFirstBit(sha, size, 0)].push(source(name, size, sha));
+    }
+    return byBit[0].length >= count ? byBit[0].slice(0, count) : byBit[1].slice(0, count);
 }
 
 describe("small file packs", () => {
@@ -182,6 +210,24 @@ describe("small file packs", () => {
         const pack = artifacts.find((file) => file.packEntries);
         expect(pack?.size).toBe(16);
         expect(pack?.packEntries).toHaveLength(2);
+    });
+
+    it("continues through a shared trie prefix instead of falling back to direct files", () => {
+        // Seven 15 MiB files total 105 MiB, just over the 100 MiB cap. We pick
+        // contents whose placement keys all share bit 0, exercising the branch
+        // where one trie side is empty. The fix descends into the non-empty
+        // side; the old code wrongly emitted singleton direct files here.
+        const target = 7;
+        const picked = pickSharedFirstBitSources(target, 15 * 1024 ** 2);
+        expect(picked).toHaveLength(target);
+
+        const artifacts = createDeterministicPackArtifacts(picked, "/packs");
+        const packs = artifacts.filter((file) => file.packEntries);
+
+        expect(packs.length).toBeGreaterThan(0);
+        for (const pack of packs) expect(pack.size).toBeLessThanOrEqual(SMALL_FILE_PACK_BYTES);
+        const direct = artifacts.filter((file) => !file.packEntries);
+        expect(direct.length).toBeLessThan(target);
     });
 
     it("preserves legacy collection-local packing for v1 resume", () => {
