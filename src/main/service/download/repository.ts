@@ -589,7 +589,8 @@ export class DownloadRepository {
              FROM "download_file"
              WHERE "collection_id" IN (
                 SELECT "id" FROM "download_collection" WHERE "bundle_id" = ?
-             )`,
+             )
+             ORDER BY "path" ASC, "id" ASC`,
             [bundleId],
         );
     }
