@@ -250,6 +250,7 @@ export class TurnstileSolver {
     private sessionParent: BrowserWindow | null | undefined = undefined;
     private sessionActive = false;
     private chromeUserAgent = this.buildChromeUserAgent();
+    private solveChain: Promise<unknown> = Promise.resolve();
 
     public constructor(private readonly kd: KioskDownloader) {}
 
@@ -273,6 +274,16 @@ export class TurnstileSolver {
     // Turnstile widget, and wait for the solved token. Applies best-effort stealth
     // so Electron looks closer to stock Chrome; network-level TLS fingerprint still differs.
     public async solve(
+        parentWindow?: BrowserWindow | null,
+        progress?: { current: number; total: number },
+    ): Promise<string> {
+        const run = () => this.solveOnce(parentWindow, progress);
+        const next = this.solveChain.then(run, run);
+        this.solveChain = next.catch(() => {});
+        return next as Promise<string>;
+    }
+
+    private async solveOnce(
         parentWindow?: BrowserWindow | null,
         progress?: { current: number; total: number },
     ): Promise<string> {
