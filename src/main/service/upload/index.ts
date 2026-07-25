@@ -432,14 +432,16 @@ export class UploadService {
             stage: "resolve-failed-collection",
         };
         // Serialize against bundle initialization: both create physical
-        // collections for the same bundle and must not interleave.
+        // collections for the same bundle and must not interleave. If an
+        // initialization is in flight, chain after it so the requested
+        // replacement still runs instead of being dropped.
         const existing = this.bundleInitializations.get(bundleId);
-        if (existing) return existing;
         const task = withLoggedError(
             this.kd.logger,
             "UploadService:replaceFailedCollection",
             context,
             async () => {
+                if (existing) await existing;
                 const bundle = this.repository.getBundle(bundleId);
                 if (!bundle || bundle.mode !== "integrated") {
                     throw new Error("교체할 통합 업로드를 찾을 수 없습니다.");
