@@ -916,11 +916,12 @@ export class UploadRepository {
                     (file) => file.collectionId === collection.id && file.path === plannedFile.path,
                 );
                 for (const entry of plannedFile.packEntries) {
-                    const uploaded = physical
-                        ? Math.floor(
-                              entry.size * Math.min(1, physical.uploadedBytes / physical.size),
-                          )
-                        : 0;
+                    const uploaded =
+                        physical && physical.size > 0
+                            ? Math.floor(
+                                  entry.size * Math.min(1, physical.uploadedBytes / physical.size),
+                              )
+                            : 0;
                     const status = physical?.status ?? "pending";
                     progress[entry.path] = {
                         fileId: physical
