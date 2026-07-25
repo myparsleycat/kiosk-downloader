@@ -1283,10 +1283,34 @@ export class DownloadService {
         }
     }
 
+    private parseStoredManifest(
+        bundleId: string,
+        manifestJson: string,
+    ): StoredExtendedManifest | null {
+        try {
+            return JSON.parse(manifestJson) as StoredExtendedManifest;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.kd.logger.error(
+                {
+                    action: "bundle-manifest-parse",
+                    bundleId,
+                    stage: "parse-manifest",
+                    message,
+                },
+                "DownloadService:parseStoredManifest",
+            );
+            this.repository.markBundleStatus(bundleId, "error", message);
+            void this.emitUpdate(bundleId);
+            return null;
+        }
+    }
+
     private restoreReassemblyCoordinator(bundleId: string) {
         const bundle = this.repository.getBundle(bundleId);
         if (!bundle) return;
-        const manifest = JSON.parse(bundle.manifestJson) as StoredExtendedManifest;
+        const manifest = this.parseStoredManifest(bundleId, bundle.manifestJson);
+        if (!manifest) return;
         this.createReassemblyCoordinator(bundleId, manifest);
         const coordinator = this.reassemblyCoordinators.get(bundleId);
         if (!coordinator) return;
@@ -1504,7 +1528,8 @@ export class DownloadService {
         if (!target) return [];
         const bundle = this.repository.getBundle(bundleId);
         if (!bundle) return [];
-        const manifest = JSON.parse(bundle.manifestJson) as StoredExtendedManifest;
+        const manifest = this.parseStoredManifest(bundleId, bundle.manifestJson);
+        if (!manifest) return [];
         const split = manifest.splitFiles.find((file) =>
             file.pieces.some((piece) => piece.remoteFileId === target.remoteId),
         );
