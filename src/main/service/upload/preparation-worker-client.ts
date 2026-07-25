@@ -66,6 +66,7 @@ export class PreparationWorkerClient {
             task.reject(new Error("preparation worker destroyed"));
         }
         if (this.active) {
+            this.active.worker.removeAllListeners();
             this.active.task.reject(new Error("preparation worker destroyed"));
             void this.active.worker.terminate().catch(() => {});
             this.active = null;
