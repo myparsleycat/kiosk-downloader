@@ -197,6 +197,7 @@ export class DownloadService {
             async () => {
                 if (payload.url.trim().startsWith(EXTENDED_SHARE_PREFIX)) {
                     const loaded = await this.loadExtendedCollection(payload);
+                    this.extendedDrafts.clear();
                     this.extendedDrafts.set(payload.url.trim(), loaded);
                     return loaded.collection;
                 }
