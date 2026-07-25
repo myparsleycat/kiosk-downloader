@@ -168,6 +168,11 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const canUpload = totalFiles > 0 && name.trim().length > 0 && !starting;
 
   const askMode = (nextFiles: UploadTreeFile[]) => {
+    if (modeResolverRef.current) {
+      const previous = modeResolverRef.current;
+      modeResolverRef.current = null;
+      previous(null);
+    }
     const compatible = createExtendedUploadPlan(nextFiles, "compatible");
     setModeDialogSummary({
       files: nextFiles.length,
@@ -190,6 +195,11 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   };
 
   const askOversize = () => {
+    if (oversizeResolverRef.current) {
+      const previous = oversizeResolverRef.current;
+      oversizeResolverRef.current = null;
+      previous("cancel");
+    }
     setOversizeDialogOpen(true);
     return new Promise<"integrated" | "exclude" | "cancel">((resolve) => {
       oversizeResolverRef.current = resolve;
@@ -203,6 +213,23 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
     setOversizeDialogOpen(false);
     resolve(choice);
   };
+
+  React.useEffect(() => {
+    return () => {
+      if (modeResolverRef.current) {
+        const resolve = modeResolverRef.current;
+        modeResolverRef.current = null;
+        setModeDialogOpen(false);
+        resolve(null);
+      }
+      if (oversizeResolverRef.current) {
+        const resolve = oversizeResolverRef.current;
+        oversizeResolverRef.current = null;
+        setOversizeDialogOpen(false);
+        resolve("cancel");
+      }
+    };
+  }, []);
 
   const handleAddExpanded = async (load: () => Promise<ExpandPathsResult>) => {
     setExpanding(true);
