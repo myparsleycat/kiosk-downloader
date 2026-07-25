@@ -78,7 +78,7 @@ describe("reassembleExtendedFile", () => {
         const dir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-test-"));
         testDirs.push(dir);
         const piecePath = path.join(dir, "piece");
-        const finalPath = path.join(dir, "output", "question?.txt");
+        const finalPath = path.join(dir, "output", "renamed_file.txt");
         await fse.writeFile(piecePath, "");
 
         await reassembleExtendedFile({
