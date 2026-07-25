@@ -359,7 +359,7 @@ describe("DownloadRepository bundles", () => {
                             {
                                 sourceIndex: 1,
                                 remoteFileId: "remote-1",
-                                offset: 0,
+                                offset: 10,
                                 length: 5,
                             },
                         ],
