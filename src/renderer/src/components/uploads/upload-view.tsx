@@ -123,7 +123,9 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
   const [renameTarget, setRenameTarget] = React.useState<RenameTarget | null>(null);
   const [renameError, setRenameError] = React.useState<string | null>(null);
   const renameTargetRef = React.useRef(renameTarget);
-  renameTargetRef.current = renameTarget;
+  React.useEffect(() => {
+    renameTargetRef.current = renameTarget;
+  }, [renameTarget]);
   const modeResolverRef = React.useRef<
     ((choice: Exclude<UploadMode, "standard"> | null) => void) | null
   >(null);
