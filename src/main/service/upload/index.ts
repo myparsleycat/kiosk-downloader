@@ -57,6 +57,18 @@ function toDisplayFile(file: UploadSourceFile): UploadTreeFile {
     };
 }
 
+// For a bundle-resolved request the file's owning bundle must match, so a
+// fileId from a different bundle or standalone collection is rejected.
+function ownsFile(
+    repository: UploadRepository,
+    bundle: UploadBundleRow | null,
+    file: { collectionId: string },
+    collectionId: string,
+): boolean {
+    if (!bundle) return file.collectionId === collectionId;
+    return repository.getBundleByCollection(file.collectionId)?.id === bundle.id;
+}
+
 export class UploadService {
     private readonly api: KioUploadClient;
     private readonly repository: UploadRepository;
@@ -279,7 +291,7 @@ export class UploadService {
         const bundle = this.repository.getBundle(collectionId);
         const physicalFileId = fileId.split("::pack::", 1)[0];
         const file = this.repository.getFile(physicalFileId);
-        if (!file || (!bundle && file.collectionId !== collectionId)) {
+        if (!file || !ownsFile(this.repository, bundle, file, collectionId)) {
             return null;
         }
         await this.scheduler.pauseFile(file.id);
@@ -299,7 +311,7 @@ export class UploadService {
         const bundle = this.repository.getBundle(collectionId);
         const physicalFileId = fileId.split("::pack::", 1)[0];
         const file = this.repository.getFile(physicalFileId);
-        if (!file || (!bundle && file.collectionId !== collectionId)) {
+        if (!file || !ownsFile(this.repository, bundle, file, collectionId)) {
             return null;
         }
         const collection = this.repository.getCollection(file.collectionId);
