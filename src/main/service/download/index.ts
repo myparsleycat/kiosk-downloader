@@ -752,17 +752,24 @@ export class DownloadService {
         }
     }
 
-    /** Read a .kds share file. Opens a picker when path is omitted. */
-    public async readShareFile(filePath?: string) {
-        const resolvedPath =
-            filePath ??
-            (
-                await showOpenDialog({
-                    title: "확장 공유 파일 선택",
-                    properties: ["openFile"],
-                    filters: KDS_FILTERS,
-                })
-            ).filePaths[0];
+    /**
+     * Read a .kds share file.
+     * - No payload: opens a trusted file picker and reads the selected path in main.
+     * - `{ bytes }`: decodes caller-supplied contents (e.g. dropped File via preload).
+     * Renderer-supplied filesystem paths are never accepted.
+     */
+    public async readShareFile(payload?: { bytes: Uint8Array }) {
+        if (payload?.bytes) {
+            return this.decodeShareFileBytes(payload.bytes);
+        }
+
+        const resolvedPath = (
+            await showOpenDialog({
+                title: "확장 공유 파일 선택",
+                properties: ["openFile"],
+                filters: KDS_FILTERS,
+            })
+        ).filePaths[0];
         if (!resolvedPath) {
             return null;
         }
@@ -784,12 +791,34 @@ export class DownloadService {
                     throw new Error("확장 공유 파일이 너무 큽니다.");
                 }
                 const bytes = await fse.readFile(resolvedPath);
-                if (!isExtendedShareFile(bytes)) {
-                    throw new Error("유효한 .kds 파일이 아닙니다.");
-                }
-                return { shareInput: decodeExtendedShareFile(bytes) };
+                return this.decodeShareFileBuffer(bytes);
             },
         );
+    }
+
+    private async decodeShareFileBytes(bytes: Uint8Array) {
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:readShareFile",
+            {
+                channel: "download:readShareFile",
+                stage: "decode-bytes",
+                byteLength: bytes.byteLength,
+            },
+            async () => {
+                if (bytes.byteLength > MAX_SHARE_FILE_BYTES) {
+                    throw new Error("확장 공유 파일이 너무 큽니다.");
+                }
+                return this.decodeShareFileBuffer(Buffer.from(bytes));
+            },
+        );
+    }
+
+    private decodeShareFileBuffer(bytes: Buffer) {
+        if (!isExtendedShareFile(bytes)) {
+            throw new Error("유효한 .kds 파일이 아닙니다.");
+        }
+        return { shareInput: decodeExtendedShareFile(bytes) };
     }
 
     public async exportCollection(collectionId: string) {

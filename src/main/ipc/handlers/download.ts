@@ -42,7 +42,7 @@ export function registerDownloadHandlers(kd: KioskDownloader) {
     rh("download:openFolder", (id: string) => kd.service.download.openFolder(id));
     rh("download:exportCollection", (id: string) => kd.service.download.exportCollection(id));
     rh("download:importCollection", () => kd.service.download.importCollection());
-    rh("download:readShareFile", (filePath?: string) =>
-        kd.service.download.readShareFile(filePath),
+    rh("download:readShareFile", (payload?: { bytes: Uint8Array }) =>
+        kd.service.download.readShareFile(payload),
     );
 }
