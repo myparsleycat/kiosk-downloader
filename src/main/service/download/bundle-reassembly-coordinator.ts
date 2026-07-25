@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 import { Transform } from "node:stream";
@@ -567,7 +567,14 @@ export class BundleReassemblyCoordinator {
             assembledBytes: state.assembledBytes,
         };
         await fse.ensureDir(path.dirname(state.progressPath));
-        await fse.writeFile(state.progressPath, `${JSON.stringify(progress)}\n`, "utf8");
+        const tempPath = `${state.progressPath}.${randomUUID()}.tmp`;
+        try {
+            await fse.writeFile(tempPath, `${JSON.stringify(progress)}\n`, "utf8");
+            await fse.move(tempPath, state.progressPath, { overwrite: true });
+        } catch (error) {
+            await fse.remove(tempPath).catch(() => undefined);
+            throw error;
+        }
     }
 
     private async ensurePartMatchesAssembledBytes(state: MultiPieceState): Promise<void> {
