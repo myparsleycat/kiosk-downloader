@@ -1297,7 +1297,7 @@ export class DownloadService {
                     file.status === "completed" &&
                     coordinator.isPieceManaged(collection.id, file.remoteId)
                 ) {
-                    void coordinator.onPieceFileSettled(collection.id, file.remoteId);
+                    this.runPieceFileSettled(bundleId, coordinator, collection.id, file.remoteId);
                 }
             }
         }
@@ -1329,9 +1329,17 @@ export class DownloadService {
         const coordinator = this.reassemblyCoordinators.get(collection.bundleId);
         if (!coordinator) return;
         if (!coordinator.isPieceManaged(collection.id, file.remoteId)) return;
-        const bundleId = collection.bundleId;
+        this.runPieceFileSettled(collection.bundleId, coordinator, collection.id, file.remoteId);
+    }
+
+    private runPieceFileSettled(
+        bundleId: string,
+        coordinator: BundleReassemblyCoordinator,
+        collectionId: string,
+        remoteId: string,
+    ) {
         void coordinator
-            .onPieceFileSettled(collection.id, file.remoteId)
+            .onPieceFileSettled(collectionId, remoteId)
             .then((result) => {
                 if (result.publishedPaths.length > 0) {
                     void this.emitUpdate(bundleId);
@@ -1344,7 +1352,7 @@ export class DownloadService {
                         bundleId,
                         message: error instanceof Error ? error.message : String(error),
                     },
-                    "DownloadService:handleFileFinalized",
+                    "DownloadService:runPieceFileSettled",
                 );
                 await coordinator.teardown();
                 this.reassemblyCoordinators.delete(bundleId);
@@ -1362,7 +1370,7 @@ export class DownloadService {
                         bundleId,
                         message: error instanceof Error ? error.message : String(error),
                     },
-                    "DownloadService:handleFileFinalized",
+                    "DownloadService:runPieceFileSettled",
                 );
             });
     }
