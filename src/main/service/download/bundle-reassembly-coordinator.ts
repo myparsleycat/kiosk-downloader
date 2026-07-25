@@ -26,6 +26,11 @@ type StoredExtendedManifest = {
     }>;
 };
 
+type MultiPieceProgress = {
+    nextIndex: number;
+    assembledBytes: number;
+};
+
 type MultiPieceState = {
     path: string;
     size: number;
@@ -42,6 +47,7 @@ type MultiPieceState = {
     hash: ReturnType<typeof createHash>;
     assembledBytes: number;
     partPath: string;
+    progressPath: string;
     finalPath: string;
     published: boolean;
 };
@@ -90,6 +96,7 @@ export class BundleReassemblyCoordinator {
     private readonly remoteIdToPack = new Map<string, string>();
     private flushLock: Promise<unknown> = Promise.resolve();
     private tornDown = false;
+    private multiPieceProgressHydrated = false;
     private readonly asciiFilenames: boolean;
 
     public constructor(
@@ -157,6 +164,7 @@ export class BundleReassemblyCoordinator {
             hash: createHash("sha256"),
             assembledBytes: 0,
             partPath,
+            progressPath: `${partPath}.progress.json`,
             finalPath,
             published: false,
         };
@@ -276,6 +284,8 @@ export class BundleReassemblyCoordinator {
             if (this.tornDown) return { publishedPaths: [] };
             const published: string[] = [];
 
+            await this.hydrateMultiPieceProgress();
+
             for (const pack of this.packFiles.values()) {
                 if (!pack.published) continue;
                 for (const entry of pack.entries) {
@@ -307,6 +317,7 @@ export class BundleReassemblyCoordinator {
                     }
 
                     await fse.ensureDir(path.dirname(state.partPath));
+                    await this.ensurePartMatchesAssembledBytes(state);
 
                     if (piece.length === 0) {
                         if (state.nextIndex === 0) {
@@ -338,6 +349,9 @@ export class BundleReassemblyCoordinator {
                     const consumedIndex = state.nextIndex;
                     state.nextIndex += 1;
 
+                    // Persist before deleting consumed pieces so restore can resume
+                    // without replaying deleted piece files.
+                    await this.persistMultiPieceProgress(state);
                     await this.releasePieceFileIfConsumed(state, consumedIndex);
                 }
 
@@ -353,6 +367,7 @@ export class BundleReassemblyCoordinator {
                     }
                     await fse.ensureDir(path.dirname(state.finalPath));
                     await fse.move(state.partPath, state.finalPath, { overwrite: true });
+                    await fse.remove(state.progressPath).catch(() => undefined);
                     state.published = true;
                     published.push(state.finalPath);
                 }
@@ -468,7 +483,105 @@ export class BundleReassemblyCoordinator {
         for (const state of this.multiPieceFiles.values()) {
             if (!state.published) {
                 await fse.remove(state.partPath).catch(() => undefined);
+                await fse.remove(state.progressPath).catch(() => undefined);
             }
+        }
+    }
+
+    private async hydrateMultiPieceProgress(): Promise<void> {
+        if (this.multiPieceProgressHydrated) return;
+        this.multiPieceProgressHydrated = true;
+        for (const state of this.multiPieceFiles.values()) {
+            await this.loadMultiPieceProgress(state);
+        }
+    }
+
+    private async loadMultiPieceProgress(state: MultiPieceState): Promise<void> {
+        const finalStat = await fse.stat(state.finalPath).catch(() => null);
+        if (finalStat && finalStat.size === state.size) {
+            state.published = true;
+            state.nextIndex = state.pieces.length;
+            state.assembledBytes = state.size;
+            await fse.remove(state.progressPath).catch(() => undefined);
+            return;
+        }
+
+        const raw = await fse.readFile(state.progressPath, "utf8").catch(() => null);
+        if (!raw) return;
+
+        let progress: MultiPieceProgress;
+        try {
+            progress = JSON.parse(raw) as MultiPieceProgress;
+        } catch {
+            throw new Error(`재조립 진행 정보가 손상되었습니다: ${state.path}`);
+        }
+
+        if (
+            !Number.isInteger(progress.nextIndex) ||
+            progress.nextIndex < 0 ||
+            progress.nextIndex > state.pieces.length ||
+            !Number.isInteger(progress.assembledBytes) ||
+            progress.assembledBytes < 0
+        ) {
+            throw new Error(`재조립 진행 정보가 올바르지 않습니다: ${state.path}`);
+        }
+
+        const expectedBytes = state.pieces
+            .slice(0, progress.nextIndex)
+            .reduce((sum, piece) => sum + piece.length, 0);
+        if (progress.assembledBytes !== expectedBytes) {
+            throw new Error(`재조립 진행 바이트가 일치하지 않습니다: ${state.path}`);
+        }
+
+        if (progress.nextIndex === state.pieces.length) {
+            if (progress.assembledBytes !== state.size) {
+                throw new Error(`재조립 진행 바이트가 일치하지 않습니다: ${state.path}`);
+            }
+            // Assembly finished but final rename did not; keep part for publish.
+        }
+
+        if (progress.nextIndex > 0 || progress.assembledBytes > 0) {
+            const partStat = await fse.stat(state.partPath).catch(() => null);
+            if (!partStat) {
+                throw new Error(`재조립 임시 파일이 없습니다: ${state.path}`);
+            }
+            if (partStat.size < progress.assembledBytes) {
+                throw new Error(`재조립 임시 파일이 짧습니다: ${state.path}`);
+            }
+            if (partStat.size > progress.assembledBytes) {
+                await fse.truncate(state.partPath, progress.assembledBytes);
+            }
+            if (state.sha256 && progress.assembledBytes > 0) {
+                state.hash = createHash("sha256");
+                await updateHashFromRange(state.hash, state.partPath, 0, progress.assembledBytes);
+            }
+        }
+
+        state.nextIndex = progress.nextIndex;
+        state.assembledBytes = progress.assembledBytes;
+    }
+
+    private async persistMultiPieceProgress(state: MultiPieceState): Promise<void> {
+        const progress: MultiPieceProgress = {
+            nextIndex: state.nextIndex,
+            assembledBytes: state.assembledBytes,
+        };
+        await fse.ensureDir(path.dirname(state.progressPath));
+        await fse.writeFile(state.progressPath, `${JSON.stringify(progress)}\n`, "utf8");
+    }
+
+    private async ensurePartMatchesAssembledBytes(state: MultiPieceState): Promise<void> {
+        if (state.assembledBytes === 0 && state.nextIndex === 0) return;
+        const partStat = await fse.stat(state.partPath).catch(() => null);
+        if (!partStat) {
+            if (state.assembledBytes === 0) return;
+            throw new Error(`재조립 임시 파일이 없습니다: ${state.path}`);
+        }
+        if (partStat.size < state.assembledBytes) {
+            throw new Error(`재조립 임시 파일이 짧습니다: ${state.path}`);
+        }
+        if (partStat.size > state.assembledBytes) {
+            await fse.truncate(state.partPath, state.assembledBytes);
         }
     }
 }

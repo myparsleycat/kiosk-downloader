@@ -373,6 +373,91 @@ describe("BundleReassemblyCoordinator", () => {
         expect(await fse.pathExists(path.join(dir, "output.bin"))).toBe(false);
     });
 
+    it("resumes multi-piece assembly from persisted progress after consumed pieces are deleted", async () => {
+        const dir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-coord-test-"));
+        testDirs.push(dir);
+
+        const collection0 = createCollection("col-0", 0, path.join(dir, "col-0"));
+        const collection1 = createCollection("col-1", 1, path.join(dir, "col-1"));
+        await fse.ensureDir(collection0.savePath);
+        await fse.ensureDir(collection1.savePath);
+
+        const piece0Data = Buffer.from("hello ");
+        const piece1Data = Buffer.from("extended upload");
+        const piece0Path = path.join(collection0.savePath, "piece0.bin");
+        const piece1Path = path.join(collection1.savePath, "piece1.bin");
+        await fse.writeFile(piece0Path, piece0Data);
+        await fse.writeFile(piece1Path, piece1Data);
+
+        const expected = Buffer.concat([piece0Data, piece1Data]);
+        const manifest = {
+            renames: {},
+            splitFiles: [
+                {
+                    path: "output.bin",
+                    size: expected.length,
+                    sha256: createHash("sha256").update(expected).digest("hex"),
+                    pieces: [
+                        {
+                            sourceIndex: 0,
+                            remoteFileId: "remote-0",
+                            offset: 0,
+                            length: piece0Data.length,
+                        },
+                        {
+                            sourceIndex: 1,
+                            remoteFileId: "remote-1",
+                            offset: piece0Data.length,
+                            length: piece1Data.length,
+                        },
+                    ],
+                },
+            ],
+        };
+
+        const first = new BundleReassemblyCoordinator(
+            createKd(),
+            "bundle-1",
+            dir,
+            manifest,
+            [collection0, collection1],
+            (piece) => {
+                if (piece.sourceIndex === 0 && piece.remoteFileId === "remote-0") return piece0Path;
+                if (piece.sourceIndex === 1 && piece.remoteFileId === "remote-1") return piece1Path;
+                return null;
+            },
+        );
+
+        await first.onPieceFileSettled("col-0", "remote-0");
+        expect(await fse.pathExists(piece0Path)).toBe(false);
+        expect(await fse.pathExists(path.join(dir, "output.bin.part"))).toBe(true);
+        expect(await fse.pathExists(path.join(dir, "output.bin.part.progress.json"))).toBe(true);
+        expect(await fse.readFile(path.join(dir, "output.bin.part"))).toEqual(piece0Data);
+
+        const resumed = new BundleReassemblyCoordinator(
+            createKd(),
+            "bundle-1",
+            dir,
+            manifest,
+            [collection0, collection1],
+            (piece) => {
+                if (piece.sourceIndex === 0 && piece.remoteFileId === "remote-0") return piece0Path;
+                if (piece.sourceIndex === 1 && piece.remoteFileId === "remote-1") return piece1Path;
+                return null;
+            },
+        );
+
+        // Restore marks both completed pieces settled; piece0 is already deleted.
+        await resumed.onPieceFileSettled("col-0", "remote-0");
+        const result = await resumed.onPieceFileSettled("col-1", "remote-1");
+        expect(result.publishedPaths).toEqual([path.join(dir, "output.bin")]);
+        expect(await fse.readFile(path.join(dir, "output.bin"))).toEqual(expected);
+        expect(await fse.pathExists(path.join(dir, "output.bin.part"))).toBe(false);
+        expect(await fse.pathExists(path.join(dir, "output.bin.part.progress.json"))).toBe(false);
+        expect(await fse.pathExists(piece1Path)).toBe(false);
+        expect(resumed.isComplete()).toBe(true);
+    });
+
     it("detects hash mismatch in multi-piece reassembly and does not publish", async () => {
         const dir = await fse.mkdtemp(path.join(process.cwd(), ".reassembly-coord-test-"));
         testDirs.push(dir);
