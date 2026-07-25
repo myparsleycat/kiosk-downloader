@@ -57,7 +57,7 @@ export async function reassembleExtendedFile(options: {
         await fse.ensureDir(path.dirname(options.finalPath));
         await fse.move(options.partPath, options.finalPath, { overwrite: true });
     } catch (error) {
-        await fse.remove(options.partPath);
+        await fse.remove(options.partPath).catch(() => undefined);
         throw error;
     }
 }
