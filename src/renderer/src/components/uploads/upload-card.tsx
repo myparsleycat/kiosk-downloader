@@ -58,6 +58,7 @@ export function UploadCard({
               )}
               <span
                 role="button"
+                tabIndex={0}
                 title={item.shareValue ? "공유 정보 저장" : "링크 복사"}
                 className="cursor-pointer truncate text-primary underline underline-offset-2"
                 onClick={async (e) => {
@@ -75,6 +76,12 @@ export function UploadCard({
                       description: error instanceof Error ? error.message : String(error),
                     });
                   }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" && e.key !== " ") return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  e.currentTarget.click();
                 }}
               >
                 {item.shareValue ? "확장 공유 정보" : item.shareLink}
