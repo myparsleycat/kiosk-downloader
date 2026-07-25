@@ -1073,10 +1073,10 @@ export class UploadService {
 
     private notifyBundleFailure(bundle: UploadBundleRow) {
         if (this.notifiedFailures.has(bundle.id)) return;
-        this.notifiedFailures.add(bundle.id);
         const window = this.kd.window.main.window;
         if (window?.isFocused()) return;
         if (!Notification.isSupported()) return;
+        this.notifiedFailures.add(bundle.id);
         const notification = new Notification({
             title: "확장 업로드에 조치가 필요합니다",
             body: `${bundle.name}의 물리 컬렉션 업로드에 실패했습니다.`,
