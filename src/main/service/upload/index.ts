@@ -653,9 +653,21 @@ export class UploadService {
         bundleId: string,
     ): Promise<PersistedBundlePlan> {
         const packDir = path.join(app.getPath("userData"), "upload-packs", bundleId);
-        return this.preparationWorker.planIntegrated({ bundleId, packDir, files }, (progress) => {
-            this.kd.ipc.sendToMainWindow("upload:plan-progress", progress);
-        });
+        return withLoggedError(
+            this.kd.logger,
+            "UploadService:createIntegratedBundlePlan",
+            {
+                channel: "upload:create",
+                stage: "plan-integrated",
+                bundleId,
+                packDir,
+                fileCount: files.length,
+            },
+            () =>
+                this.preparationWorker.planIntegrated({ bundleId, packDir, files }, (progress) => {
+                    this.kd.ipc.sendToMainWindow("upload:plan-progress", progress);
+                }),
+        );
     }
 
     private initializeBundle(bundle: UploadBundleRow, plan?: PersistedBundlePlan) {
