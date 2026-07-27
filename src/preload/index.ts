@@ -53,6 +53,15 @@ const api = {
             maxFiles,
         ) as Promise<ExpandPathsResult>;
     },
+    /** Read a dropped share file in preload and decode bytes in main. Paths never leave preload. */
+    readDroppedShareFile: async (files: File[]): Promise<{ shareInput: string } | null> => {
+        const file = files[0];
+        if (!file) return null;
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        return ipcRenderer.invoke("download:readShareFile", { bytes }) as Promise<{
+            shareInput: string;
+        } | null>;
+    },
 };
 
 if (process.contextIsolated) {

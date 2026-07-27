@@ -1,6 +1,7 @@
 import type {
     DirNode,
     UploadOptions,
+    UploadMode,
     UploadStatus,
     UploadTreeFile,
     FileUploadStatus,
@@ -12,6 +13,10 @@ export const UPLOAD_SEGMENT_SIZE = 16 * 1024 * 1024;
 /** Local source file with absolute path — main-process only. */
 export type UploadSourceFile = UploadTreeFile & {
     fsPath: string;
+    sourceOffset?: number;
+    logicalPath?: string;
+    logicalSize?: number;
+    logicalSha256?: string;
 };
 
 export type UploadRequestDir = {
@@ -56,6 +61,26 @@ export type ServerFileMapping = {
     length: number;
     fsPath: string;
     sourceMtimeMs: number;
+    sourceOffset?: number;
+    sourceSize?: number;
+};
+
+export type UploadBundleRow = {
+    id: string;
+    mode: Exclude<UploadMode, "standard">;
+    name: string;
+    description: string;
+    passwordPlain: string | null;
+    treeJson: string;
+    planJson: string;
+    physicalCount: number;
+    initializedCount: number;
+    shareValue: string | null;
+    status: UploadStatus;
+    expires: number;
+    createdAt: string;
+    updatedAt: string;
+    error: string | null;
 };
 
 export type UploadCollectionRow = {
@@ -75,6 +100,9 @@ export type UploadCollectionRow = {
     updatedAt: string;
     elapsedMs: number;
     error: string | null;
+    bundleId: string | null;
+    ordinal: number;
+    superseded: number;
 };
 
 export type UploadFileRow = {
@@ -92,6 +120,10 @@ export type UploadFileRow = {
     createdAt: string;
     updatedAt: string;
     error: string | null;
+    logicalPath: string | null;
+    sourceOffset: number;
+    logicalSize: number | null;
+    logicalSha256: string | null;
 };
 
 export type UploadChunkRow = {
@@ -110,9 +142,21 @@ export type UploadChunkRow = {
 export type CreateUploadRecord = {
     created: CreatedUpload;
     options: UploadOptions;
-    files: { path: string; name: string; size: number; fsPath: string; sourceMtimeMs: number }[];
+    files: Array<{
+        path: string;
+        name: string;
+        size: number;
+        fsPath: string;
+        sourceMtimeMs: number;
+        logicalPath?: string;
+        sourceOffset?: number;
+        logicalSize?: number;
+        logicalSha256?: string;
+    }>;
     segmentSize: number;
     tree: DirNode;
+    bundleId?: string;
+    ordinal?: number;
 };
 
 export type SchedulerSettings = {

@@ -66,9 +66,8 @@ export function useTransferItems<TItem extends { id: string }, TPatch>(
         });
         const offProgress = source.subscribeProgress((patch) => {
             if (!initialized) return;
-            React.startTransition(() => {
-                setItems((previous) => source.mergeProgress(previous, patch));
-            });
+            // Progress must stay high-priority; startTransition defers bar updates under load.
+            setItems((previous) => source.mergeProgress(previous, patch));
         });
 
         void source

@@ -1,8 +1,28 @@
 import { performance } from "node:perf_hooks";
 
+import type { UploadSegmentDedupSnapshot } from "@shared/types";
+
 import { TransferSpeedSampler } from "../transfer-speed";
 
 const SPEED_WINDOW_MS = 3000;
+
+type SegmentDedupCounters = {
+    existsCount: number;
+    existsBytes: number;
+    conflictCount: number;
+    conflictBytes: number;
+    uploadedCount: number;
+    uploadedBytes: number;
+};
+
+const EMPTY_SEGMENT_DEDUP: SegmentDedupCounters = {
+    existsCount: 0,
+    existsBytes: 0,
+    conflictCount: 0,
+    conflictBytes: 0,
+    uploadedCount: 0,
+    uploadedBytes: 0,
+};
 
 export class UploadTransferMetrics {
     private readonly activeTransferredByChunk = new Map<string, number>();
@@ -11,6 +31,7 @@ export class UploadTransferMetrics {
     private readonly observedTransferredByFile = new Map<string, number>();
     private readonly observedTransferredByCollection = new Map<string, number>();
     private readonly collectionByFile = new Map<string, string>();
+    private readonly segmentDedupByCollection = new Map<string, SegmentDedupCounters>();
     private readonly fileSpeed = new TransferSpeedSampler(() => performance.now(), SPEED_WINDOW_MS);
     private readonly collectionSpeed = new TransferSpeedSampler(
         () => performance.now(),
@@ -103,6 +124,72 @@ export class UploadTransferMetrics {
         );
     }
 
+    public sampleBundle(bundleId: string, subCollectionIds: string[]) {
+        const total = subCollectionIds.reduce(
+            (sum, id) => sum + (this.observedTransferredByCollection.get(id) ?? 0),
+            0,
+        );
+        return this.collectionSpeed.sample(bundleId, total);
+    }
+
+    public getBundleSnapshot(bundleId: string, subCollectionIds: string[]) {
+        return {
+            activeTransferredBytes: subCollectionIds.reduce(
+                (sum, id) => sum + (this.activeTransferredByCollection.get(id) ?? 0),
+                0,
+            ),
+            speedBps: this.collectionSpeed.get(bundleId),
+        };
+    }
+
+    public clearBundle(bundleId: string) {
+        this.collectionSpeed.clear(bundleId);
+    }
+
+    public clearSegmentDedup(collectionIds: Iterable<string>) {
+        for (const collectionId of collectionIds) {
+            this.segmentDedupByCollection.delete(collectionId);
+        }
+    }
+
+    public recordSegmentExists(collectionId: string, bytes: number) {
+        const counters = this.ensureSegmentDedup(collectionId);
+        counters.existsCount += 1;
+        counters.existsBytes += bytes;
+    }
+
+    public recordSegmentConflict(collectionId: string, bytes: number) {
+        const counters = this.ensureSegmentDedup(collectionId);
+        counters.conflictCount += 1;
+        counters.conflictBytes += bytes;
+    }
+
+    public recordSegmentUploaded(collectionId: string, bytes: number) {
+        const counters = this.ensureSegmentDedup(collectionId);
+        counters.uploadedCount += 1;
+        counters.uploadedBytes += bytes;
+    }
+
+    public getSegmentDedupSnapshot(collectionId: string): UploadSegmentDedupSnapshot {
+        const counters = this.segmentDedupByCollection.get(collectionId) ?? EMPTY_SEGMENT_DEDUP;
+        return { ...counters };
+    }
+
+    public getBundleSegmentDedupSnapshot(subCollectionIds: string[]): UploadSegmentDedupSnapshot {
+        const total = { ...EMPTY_SEGMENT_DEDUP };
+        for (const collectionId of subCollectionIds) {
+            const counters = this.segmentDedupByCollection.get(collectionId);
+            if (!counters) continue;
+            total.existsCount += counters.existsCount;
+            total.existsBytes += counters.existsBytes;
+            total.conflictCount += counters.conflictCount;
+            total.conflictBytes += counters.conflictBytes;
+            total.uploadedCount += counters.uploadedCount;
+            total.uploadedBytes += counters.uploadedBytes;
+        }
+        return total;
+    }
+
     public clearCollection(collectionId: string) {
         const fileIds = [...this.collectionByFile]
             .filter(([, fileCollectionId]) => fileCollectionId === collectionId)
@@ -113,6 +200,15 @@ export class UploadTransferMetrics {
         this.collectionSpeed.clear(collectionId);
         this.activeTransferredByCollection.delete(collectionId);
         this.observedTransferredByCollection.delete(collectionId);
+        this.segmentDedupByCollection.delete(collectionId);
+    }
+
+    private ensureSegmentDedup(collectionId: string) {
+        const existing = this.segmentDedupByCollection.get(collectionId);
+        if (existing) return existing;
+        const created = { ...EMPTY_SEGMENT_DEDUP };
+        this.segmentDedupByCollection.set(collectionId, created);
+        return created;
     }
 
     private chunkKey(fileId: string, chunkIndex: number) {

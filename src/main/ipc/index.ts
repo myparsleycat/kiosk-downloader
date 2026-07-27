@@ -36,6 +36,7 @@ export class IPC {
             !window ||
             window.isDestroyed() ||
             window.webContents.isDestroyed() ||
+            window.webContents.isCrashed() ||
             window.webContents.isLoadingMainFrame()
         ) {
             return;
@@ -46,6 +47,7 @@ export class IPC {
             if (
                 window.isDestroyed() ||
                 window.webContents.isDestroyed() ||
+                window.webContents.isCrashed() ||
                 (error instanceof Error &&
                     error.message.includes(
                         "Render frame was disposed before WebFrameMain could be accessed",

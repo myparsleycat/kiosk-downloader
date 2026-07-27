@@ -11,6 +11,7 @@ export type ParsedDownloadUrl = {
 export const SHARE_HOST = "kio.ac";
 export const SHARE_PATH_PREFIX = "/c/";
 export const SHARE_ID_LENGTH = 22;
+export const EXTENDED_SHARE_PREFIX = "KDE1.";
 
 export const TRANSFER_HOST = "transfer.it";
 export const TRANSFER_PATH_PREFIX = "/t/";

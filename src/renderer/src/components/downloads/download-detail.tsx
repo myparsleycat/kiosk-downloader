@@ -107,7 +107,11 @@ export function DownloadDetail({
           <div className="min-w-0">
             <h2 className="cn-font-heading truncate text-base font-medium">{collection.name}</h2>
             <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-              <span className="font-mono">{collection.shareId}</span>
+              <span className="font-mono">
+                {collection.provider === "extended"
+                  ? "Kiosk Downloader 확장 공유"
+                  : collection.shareId}
+              </span>
               <Separator orientation="vertical" className="h-3" />
               <span className="flex items-center gap-1">
                 <ClockIcon className="size-3" />
@@ -168,7 +172,7 @@ export function DownloadDetail({
               <FolderOpenIcon className="size-3.5" />
               폴더
             </Button>
-            {status !== "completed" && (
+            {status !== "completed" && collection.provider !== "extended" && (
               <Button
                 variant="outline"
                 size="sm"

@@ -68,8 +68,8 @@ describe("UploadScheduler", () => {
                 onProgress?: (bytes: number) => void,
             ) => {
                 reportProgress = onProgress;
-                return new Promise<number>((resolve) => {
-                    finishUpload = resolve;
+                return new Promise<{ length: number; outcome: "uploaded" }>((resolve) => {
+                    finishUpload = (bytes) => resolve({ length: bytes, outcome: "uploaded" });
                 });
             },
         );
@@ -114,6 +114,62 @@ describe("UploadScheduler", () => {
         scheduler.destroy();
     });
 
+    it("does not re-emit progress without new byte updates", async () => {
+        vi.useFakeTimers();
+        const file = createFile("file-1", remoteId(1));
+        const repository = createRepository([file]);
+        let reportProgress: ((bytes: number) => void) | undefined;
+        let finishUpload: ((bytes: number) => void) | undefined;
+        const uploadSegment = vi.fn(
+            async (
+                _chunk: ServerFileMapping,
+                _token: string,
+                _signal: AbortSignal,
+                onProgress?: (bytes: number) => void,
+            ) => {
+                reportProgress = onProgress;
+                return new Promise<{ length: number; outcome: "uploaded" }>((resolve) => {
+                    finishUpload = (bytes) => resolve({ length: bytes, outcome: "uploaded" });
+                });
+            },
+        );
+        const api = createApi(uploadSegment);
+        const emitUpdate = vi.fn(async () => undefined);
+        const emitProgressUpdate = vi.fn(async () => undefined);
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(),
+            api.value,
+            repository.value,
+            createMetrics(),
+            emitUpdate,
+            emitProgressUpdate,
+        );
+
+        scheduler.registerWorkItems(
+            COLLECTION_ID,
+            [{ id: file.id, remoteId: file.remoteId }],
+            [createChunk(file, 0)],
+        );
+        await scheduler.schedule();
+        await waitForMicrotasks(() => reportProgress !== undefined);
+
+        reportProgress?.(1);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(emitProgressUpdate).toHaveBeenCalledTimes(1);
+        emitProgressUpdate.mockClear();
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(emitProgressUpdate).not.toHaveBeenCalled();
+
+        reportProgress?.(2);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(emitProgressUpdate).toHaveBeenCalledTimes(1);
+
+        finishUpload?.(file.size);
+        await waitForMicrotasks(() => emitUpdate.mock.calls.length === 1);
+        scheduler.destroy();
+    });
+
     it("stops progress updates immediately while waiting for in-flight pause", async () => {
         vi.useFakeTimers();
         const file = createFile("file-1", remoteId(1));
@@ -128,8 +184,8 @@ describe("UploadScheduler", () => {
                 onProgress?: (bytes: number) => void,
             ) => {
                 reportProgress = onProgress;
-                return new Promise<number>((resolve) => {
-                    finishUpload = resolve;
+                return new Promise<{ length: number; outcome: "uploaded" }>((resolve) => {
+                    finishUpload = (bytes) => resolve({ length: bytes, outcome: "uploaded" });
                 });
             },
         );
@@ -215,7 +271,12 @@ function createApi(
         token: string,
         signal: AbortSignal,
         onProgress?: (bytes: number) => void,
-    ) => Promise<number> = vi.fn(async (chunk: ServerFileMapping) => chunk.length),
+    ) => Promise<{ length: number; outcome: "exists" | "conflict" | "uploaded" }> = vi.fn(
+        async (chunk: ServerFileMapping) => ({
+            length: chunk.length,
+            outcome: "uploaded" as const,
+        }),
+    ),
 ) {
     const completeCollection = vi.fn(async () => undefined);
     return {
@@ -233,6 +294,17 @@ function createMetrics() {
         clearChunk: vi.fn(),
         clearFile: vi.fn(),
         clearCollection: vi.fn(),
+        recordSegmentExists: vi.fn(),
+        recordSegmentConflict: vi.fn(),
+        recordSegmentUploaded: vi.fn(),
+        getSegmentDedupSnapshot: vi.fn(() => ({
+            existsCount: 0,
+            existsBytes: 0,
+            conflictCount: 0,
+            conflictBytes: 0,
+            uploadedCount: 0,
+            uploadedBytes: 0,
+        })),
     } as unknown as UploadTransferMetrics;
 }
 
@@ -255,7 +327,7 @@ function createKioskDownloader() {
                 maybeShutdownAfterTransfer: vi.fn(async () => undefined),
             },
         },
-        logger: { error: vi.fn(), warn: vi.fn() },
+        logger: { info: vi.fn(), error: vi.fn(), warn: vi.fn() },
     } as unknown as KioskDownloader;
 }
 
@@ -277,6 +349,9 @@ function createCollection(): UploadCollectionRow {
         updatedAt: "2026-01-01T00:00:00.000Z",
         elapsedMs: 0,
         error: null,
+        bundleId: null,
+        ordinal: 0,
+        superseded: 0,
     };
 }
 
@@ -296,6 +371,10 @@ function createFile(id: string, remoteIdValue: string): UploadFileRow {
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
         error: null,
+        logicalPath: null,
+        sourceOffset: 0,
+        logicalSize: null,
+        logicalSha256: null,
     };
 }
 

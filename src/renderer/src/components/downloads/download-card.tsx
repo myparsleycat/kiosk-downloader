@@ -57,7 +57,7 @@ export function DownloadCard({
             </span>
           </div>
           <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
-            {collection.shareId}
+            {collection.provider === "extended" ? "확장 공유" : collection.shareId}
           </div>
         </div>
         <StatusBadge status={status} />

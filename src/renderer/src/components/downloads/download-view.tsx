@@ -220,7 +220,7 @@ export function DownloadView({
                       <FolderOpenIcon />
                       폴더 열기
                     </ContextMenuItem>
-                    {item.status !== "completed" && (
+                    {item.status !== "completed" && item.collection.provider !== "extended" && (
                       <ContextMenuItem
                         onClick={() =>
                           runAction(async () => {

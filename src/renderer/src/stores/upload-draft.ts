@@ -6,7 +6,7 @@ import {
     renameUploadFiles,
     validateNodeName,
 } from "@shared/tree-rename";
-import type { UploadTreeFile } from "@shared/types";
+import type { UploadMode, UploadTreeFile } from "@shared/types";
 import { create } from "zustand";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -34,17 +34,20 @@ type UploadDraftState = {
     description: string;
     password: string;
     expiresAt: number;
+    mode: UploadMode;
 };
 
 type UploadDraftActions = {
     addFiles: (files: UploadTreeFile[]) => void;
     removeFile: (path: string) => void;
+    removeFiles: (paths: string[]) => void;
     renameFile: (path: string, newName: string) => Promise<string | null>;
     clearFiles: () => void;
     setName: (name: string) => void;
     setDescription: (description: string) => void;
     setPassword: (password: string) => void;
     setExpiresAt: (ms: number) => void;
+    setMode: (mode: UploadMode) => void;
     resetDraft: () => void;
 };
 
@@ -56,6 +59,7 @@ const draftDefaults = {
     description: "",
     password: "",
     expiresAt: clampExpiry(Date.now() + DEFAULT_EXPIRY_DAYS * DAY),
+    mode: "standard",
 } satisfies UploadDraftState;
 
 export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
@@ -75,9 +79,15 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
     },
 
     removeFile: (path) => {
-        const prefix = `${path}/`;
-        const files = get().files.filter((f) => f.path !== path && !f.path.startsWith(prefix));
-        void window.api.invoke("upload:removeDraftSources", [path]);
+        get().removeFiles([path]);
+    },
+
+    removeFiles: (paths) => {
+        if (paths.length === 0) return;
+        const files = get().files.filter(
+            (f) => !paths.some((path) => f.path === path || f.path.startsWith(`${path}/`)),
+        );
+        void window.api.invoke("upload:removeDraftSources", paths);
         set({ files });
     },
 
@@ -126,6 +136,7 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
     setDescription: (description) => set({ description }),
     setPassword: (password) => set({ password }),
     setExpiresAt: (expiresAt) => set({ expiresAt: clampExpiry(expiresAt) }),
+    setMode: (mode) => set({ mode }),
 
     resetDraft: () => {
         void window.api.invoke("upload:clearDraftSources");
@@ -135,6 +146,7 @@ export const useUploadDraft = create<UploadDraftStore>((set, get) => ({
             description: "",
             password: "",
             expiresAt: clampExpiry(Date.now() + DEFAULT_EXPIRY_DAYS * DAY),
+            mode: "standard",
         });
     },
 }));

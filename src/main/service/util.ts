@@ -20,6 +20,8 @@ import { trim } from "es-toolkit";
 import fse from "fs-extra";
 
 import { kd } from "..";
+export { processChunked, trimTrailingNul } from "./util-pure";
+import { trimTrailingNul } from "./util-pure";
 
 export function getAppStatus(): AppStatus {
     return {
@@ -126,16 +128,6 @@ export function shutdownSystem() {
     }
 }
 
-export function trimTrailingNul(value: string) {
-    let end = value.length;
-
-    while (end > 0 && value.charCodeAt(end - 1) === 0) {
-        end--;
-    }
-
-    return value.slice(0, end);
-}
-
 export function getClipboardFiles(): string[] {
     const buffer = clipboard.readBuffer("FileNameW");
     if (buffer && buffer.length > 0) {
@@ -179,23 +171,4 @@ export async function showOpenDialog(options: OpenDialogOptions) {
 
 export async function showSaveDialog(options: SaveDialogOptions) {
     return dialog.showSaveDialog(options);
-}
-
-export async function processChunked<T>(
-    items: T[],
-    processor: (item: T) => void,
-    size = 1000,
-    signal?: AbortSignal,
-) {
-    const CHUNK_SIZE = size;
-    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-        if (signal?.aborted) return;
-        const end = Math.min(i + CHUNK_SIZE, items.length);
-        for (let j = i; j < end; j++) {
-            processor(items[j]);
-        }
-        if (i + CHUNK_SIZE < items.length) {
-            await new Promise((resolve) => setImmediate(resolve));
-        }
-    }
 }

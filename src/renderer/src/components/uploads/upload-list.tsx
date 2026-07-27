@@ -1,4 +1,13 @@
 import { FileTree, type FileTreeError } from "@renderer/components/tree/file-tree";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@renderer/components/ui/alert-dialog";
 import { Button } from "@renderer/components/ui/button";
 import {
   ContextMenu,
@@ -32,6 +41,7 @@ import {
   PauseIcon,
   PlayIcon,
   PlusIcon,
+  SaveIcon,
   TimerIcon,
   Trash2Icon,
   UploadIcon,
@@ -64,6 +74,8 @@ export function UploadList({
   const [selectedId, setSelectedId] = React.useState<string | null>(items[0]?.id ?? null);
   const [filter, setFilter] = React.useState<UploadFilter>("all");
   const [errorDetails, setErrorDetails] = React.useState<FileTreeError[] | null>(null);
+  const [replacementTarget, setReplacementTarget] = React.useState<UploadItem | null>(null);
+  const [resolvingReplacement, setResolvingReplacement] = React.useState(false);
 
   React.useEffect(() => {
     if (!focusUploadId) return;
@@ -90,12 +102,24 @@ export function UploadList({
     }
   }, [filtered, selectedId]);
 
+  React.useEffect(() => {
+    if (replacementTarget) return;
+    const target = items.find((item) => item.mode === "integrated" && item.requiresReplacement);
+    if (target) {
+      setSelectedId(target.id);
+      setReplacementTarget(target);
+    }
+  }, [items, replacementTarget]);
+
   const selected = items.find((i) => i.id === selectedId) ?? null;
   const { remove, removeCompleted, dialog, removing } =
     useRemoveTransfer<UploadItem>(removeUploadOptions);
   const hasCompleted = items.some((item) => item.status === "completed");
+  const [pendingAction, setPendingAction] = React.useState(false);
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {
+    if (pendingAction) return;
+    setPendingAction(true);
     try {
       await action();
       if (success) toast.success(success);
@@ -103,19 +127,26 @@ export function UploadList({
       toast.error("작업을 완료하지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      setPendingAction(false);
     }
   };
 
-  const handleCopyLink = async (item: UploadItem) => {
-    if (!item.shareLink) {
-      toast.error("아직 공유 링크가 생성되지 않았습니다");
+  const handleShareInfo = async (item: UploadItem) => {
+    if (!item.shareLink && !item.shareValue) {
+      toast.error("아직 공유 정보가 생성되지 않았습니다");
       return;
     }
     try {
+      if (item.shareValue) {
+        const result = await window.api.invoke("upload:saveShareInfo", item.id);
+        if (result) toast.success("공유 정보를 저장했습니다");
+        return;
+      }
       await window.api.invoke("upload:copyLink", item.id);
       toast.success("링크를 복사했습니다");
     } catch (error) {
-      toast.error("복사하지 못했습니다", {
+      toast.error(item.shareValue ? "저장하지 못했습니다" : "복사하지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
       });
     }
@@ -214,10 +245,10 @@ export function UploadList({
                         {item.status === "error" ? "재시도" : "시작"}
                       </ContextMenuItem>
                     ) : null}
-                    {item.shareLink && (
-                      <ContextMenuItem onClick={() => handleCopyLink(item)}>
-                        <CopyIcon />
-                        링크 복사
+                    {(item.shareLink || item.shareValue) && (
+                      <ContextMenuItem onClick={() => runAction(() => handleShareInfo(item))}>
+                        {item.shareValue ? <SaveIcon /> : <CopyIcon />}
+                        {item.shareValue ? "공유 정보 저장" : "링크 복사"}
                       </ContextMenuItem>
                     )}
                     <ContextMenuSeparator />
@@ -242,7 +273,7 @@ export function UploadList({
           item={selected}
           onRemove={remove}
           removing={removing}
-          onCopyLink={handleCopyLink}
+          onShareInfo={handleShareInfo}
           onNewUpload={onNewUpload}
           onError={setErrorDetails}
         />
@@ -254,6 +285,58 @@ export function UploadList({
           if (!open) setErrorDetails(null);
         }}
       />
+      <AlertDialog open={replacementTarget !== null} onOpenChange={() => undefined}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>물리 컬렉션 업로드 실패</AlertDialogTitle>
+            <AlertDialogDescription>
+              통합 공유에는 모든 데이터가 필요합니다. 새 컬렉션을 만들려면 Turnstile 인증 후 실패한
+              분량을 처음부터 다시 업로드합니다. 전체 취소 시 이미 생성된 원격 컬렉션은 만료일까지
+              남습니다.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={resolvingReplacement}
+              onClick={() => {
+                if (!replacementTarget) return;
+                setResolvingReplacement(true);
+                void window.api
+                  .invoke("upload:remove", replacementTarget.id)
+                  .then(() => setReplacementTarget(null))
+                  .catch((error) =>
+                    toast.error("전송을 취소하지 못했습니다", {
+                      description: error instanceof Error ? error.message : String(error),
+                    }),
+                  )
+                  .finally(() => setResolvingReplacement(false));
+              }}
+            >
+              전체 전송 취소
+            </AlertDialogAction>
+            <AlertDialogAction
+              disabled={resolvingReplacement}
+              isLoading={resolvingReplacement}
+              onClick={() => {
+                if (!replacementTarget) return;
+                setResolvingReplacement(true);
+                void window.api
+                  .invoke("upload:replaceFailedCollection", replacementTarget.id)
+                  .then(() => setReplacementTarget(null))
+                  .catch((error) =>
+                    toast.error("새 컬렉션을 만들지 못했습니다", {
+                      description: error instanceof Error ? error.message : String(error),
+                    }),
+                  )
+                  .finally(() => setResolvingReplacement(false));
+              }}
+            >
+              새 컬렉션을 만들어 다시 시도
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -262,20 +345,21 @@ function UploadDetail({
   item,
   onRemove,
   removing,
-  onCopyLink,
+  onShareInfo,
   onNewUpload,
   onError,
 }: {
   item: UploadItem | null;
   onRemove: (item: UploadItem) => void;
   removing: boolean;
-  onCopyLink: (item: UploadItem) => void;
+  onShareInfo: (item: UploadItem) => void;
   onNewUpload: () => void;
   onError: (errors: FileTreeError[]) => void;
 }) {
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
 
   const runAction = async (key: string, action: () => Promise<unknown>, success?: string) => {
+    if (pendingAction) return;
     setPendingAction(key);
     try {
       await action();
@@ -339,8 +423,15 @@ function UploadDetail({
                     {item.shareLink}
                   </button>
                 </span>
+              ) : item.shareValue ? (
+                <span className="flex items-center gap-1 font-mono text-primary">
+                  <LinkIcon className="size-3" />
+                  {item.shareKind === "extended"
+                    ? "Kiosk Downloader 확장 공유 정보"
+                    : "호환 링크 목록"}
+                </span>
               ) : (
-                <span className="text-muted-foreground/60">링크 생성 대기 중</span>
+                <span className="text-muted-foreground/60">공유 정보 생성 대기 중</span>
               )}
               <span className="flex items-center gap-1">
                 <ClockIcon className="size-3" />
@@ -360,6 +451,7 @@ function UploadDetail({
                 variant="outline"
                 size="sm"
                 isLoading={pendingAction === "pause"}
+                disabled={pendingAction === "resume"}
                 onClick={() => runAction("pause", () => window.api.invoke("upload:pause", item.id))}
               >
                 <PauseIcon className="size-3.5" />
@@ -370,6 +462,7 @@ function UploadDetail({
                 variant="outline"
                 size="sm"
                 isLoading={pendingAction === "resume"}
+                disabled={pendingAction === "pause"}
                 onClick={() =>
                   runAction(
                     "resume",
@@ -385,14 +478,34 @@ function UploadDetail({
                 {status === "error" ? "재시도" : "시작"}
               </Button>
             ) : null}
-            {item.shareLink && (
+            {(item.shareLink || item.shareValue) && (
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => runAction("copy", async () => onCopyLink(item))}
+                onClick={() => runAction("share", async () => onShareInfo(item))}
               >
-                <CopyIcon className="size-3.5" />
-                링크 복사
+                {item.shareValue ? (
+                  <SaveIcon className="size-3.5" />
+                ) : (
+                  <CopyIcon className="size-3.5" />
+                )}
+                {item.shareValue ? "공유 정보 저장" : "링크 복사"}
+              </Button>
+            )}
+            {item.shareKind === "extended" && item.passwordProtected && item.shareValue && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  runAction(
+                    "copy-password",
+                    () => window.api.invoke("upload:copyPassword", item.id),
+                    "비밀번호를 복사했습니다",
+                  )
+                }
+              >
+                <LockIcon className="size-3.5" />
+                비밀번호 복사
               </Button>
             )}
             <Button

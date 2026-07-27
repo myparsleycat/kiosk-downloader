@@ -1,0 +1,331 @@
+import { createHash } from "node:crypto";
+import path from "node:path";
+
+import fse from "fs-extra";
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+    createDeterministicPackArtifacts,
+    createSmallFilePackPlan,
+    materializeSmallFilePack,
+    SMALL_FILE_PACK_BYTES,
+    SMALL_FILE_PACK_ENTRY_MAX_BYTES,
+    type PersistedBundleFile,
+} from "./small-file-pack";
+
+const testDirs: string[] = [];
+
+afterEach(async () => {
+    await Promise.all(testDirs.splice(0).map((dir) => fse.remove(dir)));
+});
+
+function source(
+    name: string,
+    size: number,
+    contentSha256 = createHash("sha256").update(name).digest("hex"),
+): PersistedBundleFile {
+    return {
+        path: name,
+        name,
+        size,
+        fsPath: `/source/${name}`,
+        sourceMtimeMs: 1,
+        logicalPath: name,
+        logicalSize: size,
+        logicalSha256: contentSha256,
+    };
+}
+
+function packPaths(artifacts: PersistedBundleFile[]) {
+    return artifacts
+        .filter((file) => file.packEntries)
+        .map((file) => file.path)
+        .toSorted();
+}
+
+function packDigests(artifacts: PersistedBundleFile[]) {
+    return artifacts
+        .filter((file) => file.packEntries)
+        .map((file) => ({
+            path: file.path,
+            entries: file
+                .packEntries!.map((entry) => entry.contentSha256 ?? "")
+                .toSorted((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        }))
+        .toSorted((left, right) => (left.path < right.path ? -1 : 1));
+}
+
+// Mirrors the module-private placement key derivation so the test can pick
+// inputs whose first trie bit collides without relying on internal exports.
+const PLACEMENT_DOMAIN = "KDE-PACK-V2";
+
+function placementFirstBit(contentSha256: string, size: number, occurrence: number) {
+    const hash = createHash("sha256");
+    hash.update(PLACEMENT_DOMAIN);
+    hash.update(Buffer.from([0]));
+    hash.update(Buffer.from(contentSha256, "hex"));
+    const sizeBuf = Buffer.alloc(8);
+    sizeBuf.writeBigUInt64BE(BigInt(size));
+    hash.update(sizeBuf);
+    const occBuf = Buffer.alloc(4);
+    occBuf.writeUInt32BE(occurrence);
+    hash.update(occBuf);
+    return (hash.digest()[0]! >> 7) & 1;
+}
+
+function pickSharedFirstBitSources(count: number, size: number) {
+    const byBit: [PersistedBundleFile[], PersistedBundleFile[]] = [[], []];
+    for (let index = 0; byBit[0].length < count && byBit[1].length < count; index += 1) {
+        const name = `shared-${index}`;
+        const sha = createHash("sha256").update(name).digest("hex");
+        byBit[placementFirstBit(sha, size, 0)].push(source(name, size, sha));
+    }
+    return byBit[0].length >= count ? byBit[0].slice(0, count) : byBit[1].slice(0, count);
+}
+
+describe("small file packs", () => {
+    it("packs whole files under the entry threshold into content-addressed packs", () => {
+        const a = source("a", 4 * 1024 ** 2);
+        const b = source("b", 5 * 1024 ** 2);
+        const c = source("c", 1);
+        const artifacts = createDeterministicPackArtifacts([c, b, a], "/packs");
+
+        const pack = artifacts.find((file) => file.packEntries);
+        expect(pack).toMatchObject({
+            size: a.size + b.size + c.size,
+            path: expect.stringMatching(/^kde_pack_v2\/[0-9a-f]{64}$/),
+        });
+        expect(pack?.packEntries?.map((entry) => entry.path).toSorted()).toEqual(["a", "b", "c"]);
+        expect(pack?.packEntries?.every((entry) => entry.contentSha256)).toBe(true);
+    });
+
+    it("ignores path renames for pack membership and recipe id", () => {
+        const hashA = createHash("sha256").update("A").digest("hex");
+        const hashB = createHash("sha256").update("B").digest("hex");
+        const first = createDeterministicPackArtifacts(
+            [source("docs/a.txt", 10, hashA), source("docs/b.txt", 20, hashB)],
+            "/packs",
+        );
+        const second = createDeterministicPackArtifacts(
+            [source("other/b.txt", 20, hashB), source("renamed/a.txt", 10, hashA)],
+            "/packs",
+        );
+
+        expect(packPaths(first)).toEqual(packPaths(second));
+        expect(packDigests(first)).toEqual(packDigests(second));
+    });
+
+    it("keeps split pieces and files at or above the entry threshold as direct uploads", () => {
+        const split = {
+            ...source("large.part", 50),
+            logicalPath: "large",
+            logicalSize: 100,
+            logicalSha256: undefined,
+        };
+        const large = source("large-direct", SMALL_FILE_PACK_ENTRY_MAX_BYTES);
+        const overPackCap = source("old-threshold", SMALL_FILE_PACK_BYTES + 1);
+        const artifacts = createDeterministicPackArtifacts([split, large, overPackCap], "/packs");
+
+        expect(artifacts).toEqual([split, large, overPackCap]);
+    });
+
+    it("does not pack a single eligible file alone", () => {
+        const only = source("solo.bin", 100);
+        expect(createDeterministicPackArtifacts([only], "/packs")).toEqual([only]);
+    });
+
+    it("produces identical packs when input order is shuffled", () => {
+        const files = [
+            source("z", 3 * 1024 ** 2),
+            source("a", 2 * 1024 ** 2),
+            source("m", 4 * 1024 ** 2),
+            source("b", 1 * 1024 ** 2),
+        ];
+        const left = createDeterministicPackArtifacts(files, "/packs");
+        const right = createDeterministicPackArtifacts([...files].reverse(), "/packs");
+
+        expect(packPaths(left)).toEqual(packPaths(right));
+        expect(packDigests(left)).toEqual(packDigests(right));
+    });
+
+    it("limits pack churn when one unrelated file is added", () => {
+        // 200 × 2 MiB = 400 MiB forces several trie splits under the 100 MiB cap.
+        const base = Array.from({ length: 200 }, (_, index) =>
+            source(
+                `base-${index}`,
+                2 * 1024 ** 2,
+                createHash("sha256").update(`base-${index}`).digest("hex"),
+            ),
+        );
+        const withExtra = [
+            ...base,
+            source("extra", 2 * 1024 ** 2, createHash("sha256").update("extra").digest("hex")),
+        ];
+
+        const before = new Set(packPaths(createDeterministicPackArtifacts(base, "/packs")));
+        const after = new Set(packPaths(createDeterministicPackArtifacts(withExtra, "/packs")));
+
+        let removed = 0;
+        for (const path of before) {
+            if (!after.has(path)) removed += 1;
+        }
+        let added = 0;
+        for (const path of after) {
+            if (!before.has(path)) added += 1;
+        }
+
+        // Hash-prefix locality: most existing packs stay put; only the touched leaf path changes.
+        expect(before.size).toBeGreaterThan(3);
+        expect(removed).toBeLessThanOrEqual(2);
+        expect(added).toBeLessThanOrEqual(3);
+        expect(removed + added).toBeLessThan(before.size);
+    });
+
+    it("splits leaves that exceed the 100 MiB pack cap", () => {
+        const files = Array.from({ length: 12 }, (_, index) =>
+            source(
+                `big-${index}`,
+                10 * 1024 ** 2,
+                createHash("sha256").update(`big-${index}`).digest("hex"),
+            ),
+        );
+        const artifacts = createDeterministicPackArtifacts(files, "/packs");
+        const packs = artifacts.filter((file) => file.packEntries);
+        const directs = artifacts.filter((file) => !file.packEntries);
+
+        expect(packs.every((pack) => pack.size <= SMALL_FILE_PACK_BYTES)).toBe(true);
+        expect(
+            packs.reduce((sum, pack) => sum + pack.size, 0) +
+                directs.reduce((sum, file) => sum + file.size, 0),
+        ).toBe(files.reduce((sum, file) => sum + file.size, 0));
+        expect(packs.length + directs.length).toBeGreaterThan(1);
+    });
+
+    it("preserves multiplicity for identical content at different paths", () => {
+        const hash = createHash("sha256").update("dup").digest("hex");
+        const artifacts = createDeterministicPackArtifacts(
+            [source("a/copy.bin", 8, hash), source("b/copy.bin", 8, hash)],
+            "/packs",
+        );
+        const pack = artifacts.find((file) => file.packEntries);
+        expect(pack?.size).toBe(16);
+        expect(pack?.packEntries).toHaveLength(2);
+    });
+
+    it("continues through a shared trie prefix instead of falling back to direct files", () => {
+        // Seven 15 MiB files total 105 MiB, just over the 100 MiB cap. We pick
+        // contents whose placement keys all share bit 0, exercising the branch
+        // where one trie side is empty. The fix descends into the non-empty
+        // side; the old code wrongly emitted singleton direct files here.
+        const target = 7;
+        const picked = pickSharedFirstBitSources(target, 15 * 1024 ** 2);
+        expect(picked).toHaveLength(target);
+
+        const artifacts = createDeterministicPackArtifacts(picked, "/packs");
+        const packs = artifacts.filter((file) => file.packEntries);
+
+        expect(packs.length).toBeGreaterThan(0);
+        for (const pack of packs) expect(pack.size).toBeLessThanOrEqual(SMALL_FILE_PACK_BYTES);
+        const direct = artifacts.filter((file) => !file.packEntries);
+        expect(direct.length).toBeLessThan(target);
+    });
+
+    it("preserves legacy collection-local packing for v1 resume", () => {
+        const plan = createSmallFilePackPlan(
+            {
+                collections: [
+                    {
+                        files: [
+                            source("a", 40 * 1024 ** 2),
+                            source("b", 60 * 1024 ** 2),
+                            source("c", 1),
+                        ],
+                    },
+                ],
+            },
+            "bundle-id",
+            "/packs",
+        );
+
+        expect(plan.collections[0].files).toHaveLength(2);
+        expect(plan.collections[0].files[0]).toMatchObject({
+            size: SMALL_FILE_PACK_BYTES,
+            packEntries: [
+                { path: "a", remoteOffset: 0 },
+                { path: "b", remoteOffset: 40 * 1024 ** 2 },
+            ],
+        });
+        expect(plan.collections[0].files[1]).toMatchObject({ path: "c", size: 1 });
+    });
+
+    it("materializes source files in manifest offset order and checks content hash", async () => {
+        const dir = await fse.mkdtemp(path.join(process.cwd(), ".pack-test-"));
+        testDirs.push(dir);
+        const firstPath = path.join(dir, "first");
+        const secondPath = path.join(dir, "second");
+        await fse.writeFile(firstPath, "first");
+        await fse.writeFile(secondPath, "SECOND");
+        const firstStat = await fse.stat(firstPath);
+        const secondStat = await fse.stat(secondPath);
+        const packPath = path.join(dir, "packs", "0.pack");
+
+        const materialized = await materializeSmallFilePack({
+            path: "pack/0",
+            name: "0",
+            size: 11,
+            fsPath: packPath,
+            sourceMtimeMs: 0,
+            logicalPath: "pack/0",
+            logicalSize: 11,
+            packEntries: [
+                {
+                    fsPath: firstPath,
+                    sourceMtimeMs: Math.trunc(firstStat.mtimeMs),
+                    path: "first.txt",
+                    size: 5,
+                    remoteOffset: 0,
+                    contentSha256: createHash("sha256").update("first").digest("hex"),
+                },
+                {
+                    fsPath: secondPath,
+                    sourceMtimeMs: Math.trunc(secondStat.mtimeMs),
+                    path: "second.txt",
+                    size: 6,
+                    remoteOffset: 5,
+                    contentSha256: createHash("sha256").update("SECOND").digest("hex"),
+                },
+            ],
+        });
+
+        expect(await fse.readFile(packPath, "utf8")).toBe("firstSECOND");
+        expect(materialized.sourceMtimeMs).toBeGreaterThan(0);
+    });
+
+    it("rejects materialization when content hash mismatches", async () => {
+        const dir = await fse.mkdtemp(path.join(process.cwd(), ".pack-test-"));
+        testDirs.push(dir);
+        const firstPath = path.join(dir, "first");
+        await fse.writeFile(firstPath, "first");
+        const firstStat = await fse.stat(firstPath);
+
+        await expect(
+            materializeSmallFilePack({
+                path: "pack/0",
+                name: "0",
+                size: 5,
+                fsPath: path.join(dir, "bad.pack"),
+                sourceMtimeMs: 0,
+                packEntries: [
+                    {
+                        fsPath: firstPath,
+                        sourceMtimeMs: Math.trunc(firstStat.mtimeMs),
+                        path: "first.txt",
+                        size: 5,
+                        remoteOffset: 0,
+                        contentSha256: createHash("sha256").update("other").digest("hex"),
+                    },
+                ],
+            }),
+        ).rejects.toThrow("업로드 원본 파일 내용이 변경되었습니다");
+    });
+});

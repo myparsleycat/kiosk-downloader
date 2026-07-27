@@ -49,16 +49,18 @@ export class TransferProgressBatcher {
             return;
         }
         const pending = this.dirtyFileIdsByCollection.get(collectionId);
-        if (!pending) {
+        if (!pending || pending.size === 0) {
             return;
         }
 
         const fileIds = new Set(pending);
         pending.clear();
         this.updatesInFlight.add(collectionId);
+        let failed = false;
         try {
             await this.flush(collectionId, fileIds);
         } catch (error) {
+            failed = true;
             const current = this.dirtyFileIdsByCollection.get(collectionId);
             if (current) {
                 for (const fileId of fileIds) {
@@ -68,6 +70,11 @@ export class TransferProgressBatcher {
             this.onError(error, collectionId);
         } finally {
             this.updatesInFlight.delete(collectionId);
+            // Flush again immediately when progress arrived during the in-flight emit.
+            // Skip on failure so retries wait for the next poll interval instead of looping.
+            if (!failed && (this.dirtyFileIdsByCollection.get(collectionId)?.size ?? 0) > 0) {
+                void this.flushOnce(collectionId);
+            }
         }
     }
 

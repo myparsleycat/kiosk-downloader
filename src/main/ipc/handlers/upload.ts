@@ -1,6 +1,5 @@
 import { showOpenDialog } from "@main/service/util";
 import type { CreateUploadPayload, ExpandPathsResult } from "@shared/types";
-import { MAX_UPLOAD_FILES } from "@shared/types";
 
 import type { KioskDownloader } from "../..";
 
@@ -21,7 +20,16 @@ export function registerUploadHandlers(kd: KioskDownloader) {
         kd.service.upload.resumeFile(collectionId, fileId, options ?? {}),
     );
     rh("upload:remove", (collectionId: string) => kd.service.upload.remove(collectionId));
+    rh("upload:replaceFailedCollection", (bundleId: string) =>
+        kd.service.upload.replaceFailedCollection(bundleId),
+    );
     rh("upload:copyLink", (collectionId: string) => kd.service.upload.copyLink(collectionId));
+    rh("upload:copyPassword", (collectionId: string) =>
+        kd.service.upload.copyPassword(collectionId),
+    );
+    rh("upload:saveShareInfo", (collectionId: string) =>
+        kd.service.upload.saveShareInfo(collectionId),
+    );
     rh("upload:expandPaths", (paths: string[], maxFiles?: number) =>
         kd.service.upload.expandPaths(paths, maxFiles),
     );
@@ -32,7 +40,7 @@ export function registerUploadHandlers(kd: KioskDownloader) {
         if (result.canceled || result.filePaths.length === 0) {
             return { files: [], truncated: false };
         }
-        return kd.service.upload.expandPaths(result.filePaths, maxFiles ?? MAX_UPLOAD_FILES);
+        return kd.service.upload.expandPaths(result.filePaths, maxFiles);
     });
     rh("upload:pickFolder", async (maxFiles?: number): Promise<ExpandPathsResult> => {
         const result = await showOpenDialog({
@@ -41,7 +49,7 @@ export function registerUploadHandlers(kd: KioskDownloader) {
         if (result.canceled || result.filePaths.length === 0) {
             return { files: [], truncated: false };
         }
-        return kd.service.upload.expandPaths(result.filePaths, maxFiles ?? MAX_UPLOAD_FILES);
+        return kd.service.upload.expandPaths(result.filePaths, maxFiles);
     });
     rh("upload:clearDraftSources", () => kd.service.upload.clearDraftSources());
     rh("upload:removeDraftSources", (paths: string[]) =>

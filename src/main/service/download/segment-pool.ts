@@ -69,6 +69,7 @@ type SegmentPoolDeps = {
     repository: DownloadRepository;
     metrics: DownloadTransferMetrics;
     onChunkSettled: () => void;
+    onProgress: (collectionId: string, fileId: string) => void;
 };
 
 function chunkBackoffMs(attempt: number) {
@@ -261,6 +262,7 @@ export class GlobalSegmentPool {
 
     private async processChunk(session: FileDownloadSession, chunk: DownloadChunkRow) {
         const {
+            collection,
             file,
             segments,
             partWriter,
@@ -394,6 +396,7 @@ export class GlobalSegmentPool {
                                 chunk.chunkIndex,
                                 scaleProgress(resumeOffset + transferredBytes),
                             );
+                            this.deps.onProgress(collection.id, file.id);
                         },
                         onWriteProgress: (writtenBytes) => {
                             committedBytes = writtenBytes;
@@ -407,6 +410,7 @@ export class GlobalSegmentPool {
                                 chunk.chunkIndex,
                                 scaleProgress(writtenBytes),
                             );
+                            this.deps.onProgress(collection.id, file.id);
                         },
                         onWritePhaseChange: (writing) => {
                             this.slowChunkMonitor.setPhase(

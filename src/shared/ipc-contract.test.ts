@@ -57,7 +57,7 @@ describe("generateIpc", () => {
         expect(types).not.toMatch(/\bany\b/);
         expect(contract).not.toMatch(/\bany\b/);
         expect(handlerSection).not.toBeNull();
-        expect(handlerSection?.[1].match(/^\s+"/gm)).toHaveLength(51);
+        expect(handlerSection?.[1].match(/^\s+"/gm)).toHaveLength(55);
     });
 
     test("reports every missing and extra handler channel", () => {

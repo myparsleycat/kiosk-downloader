@@ -18,6 +18,11 @@ export function getPartDigestPath(partPath: string) {
     return `${partPath}.crc`;
 }
 
+/** Temp directory name for a download bundle: `kdtmp-{first 8 hex chars of id}`. */
+export function getBundleTempDirName(bundleId: string) {
+    return `kdtmp-${bundleId.slice(0, 8)}`;
+}
+
 /** Staging file for deflate compressed payload (`file.part` → `file.part.z`). */
 export function getStagingPartPath(partPath: string) {
     return `${partPath}.z`;

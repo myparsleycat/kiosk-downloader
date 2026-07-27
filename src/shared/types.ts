@@ -76,7 +76,7 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
-export type DownloadProvider = "kiosk" | "transfer";
+export type DownloadProvider = "kiosk" | "transfer" | "extended";
 
 export interface Collection {
     shareId: string;
@@ -156,6 +156,10 @@ export type DownloadFilter = "all" | "active" | "completed";
 
 export type UploadStatus = "queued" | "uploading" | "paused" | "completed" | "error" | "expired";
 
+export type UploadMode = "standard" | "integrated" | "compatible";
+
+export type UploadPhase = "initializing" | "uploading" | "completed";
+
 export type FileUploadStatus = "pending" | "uploading" | "paused" | "completed" | "error";
 
 export type UploadChunkStatus = "pending" | "uploading" | "completed" | "error";
@@ -208,6 +212,13 @@ export interface UploadItem {
     createdAt: number;
     updatedAt: number;
     error?: string;
+    mode?: UploadMode;
+    phase?: UploadPhase;
+    physicalCollectionCount?: number;
+    initializedCollectionCount?: number;
+    shareValue?: string | null;
+    shareKind?: "url" | "extended" | "compatibility-list";
+    requiresReplacement?: boolean;
 }
 
 export type UploadProgressPatch = TransferProgressPatch<UploadFileProgress, UploadStatus>;
@@ -215,7 +226,8 @@ export type UploadProgressPatch = TransferProgressPatch<UploadFileProgress, Uplo
 export interface CreateUploadPayload {
     tree: UploadTreeFile[];
     options: UploadOptions;
-    turnstileToken: string;
+    mode?: UploadMode;
+    turnstileToken?: string;
 }
 
 export interface LoadCollectionPayload {
@@ -300,6 +312,25 @@ export interface SettingUpdatePayload<K extends SettingKey = SettingKey> {
     value: AppSettings[K];
 }
 
+export type UploadPlanProgress = {
+    stage: "hashing" | "packing";
+    current: number;
+    total: number;
+    /** Bytes processed so far during hashing. Only present on the hashing stage. */
+    processedBytes?: number;
+    /** Total bytes to hash across all hashing candidates. Only present on the hashing stage. */
+    totalBytes?: number;
+};
+
+export type UploadSegmentDedupSnapshot = {
+    existsCount: number;
+    existsBytes: number;
+    conflictCount: number;
+    conflictBytes: number;
+    uploadedCount: number;
+    uploadedBytes: number;
+};
+
 export type IpcEvents = {
     "window:blur": () => void;
     "window:focus": () => void;
@@ -308,9 +339,11 @@ export type IpcEvents = {
     "download:update": (items: DownloadItem[]) => void;
     "download:item-update": (item: DownloadItem) => void;
     "download:progress-update": (patch: DownloadProgressPatch) => void;
+    "download:extended-load-progress": (progress: { current: number; total: number }) => void;
     "upload:update": (items: UploadItem[]) => void;
     "upload:item-update": (item: UploadItem) => void;
     "upload:progress-update": (patch: UploadProgressPatch) => void;
+    "upload:plan-progress": (progress: UploadPlanProgress) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;
     "updater:status-changed": (status: UpdaterStatus) => void;
     "updater:update-available": () => void;
