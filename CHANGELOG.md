@@ -1,3 +1,57 @@
+# [1.8.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.7.2...v1.8.0) (2026-07-27)
+
+
+### Bug Fixes
+
+* **download:** accept extended share strings on paste ([0302c06](https://github.com/myparsleycat/kiosk-downloader/commit/0302c060b924d5a1f3bc19424f3d6dd97990d1a1))
+* **download:** atomically persist multi-piece reassembly progress ([6a9c686](https://github.com/myparsleycat/kiosk-downloader/commit/6a9c6868564d836491f0347a88ce3e36667ce6b8))
+* **download:** clarify missing piece error in reassembly ([93f8f96](https://github.com/myparsleycat/kiosk-downloader/commit/93f8f96c7e8289373dedab6522a689512aaaed55))
+* **download:** handle reassembly failures in coordinator restore replay ([a360f21](https://github.com/myparsleycat/kiosk-downloader/commit/a360f21a6fa75fdb050551d01f142fba2078ee17))
+* **download:** order listBundleFiles deterministically by path and id ([a8b0731](https://github.com/myparsleycat/kiosk-downloader/commit/a8b07317c2a0f710b058254bc22a20986dc6f6fc))
+* **download:** parse stored manifest defensively on restore and listing ([58013df](https://github.com/myparsleycat/kiosk-downloader/commit/58013df83a9898aa9a673163650df155ddb663eb))
+* **download:** persist multi-piece reassembly progress for resume ([1ce1fa7](https://github.com/myparsleycat/kiosk-downloader/commit/1ce1fa70de0e4597b7906b3f41b3201121d97d2c))
+* **download:** prevent unhandled rejection in reassembly cleanup ([26d69a4](https://github.com/myparsleycat/kiosk-downloader/commit/26d69a4cc7870ad354ce5b4a498b8b88b86eb854))
+* **download:** reject arbitrary paths in readShareFile IPC ([231fc53](https://github.com/myparsleycat/kiosk-downloader/commit/231fc530060030ba37c186e17d00e41269ac778c))
+* **download:** retain only most recent extended draft in cache ([aca2cdf](https://github.com/myparsleycat/kiosk-downloader/commit/aca2cdfc87d9d453a593cef18e85f042a30e8f83))
+* **download:** smooth live progress during transfer ([ad1fe9d](https://github.com/myparsleycat/kiosk-downloader/commit/ad1fe9d6e06b2337c88ae0f6358e7a231071afa6))
+* **download:** suppress part-path cleanup rejection in extended reassembly ([e31f40f](https://github.com/myparsleycat/kiosk-downloader/commit/e31f40f2ad0a86ba89a82b650ba8b6e14a2e2daf))
+* **transfer:** avoid tight retry loop on progress flush failure ([aedf06a](https://github.com/myparsleycat/kiosk-downloader/commit/aedf06a56ab6e319e60ccc4762894a7302ac51eb))
+* **transfer:** send dirty-only bundle progress patches ([c528500](https://github.com/myparsleycat/kiosk-downloader/commit/c528500b7abdadcad715581941e575cdb3ff4a51))
+* **upload:** add keyboard activation to share/copy span ([a9dbeed](https://github.com/myparsleycat/kiosk-downloader/commit/a9dbeed68200a46c73c41c3a259dbb1b1855a35f))
+* **upload:** clear turnstile window refs before async destroy ([d0d0724](https://github.com/myparsleycat/kiosk-downloader/commit/d0d0724373329b36547d94260a03174fe44e3977))
+* **upload:** correct trie empty-child split and bundle dedup cleanup ([d8153ab](https://github.com/myparsleycat/kiosk-downloader/commit/d8153ab2d0b2c9712ca47877b33334880e0a0a58))
+* **upload:** detach active worker listeners before terminate in destroy ([3e198ba](https://github.com/myparsleycat/kiosk-downloader/commit/3e198ba81cdf1986dd1685945fb175e6c3b9d8b3))
+* **upload:** drop false collection upper bound and harden pack cap ([8a49b94](https://github.com/myparsleycat/kiosk-downloader/commit/8a49b94fbab8e05ad14f6e4242fd8c39e1dc968c))
+* **upload:** exclude existing oversize files in compatible mode ([e17484e](https://github.com/myparsleycat/kiosk-downloader/commit/e17484e6287c16e5f5abcaa5b4daab126eb13316))
+* **upload:** guard packEntries uploaded calc against zero-byte physical size ([f55eca1](https://github.com/myparsleycat/kiosk-downloader/commit/f55eca16d4331ab39e3d10c78985317ce002c4f3))
+* **upload:** guard share info action in context menu ([88dd7b1](https://github.com/myparsleycat/kiosk-downloader/commit/88dd7b1b8e85391fdffd74ae99c874f88ae564b0))
+* **upload:** log createIntegratedBundlePlan failures before generic error path ([222d693](https://github.com/myparsleycat/kiosk-downloader/commit/222d69360bbba0716acd9e263a2c674cb4d90d7f))
+* **upload:** mark bundle notified only when failure notification is shown ([78c04e6](https://github.com/myparsleycat/kiosk-downloader/commit/78c04e6db4c2153e898bde3ade06f3da4c33bf5e))
+* **upload:** run replace flow after in-flight bundle initialization ([5d016e5](https://github.com/myparsleycat/kiosk-downloader/commit/5d016e52591e59d53f02ece48b718938804c45e0))
+* **upload:** serialize bundle init and harden worker queue ([5035994](https://github.com/myparsleycat/kiosk-downloader/commit/5035994c6dae0e81b0952ea2550f567d3b3b14e6))
+* **upload:** serialize concurrent TurnstileSolver.solve calls ([8570d68](https://github.com/myparsleycat/kiosk-downloader/commit/8570d6842c69c188891ca41877b078ce029a8497))
+* **upload:** serialize preparation worker and harden planning path ([18a2113](https://github.com/myparsleycat/kiosk-downloader/commit/18a2113c2eaf3d187a07c903800d492dfdd05a49))
+* **upload:** settle pending mode/oversize resolvers before replacing and on unmount ([30067e3](https://github.com/myparsleycat/kiosk-downloader/commit/30067e326a9b8c129de74c4ea5dc41d6e572ab12))
+* **upload:** validate file ownership against resolved bundle in pause/resume ([76f32bb](https://github.com/myparsleycat/kiosk-downloader/commit/76f32bbe6ac89f4e40f82c43d721552cdb78ee13))
+* **utils:** render zero-duration elapsed time as 0 seconds ([3c0fbca](https://github.com/myparsleycat/kiosk-downloader/commit/3c0fbca24983f321f05fe7f5679d8802921146aa))
+
+
+### Features
+
+* add extended share upload and download reassembly ([4d444ad](https://github.com/myparsleycat/kiosk-downloader/commit/4d444add9d4839489d163c2cc9b85821c0b328a4))
+* **share:** hash-trie packs and pack extract verify ([4978dd2](https://github.com/myparsleycat/kiosk-downloader/commit/4978dd2ffd4cc17916cc311a21d617c1aa06e49b))
+* **upload:** deterministic global small-file packs ([4a8830b](https://github.com/myparsleycat/kiosk-downloader/commit/4a8830b3ea18f4ea8011256ab594fc6b660f599b))
+* **upload:** plan progress UI and segment dedup metrics ([1216ac1](https://github.com/myparsleycat/kiosk-downloader/commit/1216ac1cc59b69c694d7fe06df31a967f0e485d8))
+
+
+### Performance Improvements
+
+* **download:** load bundle files once in buildBundleItem ([c2ec410](https://github.com/myparsleycat/kiosk-downloader/commit/c2ec410960b981a6c740c8a8024a219ccc1a0e83))
+* **download:** preload bundle files during finalize ([6db2463](https://github.com/myparsleycat/kiosk-downloader/commit/6db246346a621437547ebcb5fc75d2ef14cd7379))
+* **upload:** batch oversize draft file removals ([8124e88](https://github.com/myparsleycat/kiosk-downloader/commit/8124e882104753ad3758df13ccaa156d6c51ce65))
+* **upload:** load bundle files once in buildBundleItem ([94086e3](https://github.com/myparsleycat/kiosk-downloader/commit/94086e34c476845dbb1741cafd660ee9f557349a))
+* **upload:** move planning and pack materialization to worker thread ([b286a2c](https://github.com/myparsleycat/kiosk-downloader/commit/b286a2ca71ee9560e5fdc22a31b23e1db58f2232))
+
 ## [1.7.2](https://github.com/myparsleycat/kiosk-downloader/compare/v1.7.1...v1.7.2) (2026-07-22)
 
 
