@@ -179,7 +179,8 @@ export class DownloadService {
                 .filter(
                     (file) =>
                         file.status !== "completed" &&
-                        parseWorkuploadFileSourceMeta(file.sourceMetaJson).rangeSupported !== true,
+                        tryParseWorkuploadFileSourceMeta(file.sourceMetaJson)?.rangeSupported !==
+                            true,
                 );
             if (files.length === 0) {
                 continue;
@@ -1669,15 +1670,19 @@ export class DownloadService {
 }
 
 function workuploadTransferControl(sourceMetaJson: string | null) {
+    const rangeSupported = tryParseWorkuploadFileSourceMeta(sourceMetaJson)?.rangeSupported;
+    return rangeSupported === undefined
+        ? undefined
+        : rangeSupported
+          ? ("pause" as const)
+          : ("stop" as const);
+}
+
+function tryParseWorkuploadFileSourceMeta(raw: string | null) {
     try {
-        const rangeSupported = parseWorkuploadFileSourceMeta(sourceMetaJson).rangeSupported;
-        return rangeSupported === undefined
-            ? undefined
-            : rangeSupported
-              ? ("pause" as const)
-              : ("stop" as const);
+        return parseWorkuploadFileSourceMeta(raw);
     } catch {
-        return undefined;
+        return null;
     }
 }
 
