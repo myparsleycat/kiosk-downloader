@@ -83,6 +83,14 @@ function tryParseZipEntryMeta(raw: string | null): ZipEntryStoredMeta | null {
     }
 }
 
+function tryParseWorkuploadFileSourceMeta(raw: string | null) {
+    try {
+        return parseWorkuploadFileSourceMeta(raw);
+    } catch {
+        return undefined;
+    }
+}
+
 function isCollectionExpired(expires: number) {
     return expires * 1000 <= Date.now();
 }
@@ -1737,7 +1745,7 @@ export class DownloadRepository {
         for (const file of this.listFiles(collection.id)) {
             const rangeSupported =
                 collection.provider === "workupload"
-                    ? parseWorkuploadFileSourceMeta(file.sourceMetaJson).rangeSupported
+                    ? tryParseWorkuploadFileSourceMeta(file.sourceMetaJson)?.rangeSupported
                     : undefined;
             const transferControl =
                 rangeSupported === undefined ? undefined : rangeSupported ? "pause" : "stop";
