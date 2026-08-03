@@ -98,6 +98,11 @@ describe("Workupload parsers", () => {
         });
     });
 
+    it("preserves a zero-byte file size", () => {
+        const html = FILE_HTML.replace("42 (Byte)", "0 (Byte)");
+        expect(parseWorkuploadFileMetadata(html, "EmptyKey").size).toBe(0);
+    });
+
     it("parses archive overview and isolates the strict kas assignment", () => {
         expect(parseWorkuploadArchivePage(ARCHIVE_HTML, "Archive9")).toEqual({
             archiveKey: "Archive9",

@@ -318,7 +318,7 @@ export function parseWorkuploadFileMetadata(html: string, fileKey: string) {
     const filename = html.match(/Filename:&nbsp;<\/td><td[^>]*>([\s\S]*?)<\/td>/i)?.[1];
     const size = html.match(/Filesize:&nbsp;<\/td><td>(\d+) \(Byte\)/i)?.[1];
     const sha256 = html.match(/Checksum:&nbsp;<\/td><td[^>]*>([a-f\d]{64}) \(SHA256\)/i)?.[1];
-    if (!filename || !size || !sha256) {
+    if (filename === undefined || size === undefined || sha256 === undefined) {
         throw new Error(`Could not parse metadata for Workupload file ${fileKey}.`);
     }
     return {
