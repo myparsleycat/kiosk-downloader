@@ -1656,12 +1656,16 @@ export class DownloadService {
 }
 
 function workuploadTransferControl(sourceMetaJson: string | null) {
-    const rangeSupported = parseWorkuploadFileSourceMeta(sourceMetaJson).rangeSupported;
-    return rangeSupported === undefined
-        ? undefined
-        : rangeSupported
-          ? ("pause" as const)
-          : ("stop" as const);
+    try {
+        const rangeSupported = parseWorkuploadFileSourceMeta(sourceMetaJson).rangeSupported;
+        return rangeSupported === undefined
+            ? undefined
+            : rangeSupported
+              ? ("pause" as const)
+              : ("stop" as const);
+    } catch {
+        return undefined;
+    }
 }
 
 function flattenRemoteFiles(
