@@ -1,5 +1,6 @@
 import { FileTree } from "@renderer/components/tree/file-tree";
 import { RenameDialog, type RenameTarget } from "@renderer/components/tree/rename-dialog";
+import { Badge } from "@renderer/components/ui/badge";
 import { Button } from "@renderer/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@renderer/components/ui/field";
 import {
@@ -562,7 +563,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   <InputGroupInput
                     ref={urlInputRef}
                     id="url-input"
-                    placeholder="Kio · Transfer.it · Workupload URL 또는 .kds"
+                    placeholder="Kiosk · Transfer.it · Workupload URL 또는 .kds"
                     value={url}
                     onChange={(e) => {
                       const value = e.target.value;
@@ -953,6 +954,8 @@ function SortButton({
   );
 }
 
+const SUPPORTED_PROVIDERS = ["Kiosk", "Transfer.it", "Workupload", "확장 공유 (.kds)"] as const;
+
 function EmptyState({ loading }: { loading: boolean }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -964,6 +967,15 @@ function EmptyState({ loading }: { loading: boolean }) {
       <span className="text-sm">
         {loading ? "컬렉션을 불러오는 중..." : "좌측에서 URL 또는 공유 파일을 불러오세요"}
       </span>
+      {!loading && (
+        <div className="flex flex-wrap items-center justify-center gap-1.5 px-6">
+          {SUPPORTED_PROVIDERS.map((name) => (
+            <Badge key={name} variant="outline" className="text-muted-foreground">
+              {name}
+            </Badge>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
