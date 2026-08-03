@@ -63,6 +63,25 @@ class WorkuploadChecksumError extends Error {
     }
 }
 
+type WorkuploadStage =
+    | "metadata"
+    | "state"
+    | "session"
+    | "cdn-request"
+    | "cdn-response"
+    | "write"
+    | "checksum"
+    | "finalize";
+
+type WorkuploadCleanupState = "not-attempted" | "reset" | "preserved";
+
+type WorkuploadLogContext = {
+    stage: WorkuploadStage;
+    retryCount: number;
+    rangeSupported: boolean | null;
+    cleanupState: WorkuploadCleanupState;
+};
+
 const WORKUPLOAD_BODY_STALL_TIMEOUT_MS = 15_000;
 const WORKUPLOAD_PARTIAL_PERSIST_INTERVAL_MS = 1000;
 
@@ -617,6 +636,7 @@ export class DownloadScheduler {
         if (!collection || !file) {
             return;
         }
+        const originalFile = file;
 
         if (this.repository.ensureCollectionNotExpired(collectionId)) {
             this.progressBatcher.deactivate(collectionId);
@@ -625,6 +645,12 @@ export class DownloadScheduler {
         }
 
         let partWriter: PartFileWriter | null = null;
+        const workuploadContext: WorkuploadLogContext = {
+            stage: "metadata",
+            retryCount: 0,
+            rangeSupported: null,
+            cleanupState: "not-attempted",
+        };
 
         try {
             this.repository.resetRunningChunksForFile(fileId);
@@ -649,7 +675,13 @@ export class DownloadScheduler {
             }
 
             if (collection.provider === "workupload") {
-                await this.runWorkuploadFile(collection, file, settings, controller);
+                await this.runWorkuploadFile(
+                    collection,
+                    file,
+                    settings,
+                    controller,
+                    workuploadContext,
+                );
                 return;
             }
 
@@ -735,7 +767,17 @@ export class DownloadScheduler {
                     shareId: collection?.shareId,
                     remoteId: currentFile?.remoteId,
                     filePath: currentFile?.path,
-                    stage: "download",
+                    ...(collection?.provider === "workupload"
+                        ? {
+                              sourceUrl: collection.sourceUrl,
+                              partPath: this.getPartPath(collection, originalFile),
+                              finalPath: this.getFinalPath(collection, originalFile),
+                              stage: workuploadContext.stage,
+                              retryCount: workuploadContext.retryCount,
+                              rangeSupported: workuploadContext.rangeSupported,
+                              cleanupState: workuploadContext.cleanupState,
+                          }
+                        : { stage: "download" as const }),
                     message,
                 },
                 "DownloadService:runFile",
@@ -1220,15 +1262,20 @@ export class DownloadScheduler {
         file: DownloadFileRow,
         settings: SchedulerSettings,
         controller: AbortController,
+        logContext: WorkuploadLogContext,
     ) {
+        logContext.stage = "metadata";
         const sourceMeta = parseWorkuploadFileSourceMeta(file.sourceMetaJson);
+        logContext.rangeSupported = sourceMeta.rangeSupported ?? null;
         const partPath = this.getPartPath(collection, file);
 
         if (file.size === 0) {
+            logContext.stage = "checksum";
             const actual = createHash("sha256").update("").digest("hex");
             if (actual !== sourceMeta.sha256) {
                 throw new WorkuploadChecksumError(sourceMeta.sha256, actual);
             }
+            logContext.stage = "finalize";
             await this.finalizeFile(collection, file, controller.signal);
             return;
         }
@@ -1237,8 +1284,16 @@ export class DownloadScheduler {
         let failures = 0;
 
         while (true) {
+            logContext.stage = "state";
+            logContext.cleanupState = "not-attempted";
             if (controller.signal.aborted) {
-                await this.settleStoppedWorkupload(collection, file, rangeSupported, controller);
+                await this.settleStoppedWorkupload(
+                    collection,
+                    file,
+                    rangeSupported,
+                    controller,
+                    logContext,
+                );
                 return;
             }
 
@@ -1248,7 +1303,7 @@ export class DownloadScheduler {
             }
             let resumeOffset = Math.min(file.size, Math.max(0, chunk.downloadedBytes));
             if (rangeSupported === false && resumeOffset > 0) {
-                await this.resetWorkuploadPartial(collection, file);
+                await this.resetWorkuploadPartial(collection, file, logContext);
                 chunk = this.repository.listChunks(file.id)[0];
                 if (!chunk) {
                     throw new Error("Missing Workupload chunk descriptor after reset.");
@@ -1261,23 +1316,31 @@ export class DownloadScheduler {
                     .then((stat) => stat.size)
                     .catch(() => -1);
                 if (partSize < resumeOffset || partSize > file.size) {
-                    await this.resetWorkuploadPartial(collection, file);
+                    await this.resetWorkuploadPartial(collection, file, logContext);
                     continue;
                 }
             }
             if (resumeOffset === file.size) {
+                logContext.stage = "checksum";
                 const actualSha256 = await sha256File(partPath, controller.signal);
                 if (actualSha256 !== sourceMeta.sha256) {
-                    await this.resetWorkuploadPartial(collection, file);
+                    await this.resetWorkuploadPartial(collection, file, logContext);
                     continue;
                 }
                 if (
-                    await this.settleStoppedWorkupload(collection, file, rangeSupported, controller)
+                    await this.settleStoppedWorkupload(
+                        collection,
+                        file,
+                        rangeSupported,
+                        controller,
+                        logContext,
+                    )
                 ) {
                     return;
                 }
                 this.repository.markChunkCompleted(chunk, file.size);
                 this.repository.syncFileDownloadedBytes(file.id);
+                logContext.stage = "finalize";
                 await this.finalizeFile(collection, file, controller.signal);
                 return;
             }
@@ -1289,36 +1352,41 @@ export class DownloadScheduler {
             let lastPartialPersistAt = 0;
 
             try {
+                logContext.stage = "session";
                 const session = await this.getWorkuploadSession(
                     collection,
                     file.remoteId,
                     controller.signal,
                 );
+                logContext.stage = "cdn-request";
                 const download = await session.requestDownload(file.remoteId, {
                     start: resumeOffset,
                     end: file.size - 1,
                     signal: controller.signal,
                 });
                 const { response } = download;
+                logContext.stage = "cdn-response";
                 const detectedRange = await this.requireWorkuploadDownloadResponse(
                     response,
                     resumeOffset,
                     file.size,
                 );
                 rangeSupported = detectedRange;
+                logContext.rangeSupported = detectedRange;
                 this.repository.updateWorkuploadRangeSupported(file.id, detectedRange);
                 await this.emitUpdate(collection.id);
 
                 if (!detectedRange && resumeOffset > 0) {
                     await response.body?.cancel().catch(() => undefined);
                     await partWriter.close();
-                    await this.resetWorkuploadPartial(collection, file);
+                    await this.resetWorkuploadPartial(collection, file, logContext);
                     continue;
                 }
                 if (!response.body) {
                     throw new Error("Workupload CDN response has no body.");
                 }
 
+                logContext.stage = "write";
                 await partWriter.open(file.size, 1);
                 const bytes = await partWriter.writeChunkFromStream(
                     0,
@@ -1363,6 +1431,7 @@ export class DownloadScheduler {
                         file,
                         rangeSupported,
                         controller,
+                        logContext,
                         writtenBytes,
                     )
                 ) {
@@ -1372,9 +1441,10 @@ export class DownloadScheduler {
                 this.repository.syncFileDownloadedBytes(file.id);
                 this.metrics.clearChunk(file.id, 0, file.size);
 
+                logContext.stage = "checksum";
                 const actualSha256 = await sha256File(partPath, controller.signal);
                 if (actualSha256 !== sourceMeta.sha256) {
-                    await this.resetWorkuploadPartial(collection, file);
+                    await this.resetWorkuploadPartial(collection, file, logContext);
                     throw new WorkuploadChecksumError(sourceMeta.sha256, actualSha256);
                 }
                 if (
@@ -1383,12 +1453,14 @@ export class DownloadScheduler {
                         file,
                         rangeSupported,
                         controller,
+                        logContext,
                         writtenBytes,
                     )
                 ) {
                     return;
                 }
 
+                logContext.stage = "finalize";
                 await this.finalizeFile(collection, file, controller.signal);
                 return;
             } catch (error) {
@@ -1400,6 +1472,7 @@ export class DownloadScheduler {
                         file,
                         rangeSupported,
                         controller,
+                        logContext,
                         writtenBytes,
                     );
                     return;
@@ -1410,17 +1483,20 @@ export class DownloadScheduler {
                     failures >= settings.maxChunkRetries
                 ) {
                     if (rangeSupported === false) {
-                        await this.resetWorkuploadPartial(collection, file);
+                        await this.resetWorkuploadPartial(collection, file, logContext);
+                    } else if (logContext.cleanupState === "not-attempted") {
+                        logContext.cleanupState = "preserved";
                     }
                     throw error;
                 }
 
                 failures += 1;
+                logContext.retryCount = failures;
                 this.sessionCache.delete(collection.id);
                 if (rangeSupported !== true) {
-                    await this.resetWorkuploadPartial(collection, file);
+                    await this.resetWorkuploadPartial(collection, file, logContext);
                 } else {
-                    this.persistWorkuploadPartial(file.id, writtenBytes);
+                    this.persistWorkuploadPartial(file.id, writtenBytes, logContext);
                 }
                 await sleepWithAbort(Math.min(4000, 250 * 2 ** (failures - 1)), controller.signal);
             }
@@ -1558,10 +1634,15 @@ export class DownloadScheduler {
         return true;
     }
 
-    private async resetWorkuploadPartial(collection: DownloadCollectionRow, file: DownloadFileRow) {
+    private async resetWorkuploadPartial(
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        logContext: WorkuploadLogContext,
+    ) {
         const partPath = this.getPartPath(collection, file);
         await fse.remove(partPath).catch(() => undefined);
         await PartFileWriter.removeSidecar(partPath);
+        logContext.cleanupState = "reset";
         this.repository.resetFileProgress(file.id);
         this.metrics.clearFile(file.id);
         this.progressBatcher.mark(collection.id, file.id);
@@ -1573,6 +1654,7 @@ export class DownloadScheduler {
         file: DownloadFileRow,
         rangeSupported: boolean | undefined,
         controller: AbortController,
+        logContext: WorkuploadLogContext,
         writtenBytes?: number,
     ) {
         const current = this.repository.getFile(file.id);
@@ -1583,10 +1665,11 @@ export class DownloadScheduler {
             this.persistWorkuploadPartial(
                 file.id,
                 writtenBytes ?? current?.downloadedBytes ?? file.downloadedBytes,
+                logContext,
             );
             await this.emitUpdate(collection.id);
         } else {
-            await this.resetWorkuploadPartial(collection, file);
+            await this.resetWorkuploadPartial(collection, file, logContext);
         }
         if (isActiveFileDownloadStatus(current?.status)) {
             this.repository.markFileStatus(file.id, "pending");
@@ -1594,7 +1677,14 @@ export class DownloadScheduler {
         return true;
     }
 
-    private persistWorkuploadPartial(fileId: string, writtenBytes: number) {
+    private persistWorkuploadPartial(
+        fileId: string,
+        writtenBytes: number,
+        logContext?: WorkuploadLogContext,
+    ) {
+        if (logContext) {
+            logContext.cleanupState = "preserved";
+        }
         this.repository.markChunkPartial(fileId, 0, writtenBytes);
         this.repository.markChunkPending(fileId, 0);
         this.repository.syncWorkuploadDownloadedBytes(fileId);

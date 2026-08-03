@@ -5,7 +5,12 @@ import fse from "fs-extra";
 import { describe, expect, it, vi } from "vitest";
 
 import type { KioskDownloader } from "../..";
-import type { DownloadCollectionRow, DownloadFileRow, SchedulerSettings } from "./types";
+import type {
+    DownloadChunkRow,
+    DownloadCollectionRow,
+    DownloadFileRow,
+    SchedulerSettings,
+} from "./types";
 
 import { DownloadScheduler } from "./scheduler";
 
@@ -219,6 +224,158 @@ describe("DownloadScheduler", () => {
         }
     });
 
+    it("logs Workupload checksum failures with diagnostic context", async () => {
+        const collection = createCollection("workupload-checksum", 0);
+        collection.provider = "workupload";
+        collection.sourceUrl = "https://workupload.com/file/AbCdEf1234";
+        const file = createFile("checksum-file", collection.id);
+        file.size = 0;
+        file.sourceMetaJson = JSON.stringify({
+            originalName: file.name,
+            sha256: "0".repeat(64),
+        });
+        const repository = createRepository([collection], [file]);
+        const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(logger),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        try {
+            await (scheduler as unknown as SchedulerInternals).runFile(
+                collection.id,
+                file.id,
+                createSchedulerSettings(0),
+                new AbortController(),
+            );
+
+            expect(logger.error).toHaveBeenCalledTimes(2);
+            expect(logger.error.mock.calls[0]?.[0]).toMatchObject({
+                sourceUrl: collection.sourceUrl,
+                partPath: `${path.join(collection.savePath, file.path)}.part`,
+                finalPath: path.join(collection.savePath, file.path),
+                stage: "checksum",
+                retryCount: 0,
+                rangeSupported: null,
+                cleanupState: "not-attempted",
+            });
+        } finally {
+            scheduler.destroy();
+        }
+    });
+
+    it("logs Workupload finalization failures at the finalization stage", async () => {
+        const collection = createCollection("workupload-finalize", 0);
+        collection.provider = "workupload";
+        const file = createFile("finalize-file", collection.id);
+        file.size = 0;
+        file.sourceMetaJson = JSON.stringify({
+            originalName: file.name,
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        });
+        const repository = createRepository([collection], [file]);
+        const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(logger),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        vi.spyOn(scheduler as unknown as SchedulerInternals, "finalizeFile").mockRejectedValue(
+            new Error("finalize failed"),
+        );
+
+        try {
+            await (scheduler as unknown as SchedulerInternals).runFile(
+                collection.id,
+                file.id,
+                createSchedulerSettings(0),
+                new AbortController(),
+            );
+
+            expect(logger.error.mock.calls[0]?.[0]).toMatchObject({
+                stage: "finalize",
+                retryCount: 0,
+                rangeSupported: null,
+                cleanupState: "not-attempted",
+            });
+        } finally {
+            scheduler.destroy();
+        }
+    });
+
+    it.each([
+        { rangeSupported: true, cleanupState: "preserved" },
+        { rangeSupported: false, cleanupState: "reset" },
+    ] as const)(
+        "logs Workupload retry exhaustion with range and cleanup state ($rangeSupported)",
+        async ({ rangeSupported, cleanupState }) => {
+            const collection = createCollection("workupload-retry", 0);
+            collection.provider = "workupload";
+            const file = createFile("retry-file", collection.id);
+            file.sourceMetaJson = JSON.stringify({
+                originalName: file.name,
+                sha256: "0".repeat(64),
+                rangeSupported,
+            });
+            const chunk: DownloadChunkRow = {
+                collectionId: collection.id,
+                fileId: file.id,
+                chunkIndex: 0,
+                offset: 0,
+                size: file.size,
+                status: "pending",
+                downloadedBytes: 0,
+                attempts: 0,
+                updatedAt: file.updatedAt,
+                error: null,
+            };
+            const repository = createRepository([collection], [file], [chunk]);
+            const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+            const requestDownload = vi.fn(async () => {
+                throw new Error("CDN unavailable");
+            });
+            const scheduler = new DownloadScheduler(
+                createKioskDownloader(logger),
+                {} as never,
+                {} as never,
+                { createSession: vi.fn(async () => ({ requestDownload })) } as never,
+                repository.value,
+                createMetrics(),
+                vi.fn(async () => undefined),
+                vi.fn(async () => undefined),
+            );
+
+            try {
+                await (scheduler as unknown as SchedulerInternals).runFile(
+                    collection.id,
+                    file.id,
+                    createSchedulerSettings(0),
+                    new AbortController(),
+                );
+
+                expect(logger.error.mock.calls[0]?.[0]).toMatchObject({
+                    stage: "cdn-request",
+                    retryCount: 0,
+                    rangeSupported,
+                    cleanupState,
+                });
+            } finally {
+                scheduler.destroy();
+            }
+        },
+    );
+
     it("accepts an exact chunked Workupload body without Content-Length", async () => {
         const scheduler = createSchedulerForStreamTest();
         const body = streamBytes(["ab", "c"]);
@@ -342,7 +499,11 @@ describe("DownloadScheduler", () => {
     });
 });
 
-function createRepository(collections: DownloadCollectionRow[], files: DownloadFileRow[]) {
+function createRepository(
+    collections: DownloadCollectionRow[],
+    files: DownloadFileRow[],
+    chunks: DownloadChunkRow[] = [],
+) {
     const getCollection = vi.fn(
         (collectionId: string) =>
             collections.find((collection) => collection.id === collectionId) ?? null,
@@ -357,6 +518,26 @@ function createRepository(collections: DownloadCollectionRow[], files: DownloadF
         },
     );
     const resetRunningChunksForFile = vi.fn();
+    const ensureCollectionNotExpired = vi.fn(() => false);
+    const markFileStatus = vi.fn(
+        (fileId: string, status: DownloadFileRow["status"], error?: string | null) => {
+            const file = getFile(fileId);
+            if (file) {
+                file.status = status;
+                file.error = error ?? null;
+            }
+        },
+    );
+    const listChunks = vi.fn((fileId: string) => chunks.filter((chunk) => chunk.fileId === fileId));
+    const markChunkDownloading = vi.fn((chunk: DownloadChunkRow) => {
+        chunk.status = "downloading";
+    });
+    const resetFileProgress = vi.fn((fileId: string) => {
+        const file = getFile(fileId);
+        if (file) {
+            file.downloadedBytes = 0;
+        }
+    });
     const completeFile = vi.fn();
     const markChunkPending = vi.fn();
     const markChunkPartial = vi.fn();
@@ -399,8 +580,13 @@ function createRepository(collections: DownloadCollectionRow[], files: DownloadF
             },
         ),
         markCollectionStatus,
+        ensureCollectionNotExpired,
         getFile,
         getCollection,
+        markFileStatus,
+        listChunks,
+        markChunkDownloading,
+        resetFileProgress,
         recomputeCollectionStatus: vi.fn((collectionId: string) => {
             const collection = getCollection(collectionId);
             const collectionFiles = files.filter((file) => file.collectionId === collectionId);
@@ -424,7 +610,7 @@ function createRepository(collections: DownloadCollectionRow[], files: DownloadF
     };
 }
 
-function createKioskDownloader() {
+function createKioskDownloader(logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() }) {
     return {
         setting: {
             get: vi.fn(async (key: string) => {
@@ -447,7 +633,7 @@ function createKioskDownloader() {
                 getSafeRelativePath: vi.fn((filePath: string) => filePath),
             },
         },
-        logger: { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+        logger,
     } as unknown as KioskDownloader;
 }
 
@@ -455,7 +641,17 @@ function createMetrics() {
     return {
         clearFile: vi.fn(),
         clearCollection: vi.fn(),
+        registerFile: vi.fn(),
     } as never;
+}
+
+function createSchedulerSettings(maxChunkRetries: number): SchedulerSettings {
+    return {
+        segmentPoolSize: 1,
+        maxChunkRetries,
+        streamWriteBatchBytes: 1024,
+        inflateBufferBytes: 1024,
+    };
 }
 
 function createSchedulerForStreamTest() {
