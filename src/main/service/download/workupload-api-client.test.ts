@@ -435,8 +435,12 @@ describe("WorkuploadApiClient", () => {
     it("solves the proof-of-work, preserves cookies, validates CDN, and sends Range", async () => {
         const target = crypto.createHash("sha256").update("puzzle1").digest("hex");
         let fileRequests = 0;
+        let downloadSignal: AbortSignal | undefined;
         const request = vi.fn(
-            async (url: string, options?: { headers?: Headers; body?: unknown }) => {
+            async (
+                url: string,
+                options?: { headers?: Headers; body?: unknown; signal?: AbortSignal },
+            ) => {
                 if (url.endsWith("/file/FileKey")) {
                     fileRequests += 1;
                     if (fileRequests === 1) {
@@ -473,6 +477,7 @@ describe("WorkuploadApiClient", () => {
                     );
                 }
                 if (url === "https://f12.workupload.com/download/FileKey") {
+                    downloadSignal = options?.signal;
                     expect(options?.headers?.get("range")).toBe("bytes=4-9");
                     expect(options?.headers?.get("cookie")).toContain("token=session");
                     return new Response("bytes", { status: 206 });
@@ -485,6 +490,9 @@ describe("WorkuploadApiClient", () => {
         const result = await session.requestDownload("FileKey", { start: 4, end: 9 });
         expect(result.url).toBe("https://f12.workupload.com/download/FileKey");
         expect(result.response.status).toBe(206);
+        expect(downloadSignal?.aborted).toBe(false);
+        result.abort();
+        expect(downloadSignal?.aborted).toBe(true);
     });
 
     it("aborts an unmatched proof-of-work search after yielding", async () => {

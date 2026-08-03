@@ -430,6 +430,7 @@ export class WorkuploadSession {
 
     public async requestDownload(fileKey: string, options: RequestDownloadOptions = {}) {
         const url = await this.resolveDownloadUrl(fileKey);
+        const requestController = new AbortController();
         const headers: Record<string, string> = {};
         if (options.start !== undefined) {
             if (!Number.isSafeInteger(options.start) || options.start < 0) {
@@ -449,9 +450,12 @@ export class WorkuploadSession {
             url,
             response: await request(this.kd, this.jar, url, {
                 headers,
-                signal: options.signal,
+                signal: options.signal
+                    ? AbortSignal.any([options.signal, requestController.signal])
+                    : requestController.signal,
                 timeout: false,
             }),
+            abort: () => requestController.abort(),
         };
     }
 

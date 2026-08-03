@@ -63,6 +63,8 @@ class WorkuploadChecksumError extends Error {
     }
 }
 
+const WORKUPLOAD_BODY_STALL_TIMEOUT_MS = 15_000;
+
 function isActiveFileDownloadStatus(status: FileDownloadStatus | undefined) {
     return status === "downloading" || status === "inflating";
 }
@@ -110,6 +112,53 @@ function throwIfAborted(signal?: AbortSignal) {
     if (signal?.aborted) {
         throw new DOMException("The operation was aborted.", "AbortError");
     }
+}
+
+function readWorkuploadBodyChunk(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    signal: AbortSignal,
+    abortRequest?: () => void,
+) {
+    return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const cleanup = () => {
+            if (timer !== undefined) {
+                clearTimeout(timer);
+            }
+            signal.removeEventListener("abort", onAbort);
+        };
+        const settle = (finish: () => void) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            cleanup();
+            finish();
+        };
+        const onAbort = () => {
+            settle(() => reject(new DOMException("The operation was aborted.", "AbortError")));
+        };
+
+        timer = setTimeout(() => {
+            settle(() => reject(new Error("Workupload CDN body stalled.")));
+            abortRequest?.();
+        }, WORKUPLOAD_BODY_STALL_TIMEOUT_MS);
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) {
+            onAbort();
+            return;
+        }
+
+        try {
+            void reader.read().then(
+                (result) => settle(() => resolve(result)),
+                (error) => settle(() => reject(error)),
+            );
+        } catch (error) {
+            settle(() => reject(error));
+        }
+    });
 }
 
 async function sha256File(filePath: string, signal: AbortSignal) {
@@ -1242,11 +1291,12 @@ export class DownloadScheduler {
                     file.remoteId,
                     controller.signal,
                 );
-                const { response } = await session.requestDownload(file.remoteId, {
+                const download = await session.requestDownload(file.remoteId, {
                     start: resumeOffset,
                     end: file.size - 1,
                     signal: controller.signal,
                 });
+                const { response } = download;
                 const detectedRange = await this.requireWorkuploadDownloadResponse(
                     response,
                     resumeOffset,
@@ -1274,6 +1324,7 @@ export class DownloadScheduler {
                         response.body,
                         controller.signal,
                         file.size - resumeOffset,
+                        download.abort,
                     ),
                     file.size,
                     settings.streamWriteBatchBytes,
@@ -1419,6 +1470,7 @@ export class DownloadScheduler {
         body: ReadableStream<Uint8Array>,
         signal: AbortSignal,
         expectedBytes: number,
+        abortRequest?: () => void,
     ): AsyncGenerator<Uint8Array> {
         const reader = body.getReader();
         let receivedBytes = 0;
@@ -1427,7 +1479,7 @@ export class DownloadScheduler {
                 if (signal.aborted) {
                     throw new DOMException("The operation was aborted.", "AbortError");
                 }
-                const { done, value } = await reader.read();
+                const { done, value } = await readWorkuploadBodyChunk(reader, signal, abortRequest);
                 if (done) {
                     if (receivedBytes !== expectedBytes) {
                         throw new Error(
@@ -1446,9 +1498,9 @@ export class DownloadScheduler {
                     );
                 }
                 if (receivedBytes === expectedBytes) {
-                    let trailing = await reader.read();
+                    let trailing = await readWorkuploadBodyChunk(reader, signal, abortRequest);
                     while (!trailing.done && (!trailing.value || trailing.value.length === 0)) {
-                        trailing = await reader.read();
+                        trailing = await readWorkuploadBodyChunk(reader, signal, abortRequest);
                     }
                     if (!trailing.done) {
                         throw new Error(

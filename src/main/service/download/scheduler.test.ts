@@ -26,6 +26,7 @@ type SchedulerInternals = {
         body: ReadableStream<Uint8Array>,
         signal: AbortSignal,
         expectedBytes: number,
+        abortRequest?: () => void,
     ) => AsyncGenerator<Uint8Array>;
     persistWorkuploadPartial: (fileId: string) => void;
 };
@@ -250,6 +251,38 @@ describe("DownloadScheduler", () => {
         ).rejects.toThrow("more than the expected 3B");
 
         scheduler.destroy();
+    });
+
+    it("aborts a Workupload request when the body stalls", async () => {
+        vi.useFakeTimers();
+        const scheduler = createSchedulerForStreamTest();
+        const reader = {
+            read: vi.fn(() => new Promise<ReadableStreamReadResult<Uint8Array>>(() => undefined)),
+            cancel: vi.fn(async () => undefined),
+            releaseLock: vi.fn(),
+        };
+        const body = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
+        const abortRequest = vi.fn();
+
+        try {
+            const result = collectBytes(
+                (scheduler as unknown as SchedulerInternals).streamWorkuploadBody(
+                    body,
+                    new AbortController().signal,
+                    3,
+                    abortRequest,
+                ),
+            );
+            const rejected = expect(result).rejects.toThrow("Workupload CDN body stalled.");
+            await vi.advanceTimersByTimeAsync(15_000);
+
+            await rejected;
+            expect(abortRequest).toHaveBeenCalledOnce();
+            expect(reader.cancel).toHaveBeenCalledOnce();
+        } finally {
+            scheduler.destroy();
+            vi.useRealTimers();
+        }
     });
 
     it("persists resumable Workupload bytes before leaving the chunk pending", () => {
