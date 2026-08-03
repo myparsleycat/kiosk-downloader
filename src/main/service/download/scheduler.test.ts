@@ -28,7 +28,7 @@ type SchedulerInternals = {
         expectedBytes: number,
         abortRequest?: () => void,
     ) => AsyncGenerator<Uint8Array>;
-    persistWorkuploadPartial: (fileId: string) => void;
+    persistWorkuploadPartial: (fileId: string, writtenBytes: number) => void;
 };
 
 describe("DownloadScheduler", () => {
@@ -298,8 +298,9 @@ describe("DownloadScheduler", () => {
             vi.fn(async () => undefined),
         );
 
-        (scheduler as unknown as SchedulerInternals).persistWorkuploadPartial("file");
+        (scheduler as unknown as SchedulerInternals).persistWorkuploadPartial("file", 123);
 
+        expect(repository.markChunkPartial).toHaveBeenCalledWith("file", 0, 123);
         expect(repository.markChunkPending).toHaveBeenCalledWith("file", 0);
         expect(repository.syncWorkuploadDownloadedBytes).toHaveBeenCalledWith("file");
         expect(repository.markChunkPending.mock.invocationCallOrder[0]).toBeLessThan(
@@ -358,6 +359,7 @@ function createRepository(collections: DownloadCollectionRow[], files: DownloadF
     const resetRunningChunksForFile = vi.fn();
     const completeFile = vi.fn();
     const markChunkPending = vi.fn();
+    const markChunkPartial = vi.fn();
     const syncWorkuploadDownloadedBytes = vi.fn();
     const repository = {
         getCollectionElapsedMs: vi.fn(() => 0),
@@ -408,6 +410,7 @@ function createRepository(collections: DownloadCollectionRow[], files: DownloadF
         }),
         resetRunningChunksForFile,
         completeFile,
+        markChunkPartial,
         markChunkPending,
         syncWorkuploadDownloadedBytes,
     };
@@ -415,6 +418,7 @@ function createRepository(collections: DownloadCollectionRow[], files: DownloadF
         value: repository as never,
         resetRunningChunksForFile,
         completeFile,
+        markChunkPartial,
         markChunkPending,
         syncWorkuploadDownloadedBytes,
     };
