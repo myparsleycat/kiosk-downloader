@@ -37,6 +37,7 @@ import {
 } from "@shared/download-errors";
 import {
   EXTENDED_SHARE_PREFIX,
+  type ParsedDownloadUrl,
   tryDecodeShareUrlBase64,
   tryParseDownloadUrl,
 } from "@shared/share-url";
@@ -287,7 +288,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         setSelected(collectAllPaths(loaded.tree));
         setPasswordRequired(false);
         setPasswordInvalid(false);
-        setProbedShareId(parsed?.id ?? trimmedUrl);
+        setProbedShareId(parsed ? downloadUrlIdentity(parsed) : trimmedUrl);
       } catch (error) {
         if (seq !== loadSeqRef.current) {
           return;
@@ -307,14 +308,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           !loadPassword &&
           (isCollectionPasswordRequiredError(error) || isExtendedSharePasswordRequiredError(error))
         ) {
-          setProbedShareId(parsed?.id ?? trimmedUrl);
+          setProbedShareId(parsed ? downloadUrlIdentity(parsed) : trimmedUrl);
           setPasswordRequired(true);
           setCollection(null);
           setSelected(new Set());
 
           const autoTried = await tryAutoCollectionPasswords(
             trimmedUrl,
-            parsed?.id ?? trimmedUrl,
+            parsed ? downloadUrlIdentity(parsed) : trimmedUrl,
             seq,
           );
           if (autoTried || seq !== loadSeqRef.current) {
@@ -365,8 +366,11 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   React.useEffect(() => {
     const trimmedUrl = url.trim();
     const parsed = tryParseDownloadUrl(trimmedUrl);
-    const identity =
-      parsed?.id ?? (trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX) ? trimmedUrl : null);
+    const identity = parsed
+      ? downloadUrlIdentity(parsed)
+      : trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX)
+        ? trimmedUrl
+        : null;
 
     if (!identity) {
       loadSeqRef.current += 1;
@@ -375,7 +379,10 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       return;
     }
 
-    if (identity === probedShareId || (parsed != null && parsed.id === collection?.shareId)) {
+    if (
+      identity === probedShareId ||
+      (parsed != null && parsed.provider !== "workupload" && parsed.id === collection?.shareId)
+    ) {
       return;
     }
 
@@ -464,13 +471,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     setSortDir("desc");
   };
 
+  const parsedCurrentUrl = tryParseDownloadUrl(url.trim());
   const currentShareId =
-    tryParseDownloadUrl(url.trim())?.id ??
-    (url.trim().startsWith(EXTENDED_SHARE_PREFIX) ? url.trim() : null);
+    parsedCurrentUrl?.id ?? (url.trim().startsWith(EXTENDED_SHARE_PREFIX) ? url.trim() : null);
+  const currentIdentity = parsedCurrentUrl ? downloadUrlIdentity(parsedCurrentUrl) : currentShareId;
   const collectionSynced =
     collection !== null &&
-    (collection.provider === "extended"
-      ? currentShareId === probedShareId
+    (collection.provider === "extended" || collection.provider === "workupload"
+      ? currentIdentity === probedShareId
       : currentShareId === collection.shareId) &&
     !loading;
   const canStart =
@@ -487,8 +495,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     if (
       !collection ||
       !canStart ||
-      (collection.provider === "extended"
-        ? currentShareId !== probedShareId
+      (collection.provider === "extended" || collection.provider === "workupload"
+        ? currentIdentity !== probedShareId
         : currentShareId !== collection.shareId) ||
       loading
     ) {
@@ -554,7 +562,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   <InputGroupInput
                     ref={urlInputRef}
                     id="url-input"
-                    placeholder="https://kio.ac/c/... 또는 .kds 파일"
+                    placeholder="Kio · Transfer.it · Workupload URL 또는 .kds"
                     value={url}
                     onChange={(e) => {
                       const value = e.target.value;
@@ -651,7 +659,17 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   >
                     {collection.name}
                   </MetaRow>
-                  <MetaRow icon={<HashIcon className="size-3" />} label="Share ID">
+                  <MetaRow
+                    icon={<HashIcon className="size-3" />}
+                    label={
+                      collection.provider === "workupload"
+                        ? parsedCurrentUrl?.provider === "workupload" &&
+                          parsedCurrentUrl.kind === "archive"
+                          ? "Workupload Archive ID"
+                          : "Workupload File ID"
+                        : "Share ID"
+                    }
+                  >
                     <span className="font-mono text-[11px]">{collection.shareId}</span>
                   </MetaRow>
                   <MetaRow icon={<ClockIcon className="size-3" />} label="만료">
@@ -746,7 +764,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   root={sortedTree ?? displayTree ?? collection.tree}
                   selected={selected}
                   onToggle={handleToggle}
-                  onExpandZip={collection.provider === "extended" ? undefined : handleExpandZip}
+                  onExpandZip={collection.provider === "kiosk" ? handleExpandZip : undefined}
                   zipLoadingPaths={zipLoadingPaths}
                   onRename={(key, kind) => {
                     setRenameError(null);
@@ -961,4 +979,10 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
     if (file) files.push(file);
   }
   return files;
+}
+
+function downloadUrlIdentity(parsed: ParsedDownloadUrl) {
+  return parsed.provider === "workupload"
+    ? `${parsed.provider}:${parsed.kind}:${parsed.id}`
+    : `${parsed.provider}:${parsed.id}`;
 }

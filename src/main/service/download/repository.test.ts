@@ -687,3 +687,306 @@ describe("DownloadRepository.reconcileTransferChunkLayout", () => {
         );
     });
 });
+
+describe("DownloadRepository Workupload persistence", () => {
+    it("persists child metadata, uses one chunk, and projects transfer controls", async () => {
+        const { db, repo } = await createRepository();
+        const sha256 = "ab".repeat(32);
+        const collectionId = repo.insertDownload({
+            loaded: {
+                provider: "workupload",
+                resource: "archive",
+                rootId: "archive",
+                passwordProtected: false,
+                fileMetaByRemoteId: new Map([
+                    ["remote-a", { originalName: "a.bin", sha256, rangeSupported: true }],
+                    ["remote-b", { originalName: "b.bin", sha256 }],
+                ]),
+                collection: {
+                    shareId: "archive",
+                    name: "Archive",
+                    expires: Math.ceil(Date.now() / 1000) + 3600,
+                    segmentSize: 4,
+                    passwordProtected: false,
+                    provider: "workupload",
+                    tree: {
+                        type: "dir",
+                        id: "archive",
+                        name: "",
+                        entries: [
+                            {
+                                kind: "file",
+                                node: {
+                                    type: "file",
+                                    id: "remote-a",
+                                    name: "a.bin",
+                                    size: 10,
+                                },
+                            },
+                            {
+                                kind: "file",
+                                node: {
+                                    type: "file",
+                                    id: "remote-b",
+                                    name: "b.bin",
+                                    size: 6,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            url: "https://workupload.com/archive/archive",
+            savePath: "/tmp",
+            selectedPaths: ["a.bin", "b.bin"],
+            asciiFilenames: false,
+        });
+
+        const files = repo.listFiles(collectionId);
+        expect(files.map((file) => JSON.parse(file.sourceMetaJson!))).toEqual([
+            { originalName: "a.bin", sha256, rangeSupported: true },
+            { originalName: "b.bin", sha256 },
+        ]);
+        expect(repo.listChunks(files[0]!.id)).toMatchObject([
+            { chunkIndex: 0, offset: 0, size: 10 },
+        ]);
+        expect(repo.listChunks(files[1]!.id)).toMatchObject([
+            { chunkIndex: 0, offset: 0, size: 6 },
+        ]);
+        expect(repo.getItem(collectionId)).toMatchObject({
+            progress: {
+                "a.bin": { transferControl: "pause" },
+                "b.bin": { transferControl: undefined },
+            },
+        });
+        expect(repo.getItem(collectionId)?.transferControl).toBeUndefined();
+
+        repo.markFileStatus(files[0]!.id, "downloading");
+        repo.markCollectionStatus(collectionId, "downloading");
+        expect(repo.getItem(collectionId)?.transferControl).toBe("pause");
+
+        repo.markFileStatus(files[1]!.id, "downloading");
+        expect(repo.getItem(collectionId)?.transferControl).toBeUndefined();
+
+        repo.updateWorkuploadRangeSupported(files[1]!.id, true);
+
+        expect(JSON.parse(repo.getFile(files[1]!.id)!.sourceMetaJson!)).toEqual({
+            originalName: "b.bin",
+            sha256,
+            rangeSupported: true,
+        });
+        expect(repo.getItem(collectionId)).toMatchObject({
+            transferControl: "pause",
+            progress: {
+                "a.bin": { transferControl: "pause" },
+                "b.bin": { transferControl: "pause" },
+            },
+        });
+
+        repo.updateWorkuploadRangeSupported(files[1]!.id, false);
+        expect(repo.getItem(collectionId)).toMatchObject({
+            transferControl: "stop",
+            progress: { "b.bin": { transferControl: "stop" } },
+        });
+
+        db.run(`UPDATE "download_collection" SET "status" = 'paused' WHERE "id" = ?`, [
+            collectionId,
+        ]);
+        db.run(
+            `UPDATE "download_file"
+             SET "status" = 'paused',
+                 "downloaded_bytes" = CASE WHEN "id" = ? THEN 4 ELSE 0 END
+             WHERE "collection_id" = ?`,
+            [files[0]!.id, collectionId],
+        );
+        db.run(`UPDATE "download_file" SET "source_meta_json" = ? WHERE "id" = ?`, [
+            JSON.stringify({ originalName: "b.bin", sha256 }),
+            files[1]!.id,
+        ]);
+        expect(repo.getItem(collectionId)?.transferControl).toBe("pause");
+
+        repo.updateWorkuploadRangeSupported(files[1]!.id, false);
+        expect(repo.getItem(collectionId)?.transferControl).toBe("stop");
+
+        db.run(
+            `UPDATE "download_file"
+             SET "source_meta_json" = ?, "downloaded_bytes" = 2
+             WHERE "id" = ?`,
+            [JSON.stringify({ originalName: "b.bin", sha256 }), files[1]!.id],
+        );
+        expect(repo.getItem(collectionId)?.transferControl).toBeUndefined();
+    });
+
+    it("resets file bytes and chunks atomically while preserving metadata and status", async () => {
+        const { db, repo } = await createRepository();
+        const collectionId = repo.insertDownload({
+            loaded: {
+                provider: "workupload",
+                resource: "file",
+                rootId: "file",
+                passwordProtected: false,
+                fileMetaByRemoteId: new Map([
+                    ["remote", { originalName: "file.bin", sha256: "cd".repeat(32) }],
+                ]),
+                collection: {
+                    shareId: "file",
+                    name: "file.bin",
+                    expires: Math.ceil(Date.now() / 1000) + 3600,
+                    segmentSize: 4,
+                    passwordProtected: false,
+                    provider: "workupload",
+                    tree: {
+                        type: "dir",
+                        id: "file",
+                        name: "",
+                        entries: [
+                            {
+                                kind: "file",
+                                node: {
+                                    type: "file",
+                                    id: "remote",
+                                    name: "file.bin",
+                                    size: 10,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            url: "https://workupload.com/file/file",
+            savePath: "/tmp",
+            selectedPaths: ["file.bin"],
+            asciiFilenames: false,
+        });
+        const file = repo.listFiles(collectionId)[0]!;
+        const sourceMetaJson = file.sourceMetaJson;
+        db.run(
+            `UPDATE "download_file"
+             SET "status" = 'paused', "downloaded_bytes" = 7, "error" = 'old'
+             WHERE "id" = ?`,
+            [file.id],
+        );
+        db.run(
+            `INSERT INTO "download_chunk"
+             ("collection_id", "file_id", "chunk_index", "offset", "size", "status",
+              "downloaded_bytes", "attempts", "updated_at", "error")
+             VALUES (?, ?, 0, 0, 10, 'pending', 7, 1, ?, 'old')`,
+            [collectionId, file.id, new Date().toISOString()],
+        );
+
+        repo.resetFileProgress(file.id);
+
+        expect(repo.getFile(file.id)).toMatchObject({
+            status: "paused",
+            downloadedBytes: 0,
+            error: null,
+            sourceMetaJson,
+        });
+        expect(db.all(`SELECT * FROM "download_chunk" WHERE "file_id" = ?`, [file.id])).toEqual([]);
+    });
+
+    it("syncs a pending Workupload chunk and clamps it to the file size", async () => {
+        const { db, repo } = await createRepository();
+        const collectionId = repo.insertDownload({
+            loaded: {
+                provider: "workupload",
+                resource: "file",
+                rootId: "file",
+                passwordProtected: false,
+                fileMetaByRemoteId: new Map([
+                    ["remote", { originalName: "file.bin", sha256: "ef".repeat(32) }],
+                ]),
+                collection: {
+                    shareId: "file",
+                    name: "file.bin",
+                    expires: Math.ceil(Date.now() / 1000) + 3600,
+                    segmentSize: 10,
+                    passwordProtected: false,
+                    provider: "workupload",
+                    tree: {
+                        type: "dir",
+                        id: "file",
+                        name: "",
+                        entries: [
+                            {
+                                kind: "file",
+                                node: {
+                                    type: "file",
+                                    id: "remote",
+                                    name: "file.bin",
+                                    size: 10,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            url: "https://workupload.com/file/file",
+            savePath: "/tmp",
+            selectedPaths: ["file.bin"],
+            asciiFilenames: false,
+        });
+        const file = repo.listFiles(collectionId)[0]!;
+        const timestamp = new Date().toISOString();
+        db.run(
+            `INSERT INTO "download_chunk"
+             ("collection_id", "file_id", "chunk_index", "offset", "size", "status",
+              "downloaded_bytes", "attempts", "updated_at")
+             VALUES (?, ?, 0, 0, 10, 'pending', 7, 0, ?)`,
+            [collectionId, file.id, timestamp],
+        );
+
+        repo.syncWorkuploadDownloadedBytes(file.id);
+        expect(repo.getFile(file.id)?.downloadedBytes).toBe(7);
+
+        db.run(`UPDATE "download_chunk" SET "downloaded_bytes" = 50 WHERE "file_id" = ?`, [
+            file.id,
+        ]);
+        repo.syncWorkuploadDownloadedBytes(file.id);
+        expect(repo.getFile(file.id)?.downloadedBytes).toBe(10);
+    });
+
+    it("rejects a Workupload child without source metadata", async () => {
+        const { repo } = await createRepository();
+
+        expect(() =>
+            repo.insertDownload({
+                loaded: {
+                    provider: "workupload",
+                    resource: "file",
+                    rootId: "file",
+                    passwordProtected: false,
+                    fileMetaByRemoteId: new Map(),
+                    collection: {
+                        shareId: "file",
+                        name: "file.bin",
+                        expires: Math.ceil(Date.now() / 1000) + 3600,
+                        segmentSize: 4,
+                        passwordProtected: false,
+                        provider: "workupload",
+                        tree: {
+                            type: "dir",
+                            id: "file",
+                            name: "",
+                            entries: [
+                                {
+                                    kind: "file",
+                                    node: {
+                                        type: "file",
+                                        id: "remote",
+                                        name: "file.bin",
+                                        size: 10,
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                },
+                url: "https://workupload.com/file/file",
+                savePath: "/tmp",
+                selectedPaths: ["file.bin"],
+                asciiFilenames: false,
+            }),
+        ).toThrow("Missing Workupload source metadata for file: remote.");
+    });
+});

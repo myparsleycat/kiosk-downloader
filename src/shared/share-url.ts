@@ -3,10 +3,10 @@ import validator from "validator";
 import type { DownloadProvider } from "./types";
 
 export type { DownloadProvider };
-export type ParsedDownloadUrl = {
-    provider: DownloadProvider;
-    id: string;
-};
+export type WorkuploadShareKind = "file" | "archive";
+export type ParsedDownloadUrl =
+    | { provider: Exclude<DownloadProvider, "workupload">; id: string }
+    | { provider: "workupload"; id: string; kind: WorkuploadShareKind };
 
 export const SHARE_HOST = "kio.ac";
 export const SHARE_PATH_PREFIX = "/c/";
@@ -17,9 +17,15 @@ export const TRANSFER_HOST = "transfer.it";
 export const TRANSFER_PATH_PREFIX = "/t/";
 export const TRANSFER_ID_LENGTH = 12;
 
+export const WORKUPLOAD_HOST = "workupload.com";
+export const WORKUPLOAD_FILE_PATH_PREFIX = "/file/";
+export const WORKUPLOAD_START_PATH_PREFIX = "/start/";
+export const WORKUPLOAD_ARCHIVE_PATH_PREFIX = "/archive/";
+
 const UUID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 const UUID_DECODE_TABLE = new Map(UUID_ALPHABET.split("").map((char, index) => [char, index]));
 const TRANSFER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const WORKUPLOAD_ID_PATTERN = /^[A-Za-z0-9]+$/;
 
 export function tryExtractShareId(url: string) {
     let parsed: URL;
@@ -151,6 +157,39 @@ export function tryParseTransferUrl(url: string) {
     return tryExtractTransferId(url);
 }
 
+export function tryParseWorkuploadUrl(
+    url: string,
+): { id: string; kind: WorkuploadShareKind } | null {
+    let parsed: URL;
+    try {
+        parsed = new URL(url.trim());
+    } catch {
+        return null;
+    }
+
+    if (
+        parsed.protocol !== "https:" ||
+        parsed.username ||
+        parsed.password ||
+        parsed.port ||
+        parsed.search ||
+        parsed.hash ||
+        (parsed.hostname !== WORKUPLOAD_HOST && parsed.hostname !== `www.${WORKUPLOAD_HOST}`)
+    ) {
+        return null;
+    }
+
+    const match = /^\/(file|start|archive)\/([^/]+)\/?$/.exec(parsed.pathname);
+    if (!match || !WORKUPLOAD_ID_PATTERN.test(match[2])) {
+        return null;
+    }
+
+    return {
+        id: match[2],
+        kind: match[1] === "archive" ? "archive" : "file",
+    };
+}
+
 export function tryParseDownloadUrl(url: string): ParsedDownloadUrl | null {
     const shareId = tryParseShareUrl(url);
     if (shareId) {
@@ -162,11 +201,25 @@ export function tryParseDownloadUrl(url: string): ParsedDownloadUrl | null {
         return { provider: "transfer", id: transferId };
     }
 
+    const workupload = tryParseWorkuploadUrl(url);
+    if (workupload) {
+        return { provider: "workupload", ...workupload };
+    }
+
     return null;
 }
 
 export function buildTransferUrl(transferId: string): string {
     return `https://${TRANSFER_HOST}${TRANSFER_PATH_PREFIX}${transferId}`;
+}
+
+export function buildWorkuploadUrl(id: string, kind: WorkuploadShareKind = "file"): string {
+    if (!WORKUPLOAD_ID_PATTERN.test(id)) {
+        throw new Error(`Invalid Workupload id: ${id}.`);
+    }
+    const prefix =
+        kind === "archive" ? WORKUPLOAD_ARCHIVE_PATH_PREFIX : WORKUPLOAD_FILE_PATH_PREFIX;
+    return `https://${WORKUPLOAD_HOST}${prefix}${id}`;
 }
 
 export function tryDecodeShareUrlBase64(input: string) {

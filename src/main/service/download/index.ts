@@ -3,7 +3,12 @@ import path from "node:path";
 
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import { buildDirTreeFromFiles } from "@shared/dir-tree";
-import { buildShareUrl, tryParseDownloadUrl, uuidBytesToShareId } from "@shared/share-url";
+import {
+    buildShareUrl,
+    buildWorkuploadUrl,
+    tryParseDownloadUrl,
+    uuidBytesToShareId,
+} from "@shared/share-url";
 import { applyRenamesToTree, toDisplayPath } from "@shared/tree-rename";
 import type {
     Collection,
@@ -28,6 +33,7 @@ import type {
     DownloadFileRow,
     LoadedCollection,
     LoadedKioskCollection,
+    LoadedWorkuploadCollection,
 } from "./types";
 
 import { withLoggedError } from "../../lib/logged-error";
@@ -55,6 +61,9 @@ import {
     encodeDownloadTransfer,
 } from "./transfer-format";
 import { TransferItApiClient } from "./transfer-it-api-client";
+import { parseWorkuploadFileSourceMeta } from "./types";
+import { WorkuploadApiClient } from "./workupload-api-client";
+import { uniquifyWorkuploadTree } from "./workupload-filenames";
 import { indexZipFromSegments } from "./zip-index";
 
 const KDX_FILTERS = [{ name: "Kiosk Download Transfer", extensions: ["kdx"] }];
@@ -87,6 +96,7 @@ type StoredExtendedManifest = {
 export class DownloadService {
     private readonly api: KioApiClient;
     private readonly transferApi: TransferItApiClient;
+    private readonly workuploadApi: WorkuploadApiClient;
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
@@ -98,11 +108,13 @@ export class DownloadService {
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
         this.transferApi = new TransferItApiClient(kd);
+        this.workuploadApi = new WorkuploadApiClient(kd);
         this.repository = new DownloadRepository(kd);
         this.scheduler = new DownloadScheduler(
             kd,
             this.api,
             this.transferApi,
+            this.workuploadApi,
             this.repository,
             this.metrics,
             async (id) => {
@@ -128,6 +140,7 @@ export class DownloadService {
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.startupResumeMode");
         this.repository.restoreStartupState();
+        await this.resetNonResumableWorkuploadStartupState();
         this.repository.syncExpiredCollections();
         await this.emitUpdate();
         for (const bundle of this.repository.listBundles()) {
@@ -150,6 +163,32 @@ export class DownloadService {
 
     public hasActiveTransfers() {
         return this.scheduler.hasActiveTransfers();
+    }
+
+    private async resetNonResumableWorkuploadStartupState() {
+        for (const item of this.repository.listItems()) {
+            if (item.collection.provider !== "workupload") {
+                continue;
+            }
+            const collection = this.repository.getCollection(item.id);
+            if (!collection) {
+                continue;
+            }
+            const files = this.repository
+                .listFiles(item.id)
+                .filter(
+                    (file) =>
+                        file.status !== "completed" &&
+                        parseWorkuploadFileSourceMeta(file.sourceMetaJson).rangeSupported !== true,
+                );
+            if (files.length === 0) {
+                continue;
+            }
+            await this.scheduler.cleanupPartFiles(collection, files);
+            for (const file of files) {
+                this.repository.resetFileProgress(file.id);
+            }
+        }
     }
 
     public listOsProgressTransfers() {
@@ -225,6 +264,9 @@ export class DownloadService {
                 if (loaded.provider === "transfer") {
                     throw new Error("ZIP entry browsing is not supported for transfer.it.");
                 }
+                if (loaded.provider === "workupload") {
+                    throw new Error("ZIP entry browsing is not supported for Workupload.");
+                }
                 const found = findZipNodeById(loaded.collection.tree, payload.fileId);
                 if (!found) {
                     throw new Error(`ZIP file not found: ${payload.fileId}`);
@@ -257,6 +299,9 @@ export class DownloadService {
                 if (parsed.provider === "transfer") {
                     return await this.transferApi.probeCollection(payload);
                 }
+                if (parsed.provider === "workupload") {
+                    return await this.workuploadApi.probeCollection(payload);
+                }
                 return await this.api.probeCollection(payload);
             },
         );
@@ -285,6 +330,23 @@ export class DownloadService {
 
         tree = applyRenamesToTree(tree, renames);
 
+        const basePath = payload.savePath.trim();
+        const [createCollectionSubfolder, asciiFilenames] = await Promise.all([
+            this.kd.setting.get("general.createCollectionSubfolder"),
+            this.kd.setting.get("general.asciiFilenames"),
+        ]);
+        const uniqueWorkupload =
+            loaded.provider === "workupload"
+                ? uniquifyWorkuploadTree(tree, (name) =>
+                      this.kd.lib.fs.sanitizeDownloadPathSegment(name, { asciiFilenames }),
+                  )
+                : null;
+        tree = uniqueWorkupload?.tree ?? tree;
+        const selectedDownloadPaths = uniqueWorkupload
+            ? payload.selectedPaths.map(
+                  (selectedPath) => uniqueWorkupload.pathMap.get(selectedPath) ?? selectedPath,
+              )
+            : payload.selectedPaths;
         const enriched: LoadedCollection = {
             ...loaded,
             collection: {
@@ -292,12 +354,6 @@ export class DownloadService {
                 tree,
             },
         };
-
-        const basePath = payload.savePath.trim();
-        const [createCollectionSubfolder, asciiFilenames] = await Promise.all([
-            this.kd.setting.get("general.createCollectionSubfolder"),
-            this.kd.setting.get("general.asciiFilenames"),
-        ]);
         const savePath = shouldCreateCollectionSubfolder(
             enriched.collection.tree,
             enriched.collection.name,
@@ -313,10 +369,13 @@ export class DownloadService {
             : basePath;
         const collectionId = this.repository.insertDownload({
             loaded: enriched,
-            url: payload.url,
+            url:
+                enriched.provider === "workupload"
+                    ? buildWorkuploadUrl(enriched.collection.shareId, enriched.resource)
+                    : payload.url,
             password: enriched.passwordProtected ? payload.password : undefined,
             savePath,
-            selectedPaths: payload.selectedPaths,
+            selectedPaths: selectedDownloadPaths,
             asciiFilenames,
             zipPasswords: payload.zipPasswords,
         });
@@ -337,7 +396,26 @@ export class DownloadService {
         if (parsed.provider === "transfer") {
             return this.transferApi.loadCollection(payload);
         }
+        if (parsed.provider === "workupload") {
+            return this.normalizeWorkuploadCollection(
+                await this.workuploadApi.loadCollection(payload),
+            );
+        }
         return this.api.loadCollection(payload);
+    }
+
+    private normalizeWorkuploadCollection(
+        loaded: LoadedWorkuploadCollection,
+    ): LoadedWorkuploadCollection {
+        return {
+            ...loaded,
+            collection: {
+                ...loaded.collection,
+                tree: uniquifyWorkuploadTree(loaded.collection.tree, (name) =>
+                    this.kd.lib.fs.sanitizeDownloadPathSegment(name),
+                ).tree,
+            },
+        };
     }
 
     private async loadExtendedCollection(
@@ -1132,6 +1210,10 @@ export class DownloadService {
                         ? snapshot.speedBps
                         : undefined,
                 error: file.error ?? undefined,
+                transferControl:
+                    collection.provider === "workupload"
+                        ? workuploadTransferControl(file.sourceMetaJson)
+                        : undefined,
             };
         }
 
@@ -1569,6 +1651,15 @@ export class DownloadService {
             .flatMap((collection) => this.repository.listFiles(collection.id))
             .filter((file) => (splitIds ? splitIds.has(file.remoteId) : file.path === target.path));
     }
+}
+
+function workuploadTransferControl(sourceMetaJson: string | null) {
+    const rangeSupported = parseWorkuploadFileSourceMeta(sourceMetaJson).rangeSupported;
+    return rangeSupported === undefined
+        ? undefined
+        : rangeSupported
+          ? ("pause" as const)
+          : ("stop" as const);
 }
 
 function flattenRemoteFiles(

@@ -76,7 +76,9 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
-export type DownloadProvider = "kiosk" | "transfer" | "extended";
+export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload";
+
+export type TransferControl = "pause" | "stop";
 
 export interface Collection {
     shareId: string;
@@ -117,6 +119,7 @@ export interface FileProgress {
     completedElsewhere?: boolean;
     speedBps?: number;
     error?: string;
+    transferControl?: TransferControl;
 }
 
 export interface TransferProgressSummary {
@@ -148,6 +151,7 @@ export interface DownloadItem {
     createdAt: number;
     updatedAt: number;
     error?: string;
+    transferControl?: TransferControl;
 }
 
 export type DownloadProgressPatch = TransferProgressPatch<FileProgress, DownloadStatus>;

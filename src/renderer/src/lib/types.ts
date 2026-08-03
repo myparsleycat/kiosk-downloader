@@ -4,11 +4,13 @@ export type {
     DirNode,
     DownloadFilter,
     DownloadItem,
+    DownloadProvider,
     DownloadStatus,
     FileDownloadStatus,
     FileNode,
     FileProgress,
     TreeEntry,
+    TransferControl,
     ZipEntryMeta,
     ZipNode,
 } from "@shared/types";

@@ -8,6 +8,7 @@ import {
 } from "@renderer/components/ui/context-menu";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@renderer/components/ui/tooltip";
+import { useConfirmDownloadStop } from "@renderer/hooks/use-confirm-download-stop";
 import { useRemoveTransfer } from "@renderer/hooks/use-remove-transfer";
 import type { DownloadFilter, DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
@@ -21,6 +22,7 @@ import {
   PlayIcon,
   PlusIcon,
   ShareIcon,
+  SquareIcon,
   Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
@@ -81,6 +83,7 @@ export function DownloadView({
   const selected = items.find((i) => i.id === selectedId) ?? null;
   const { remove, removeCompleted, dialog, removing } =
     useRemoveTransfer<DownloadItem>(removeCollectionOptions);
+  const { runWithStopConfirmation, dialog: stopDialog } = useConfirmDownloadStop();
   const hasCompleted = items.some((item) => item.status === "completed");
   const [pendingAction, setPendingAction] = React.useState(false);
 
@@ -185,14 +188,26 @@ export function DownloadView({
                     />
                   </ContextMenuTrigger>
                   <ContextMenuContent>
-                    {item.status === "downloading" || item.status === "inflating" ? (
+                    {(item.status === "downloading" || item.status === "inflating") &&
+                    collectionTransferControl(item) ? (
                       <ContextMenuItem
                         onClick={() =>
-                          runAction(() => window.api.invoke("download:pauseCollection", item.id))
+                          runWithStopConfirmation(
+                            collectionTransferControl(item),
+                            "collection",
+                            () =>
+                              runAction(() =>
+                                window.api.invoke("download:pauseCollection", item.id),
+                              ),
+                          )
                         }
                       >
-                        <PauseIcon />
-                        일시정지
+                        {collectionTransferControl(item) === "stop" ? (
+                          <SquareIcon />
+                        ) : (
+                          <PauseIcon />
+                        )}
+                        {collectionTransferControl(item) === "stop" ? "정지" : "일시정지"}
                       </ContextMenuItem>
                     ) : item.status === "paused" ||
                       item.status === "queued" ||
@@ -209,7 +224,14 @@ export function DownloadView({
                         }
                       >
                         <PlayIcon />
-                        {item.status === "error" ? "재시도" : "시작"}
+                        {item.status === "error"
+                          ? "재시도"
+                          : item.status === "paused" && collectionTransferControl(item) === "stop"
+                            ? "다시 시작"
+                            : item.status === "paused" &&
+                                collectionTransferControl(item) === "pause"
+                              ? "이어받기"
+                              : "시작"}
                       </ContextMenuItem>
                     ) : null}
                     <ContextMenuItem
@@ -258,7 +280,12 @@ export function DownloadView({
       <div className="flex-1">
         <DownloadDetail item={selected} onRemove={remove} removing={removing} />
       </div>
+      {stopDialog}
       {dialog}
     </div>
   );
+}
+
+function collectionTransferControl(item: DownloadItem) {
+  return item.collection.provider === "workupload" ? item.transferControl : "pause";
 }

@@ -23,7 +23,19 @@ export type LoadedTransferCollection = {
     nodeKeys: Map<string, string>;
 };
 
-export type LoadedCollection = LoadedKioskCollection | LoadedTransferCollection;
+export type LoadedWorkuploadCollection = {
+    provider: "workupload";
+    resource: "file" | "archive";
+    collection: Collection;
+    rootId: string;
+    passwordProtected: boolean;
+    fileMetaByRemoteId: Map<string, WorkuploadFileSourceMeta>;
+};
+
+export type LoadedCollection =
+    | LoadedKioskCollection
+    | LoadedTransferCollection
+    | LoadedWorkuploadCollection;
 
 export type SegmentDescriptor = {
     type: "cdn" | "edge";
@@ -126,6 +138,48 @@ export type CreateDownloadRecord = {
 export type TransferFileSourceMeta = {
     nodeKey: string;
 };
+
+export type WorkuploadFileSourceMeta = {
+    originalName: string;
+    sha256: string;
+    rangeSupported?: boolean;
+};
+
+export function parseWorkuploadFileSourceMeta(raw: string | null): WorkuploadFileSourceMeta {
+    if (!raw) {
+        throw new Error("Missing Workupload file source metadata.");
+    }
+
+    let input: unknown;
+    try {
+        input = JSON.parse(raw);
+    } catch {
+        throw new Error("Invalid Workupload file source metadata.");
+    }
+
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+        throw new Error("Invalid Workupload file source metadata.");
+    }
+    const meta = input as Record<string, unknown>;
+    if (
+        Object.keys(meta).some(
+            (key) => key !== "originalName" && key !== "sha256" && key !== "rangeSupported",
+        ) ||
+        typeof meta.originalName !== "string" ||
+        meta.originalName.length === 0 ||
+        typeof meta.sha256 !== "string" ||
+        !/^[a-f\d]{64}$/i.test(meta.sha256) ||
+        (meta.rangeSupported !== undefined && typeof meta.rangeSupported !== "boolean")
+    ) {
+        throw new Error("Invalid Workupload file source metadata.");
+    }
+
+    return {
+        originalName: meta.originalName,
+        sha256: meta.sha256.toLowerCase(),
+        ...(meta.rangeSupported === undefined ? {} : { rangeSupported: meta.rangeSupported }),
+    };
+}
 
 export type ZipEntryStoredMeta = {
     path: string;
