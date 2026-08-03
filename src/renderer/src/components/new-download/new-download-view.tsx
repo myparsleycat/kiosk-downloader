@@ -664,8 +664,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                     icon={<HashIcon className="size-3" />}
                     label={
                       collection.provider === "workupload"
-                        ? parsedCurrentUrl?.provider === "workupload" &&
-                          parsedCurrentUrl.kind === "archive"
+                        ? collection.resource === "archive"
                           ? "Workupload Archive ID"
                           : "Workupload File ID"
                         : "Share ID"

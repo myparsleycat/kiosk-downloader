@@ -88,6 +88,7 @@ export interface Collection {
     passwordProtected: boolean;
     tree: CollectionTree;
     provider?: DownloadProvider;
+    resource?: "file" | "archive";
 }
 
 export type DownloadStatus =

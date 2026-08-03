@@ -241,7 +241,9 @@ export class DownloadService {
                     return loaded.collection;
                 }
                 const loaded = await this.loadCollectionUnlocked(payload);
-                return loaded.collection;
+                return loaded.provider === "workupload"
+                    ? { ...loaded.collection, resource: loaded.resource }
+                    : loaded.collection;
             },
         );
     }
