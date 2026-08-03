@@ -240,7 +240,9 @@ export class DownloadService {
                     this.extendedDrafts.set(payload.url.trim(), loaded);
                     return loaded.collection;
                 }
-                const loaded = await this.loadCollectionUnlocked(payload);
+                const asciiFilenames =
+                    payload.asciiFilenames ?? (await this.kd.setting.get("general.asciiFilenames"));
+                const loaded = await this.loadCollectionUnlocked(payload, asciiFilenames);
                 return loaded.provider === "workupload"
                     ? { ...loaded.collection, resource: loaded.resource }
                     : loaded.collection;
@@ -262,7 +264,10 @@ export class DownloadService {
                 if (payload.url.trim().startsWith(EXTENDED_SHARE_PREFIX)) {
                     throw new Error("확장 공유의 ZIP 파일은 다운로드 완료 후 열 수 있습니다.");
                 }
-                const loaded = await this.loadCollectionUnlocked(payload);
+                const loaded = await this.loadCollectionUnlocked(
+                    payload,
+                    await this.kd.setting.get("general.asciiFilenames"),
+                );
                 if (loaded.provider === "transfer") {
                     throw new Error("ZIP entry browsing is not supported for transfer.it.");
                 }
@@ -313,7 +318,13 @@ export class DownloadService {
         if (payload.url.trim().startsWith(EXTENDED_SHARE_PREFIX)) {
             return await this.createExtendedDownload(payload);
         }
-        const loaded = await this.loadCollectionUnlocked(payload);
+        const basePath = payload.savePath.trim();
+        const [createCollectionSubfolder, configuredAsciiFilenames] = await Promise.all([
+            this.kd.setting.get("general.createCollectionSubfolder"),
+            this.kd.setting.get("general.asciiFilenames"),
+        ]);
+        const asciiFilenames = payload.asciiFilenames ?? configuredAsciiFilenames;
+        const loaded = await this.loadCollectionUnlocked(payload, asciiFilenames);
         const selectedPaths = new Set(payload.selectedPaths);
         const renames = payload.renames ?? {};
         let tree = loaded.collection.tree;
@@ -331,24 +342,20 @@ export class DownloadService {
         }
 
         tree = applyRenamesToTree(tree, renames);
+        if (loaded.provider === "workupload") {
+            const usedNames = new Set<string>();
+            for (const entry of tree.entries) {
+                const safeName = this.kd.lib.fs.sanitizeDownloadPathSegment(entry.node.name, {
+                    asciiFilenames,
+                });
+                const key = safeName.toLowerCase();
+                if (usedNames.has(key)) {
+                    throw new Error("Workupload file names collide after sanitization.");
+                }
+                usedNames.add(key);
+            }
+        }
 
-        const basePath = payload.savePath.trim();
-        const [createCollectionSubfolder, asciiFilenames] = await Promise.all([
-            this.kd.setting.get("general.createCollectionSubfolder"),
-            this.kd.setting.get("general.asciiFilenames"),
-        ]);
-        const uniqueWorkupload =
-            loaded.provider === "workupload"
-                ? uniquifyWorkuploadTree(tree, (name) =>
-                      this.kd.lib.fs.sanitizeDownloadPathSegment(name, { asciiFilenames }),
-                  )
-                : null;
-        tree = uniqueWorkupload?.tree ?? tree;
-        const selectedDownloadPaths = uniqueWorkupload
-            ? payload.selectedPaths.map(
-                  (selectedPath) => uniqueWorkupload.pathMap.get(selectedPath) ?? selectedPath,
-              )
-            : payload.selectedPaths;
         const enriched: LoadedCollection = {
             ...loaded,
             collection: {
@@ -377,7 +384,7 @@ export class DownloadService {
                     : payload.url,
             password: enriched.passwordProtected ? payload.password : undefined,
             savePath,
-            selectedPaths: selectedDownloadPaths,
+            selectedPaths: payload.selectedPaths,
             asciiFilenames,
             zipPasswords: payload.zipPasswords,
         });
@@ -387,10 +394,13 @@ export class DownloadService {
         return this.getEnrichedItem(collectionId);
     }
 
-    private async loadCollectionUnlocked(payload: {
-        url: string;
-        password?: string;
-    }): Promise<LoadedCollection> {
+    private async loadCollectionUnlocked(
+        payload: {
+            url: string;
+            password?: string;
+        },
+        asciiFilenames: boolean,
+    ): Promise<LoadedCollection> {
         const parsed = tryParseDownloadUrl(payload.url);
         if (!parsed) {
             throw new Error("Invalid share URL.");
@@ -401,6 +411,7 @@ export class DownloadService {
         if (parsed.provider === "workupload") {
             return this.normalizeWorkuploadCollection(
                 await this.workuploadApi.loadCollection(payload),
+                asciiFilenames,
             );
         }
         return this.api.loadCollection(payload);
@@ -408,13 +419,14 @@ export class DownloadService {
 
     private normalizeWorkuploadCollection(
         loaded: LoadedWorkuploadCollection,
+        asciiFilenames: boolean,
     ): LoadedWorkuploadCollection {
         return {
             ...loaded,
             collection: {
                 ...loaded.collection,
                 tree: uniquifyWorkuploadTree(loaded.collection.tree, (name) =>
-                    this.kd.lib.fs.sanitizeDownloadPathSegment(name),
+                    this.kd.lib.fs.sanitizeDownloadPathSegment(name, { asciiFilenames }),
                 ).tree,
             },
         };
@@ -499,10 +511,11 @@ export class DownloadService {
         const renames = payload.renames ?? {};
         const logicalTree = applyRenamesToTree(loaded.collection.tree, renames);
         const basePath = payload.savePath.trim();
-        const [createCollectionSubfolder, asciiFilenames] = await Promise.all([
+        const [createCollectionSubfolder, configuredAsciiFilenames] = await Promise.all([
             this.kd.setting.get("general.createCollectionSubfolder"),
             this.kd.setting.get("general.asciiFilenames"),
         ]);
+        const asciiFilenames = payload.asciiFilenames ?? configuredAsciiFilenames;
         const savePath = shouldCreateCollectionSubfolder(
             logicalTree,
             loaded.collection.name,

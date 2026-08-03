@@ -238,6 +238,7 @@ export interface CreateUploadPayload {
 export interface LoadCollectionPayload {
     url: string;
     password?: string;
+    asciiFilenames?: boolean;
 }
 
 export interface ProbeCollectionPayload {
@@ -253,6 +254,7 @@ export interface CreateDownloadPayload {
     password?: string;
     savePath: string;
     selectedPaths: string[];
+    asciiFilenames?: boolean;
     zipPasswords?: Record<string, string>;
     /** original relative node path → new basename (applied after collection load) */
     renames?: Record<string, string>;

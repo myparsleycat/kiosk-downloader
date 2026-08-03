@@ -80,6 +80,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const password = useNewDownloadDraft((state) => state.password);
   const savePath = useNewDownloadDraft((state) => state.savePath);
   const createCollectionSubfolder = useNewDownloadDraft((state) => state.createCollectionSubfolder);
+  const asciiFilenames = useNewDownloadDraft((state) => state.asciiFilenames);
   const passwordRequired = useNewDownloadDraft((state) => state.passwordRequired);
   const passwordInvalid = useNewDownloadDraft((state) => state.passwordInvalid);
   const collection = useNewDownloadDraft((state) => state.collection);
@@ -185,7 +186,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   );
 
   const tryAutoCollectionPasswords = React.useCallback(
-    async (trimmedUrl: string, shareId: string, seq: number) => {
+    async (trimmedUrl: string, shareId: string, seq: number, asciiFilenames: boolean) => {
       try {
         const settings = await window.api.invoke("setting:getMany", [
           "general.autoTryCollectionPasswords",
@@ -217,6 +218,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
               .invoke("download:loadCollection", {
                 url: trimmedUrl,
                 password: candidate,
+                asciiFilenames,
               })
               .then((loaded) => {
                 if (settled) {
@@ -275,10 +277,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       setLoading(true);
       setExtendedLoadProgress(extended ? { current: 0, total: 0 } : null);
 
+      let effectiveAsciiFilenames = false;
       try {
+        await hydrateSettings();
+        effectiveAsciiFilenames = useNewDownloadDraft.getState().asciiFilenames;
         const loaded = await window.api.invoke("download:loadCollection", {
           url: trimmedUrl,
           password: loadPassword || undefined,
+          asciiFilenames: effectiveAsciiFilenames,
         });
 
         if (seq !== loadSeqRef.current) {
@@ -318,6 +324,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
             trimmedUrl,
             parsed ? downloadUrlIdentity(parsed) : trimmedUrl,
             seq,
+            effectiveAsciiFilenames,
           );
           if (autoTried || seq !== loadSeqRef.current) {
             return;
@@ -347,6 +354,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       setPasswordRequired,
       setProbedShareId,
       setSelected,
+      hydrateSettings,
       tryAutoCollectionPasswords,
     ],
   );
@@ -511,6 +519,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         savePath: savePath.trim(),
         selectedPaths: [...selected],
         zipPasswords: Object.keys(zipPasswords).length > 0 ? zipPasswords : undefined,
+        asciiFilenames,
         renames: Object.keys(renames).length > 0 ? renames : undefined,
       });
       if (!created) {
