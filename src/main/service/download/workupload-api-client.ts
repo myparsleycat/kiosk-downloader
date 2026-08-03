@@ -18,6 +18,7 @@ import { COLLECTION_EXPIRES_NEVER } from "./transfer-it-crypto";
 const ORIGIN = "https://workupload.com";
 const WORKUPLOAD_HOST = "workupload.com";
 const AJAX_ACCEPT = "application/json, text/javascript, */*; q=0.01";
+const PUZZLE_SEARCH_BATCH_SIZE = 1_000;
 
 export class WorkuploadHttpError extends Error {
     public constructor(
@@ -86,6 +87,7 @@ type RequestDownloadOptions = {
 type CreateSessionOptions = {
     requestedFileKey?: string;
     password?: string;
+    signal?: AbortSignal;
 };
 
 type ArchivePage = {
@@ -536,12 +538,13 @@ export class WorkuploadApiClient {
         }
         const jar = new CookieJar();
         return resource.kind === "file"
-            ? await this.createFileSession(resource, jar, options.password)
+            ? await this.createFileSession(resource, jar, options.password, options.signal)
             : await this.createArchiveSession(
                   resource,
                   jar,
                   options.requestedFileKey,
                   options.password,
+                  options.signal,
               );
     }
 
@@ -553,11 +556,12 @@ export class WorkuploadApiClient {
         resource: WorkuploadResource,
         jar: CookieJar,
         password?: string,
+        signal?: AbortSignal,
     ) {
         const fileUrl = resource.sourceUrl;
-        const loaded = await loadFileMetadata(this.kd, jar, resource.key, password);
+        const loaded = await loadFileMetadata(this.kd, jar, resource.key, password, signal);
         const startUrl = `${ORIGIN}/start/${resource.key}`;
-        await activateFileSession(this.kd, jar, fileUrl, startUrl);
+        await activateFileSession(this.kd, jar, fileUrl, startUrl, signal);
         const source: WorkuploadSource = {
             kind: "file",
             key: resource.key,
@@ -573,9 +577,10 @@ export class WorkuploadApiClient {
         jar: CookieJar,
         requestedFileKey?: string,
         password?: string,
+        signal?: AbortSignal,
     ) {
         const archiveUrl = resource.sourceUrl;
-        const loadedArchive = await loadProtectedPage(this.kd, jar, resource, password);
+        const loadedArchive = await loadProtectedPage(this.kd, jar, resource, password, signal);
         const archive = parseWorkuploadArchivePage(loadedArchive.html, resource.key);
         const startUrl = `${archiveUrl}/start`;
         const manifest = parseWorkuploadArchiveManifest(
@@ -585,6 +590,7 @@ export class WorkuploadApiClient {
                 startUrl,
                 `GET /archive/${resource.key}/start`,
                 archiveUrl,
+                signal,
             ),
             resource.key,
         );
@@ -610,7 +616,7 @@ export class WorkuploadApiClient {
         const files: WorkuploadFileMetadata[] = [];
         let childPasswordProtected = false;
         for (const { entry, index } of requestedEntries) {
-            const loaded = await loadFileMetadata(this.kd, jar, entry.fileKey, password);
+            const loaded = await loadFileMetadata(this.kd, jar, entry.fileKey, password, signal);
             const metadata = loaded.metadata;
             childPasswordProtected ||= loaded.passwordProtected;
             if (
@@ -693,15 +699,16 @@ async function loadPage(
     url: string,
     stage: string,
     referer = url,
+    signal?: AbortSignal,
 ) {
     const first = await readText(
-        await request(kd, jar, url, { headers: { Referer: referer } }),
+        await request(kd, jar, url, { headers: { Referer: referer }, signal }),
         stage,
     );
     if (!first.includes("/puzzle")) return first;
-    await passSecurityCheck(kd, jar, url);
+    await passSecurityCheck(kd, jar, url, signal);
     return await readText(
-        await request(kd, jar, url, { headers: { Referer: referer } }),
+        await request(kd, jar, url, { headers: { Referer: referer }, signal }),
         `${stage} retry`,
     );
 }
@@ -711,12 +718,14 @@ async function loadFileMetadata(
     jar: CookieJar,
     fileKey: string,
     password?: string,
+    signal?: AbortSignal,
 ) {
     const loaded = await loadProtectedPage(
         kd,
         jar,
         { kind: "file", key: fileKey, sourceUrl: `${ORIGIN}/file/${fileKey}` },
         password,
+        signal,
     );
     return {
         metadata: parseWorkuploadFileMetadata(loaded.html, fileKey),
@@ -749,9 +758,10 @@ async function loadProtectedPage(
     jar: CookieJar,
     resource: WorkuploadResource,
     password?: string,
+    signal?: AbortSignal,
 ) {
     const stage = `metadata GET /${resource.kind}/${resource.key}`;
-    const first = await loadPage(kd, jar, resource.sourceUrl, stage);
+    const first = await loadPage(kd, jar, resource.sourceUrl, stage, resource.sourceUrl, signal);
     if (!hasPasswordForm(first, resource)) {
         return { html: first, passwordProtected: false };
     }
@@ -771,10 +781,11 @@ async function loadProtectedPage(
             [`${name}[submit]`]: "",
             [`${name}[key]`]: resource.key,
         }),
+        signal,
     });
     const html =
         response.status >= 300 && response.status < 400
-            ? await loadPasswordRedirect(kd, jar, response, resource)
+            ? await loadPasswordRedirect(kd, jar, response, resource, signal)
             : await readText(response, `password POST /${resource.kind}/${resource.key}`);
     if (
         html.includes("The password you entered is incorrect.") ||
@@ -790,6 +801,7 @@ async function loadPasswordRedirect(
     jar: CookieJar,
     response: Response,
     resource: WorkuploadResource,
+    signal?: AbortSignal,
 ) {
     const location = response.headers.get("location");
     await response.body?.cancel().catch(() => undefined);
@@ -813,6 +825,7 @@ async function loadPasswordRedirect(
         redirect.href,
         `password redirect GET /${resource.kind}/${resource.key}`,
         resource.sourceUrl,
+        signal,
     );
 }
 
@@ -837,23 +850,47 @@ function parsePuzzle(value: unknown) {
     return { puzzle: data.puzzle, range: data.range as number, find: find as string[] };
 }
 
-function solvePuzzle(puzzle: ReturnType<typeof parsePuzzle>) {
+function throwIfAborted(signal?: AbortSignal) {
+    if (signal?.aborted) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+    }
+}
+
+async function solvePuzzle(puzzle: ReturnType<typeof parsePuzzle>, signal?: AbortSignal) {
     const answers = new Map<string, number>();
     const targets = new Set(puzzle.find);
-    for (let index = 0; index < puzzle.range && answers.size < targets.size; index += 1) {
-        const hash = crypto
-            .createHash("sha256")
-            .update(puzzle.puzzle + index)
-            .digest("hex");
-        if (targets.has(hash)) answers.set(hash, index);
+    for (
+        let start = 0;
+        start < puzzle.range && answers.size < targets.size;
+        start += PUZZLE_SEARCH_BATCH_SIZE
+    ) {
+        throwIfAborted(signal);
+        const end = Math.min(start + PUZZLE_SEARCH_BATCH_SIZE, puzzle.range);
+        for (let index = start; index < end && answers.size < targets.size; index += 1) {
+            throwIfAborted(signal);
+            const hash = crypto
+                .createHash("sha256")
+                .update(puzzle.puzzle + index)
+                .digest("hex");
+            if (targets.has(hash)) answers.set(hash, index);
+        }
+        if (answers.size < targets.size) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        }
     }
+    throwIfAborted(signal);
     if (answers.size !== puzzle.find.length) {
         throw new Error(`Workupload puzzle solved ${answers.size}/${puzzle.find.length} hashes.`);
     }
     return `${puzzle.find.map((hash) => answers.get(hash)).join(" ")} `;
 }
 
-async function passSecurityCheck(kd: KioskDownloader, jar: CookieJar, referer: string) {
+async function passSecurityCheck(
+    kd: KioskDownloader,
+    jar: CookieJar,
+    referer: string,
+    signal?: AbortSignal,
+) {
     const puzzle = parsePuzzle(
         await readJson(
             await request(kd, jar, `${ORIGIN}/puzzle`, {
@@ -862,6 +899,7 @@ async function passSecurityCheck(kd: KioskDownloader, jar: CookieJar, referer: s
                     Referer: referer,
                     "X-Requested-With": "XMLHttpRequest",
                 },
+                signal,
             }),
             "puzzle",
         ),
@@ -874,7 +912,8 @@ async function passSecurityCheck(kd: KioskDownloader, jar: CookieJar, referer: s
             Referer: referer,
             "X-Requested-With": "XMLHttpRequest",
         },
-        body: new URLSearchParams({ captcha: solvePuzzle(puzzle) }),
+        body: new URLSearchParams({ captcha: await solvePuzzle(puzzle, signal) }),
+        signal,
     });
     await readText(response, "captcha");
 }
@@ -884,14 +923,22 @@ async function activateFileSession(
     jar: CookieJar,
     fileUrl: string,
     startUrl: string,
+    signal?: AbortSignal,
 ) {
-    const first = await loadPage(kd, jar, startUrl, "activate GET /start/<key>", fileUrl);
+    const first = await loadPage(kd, jar, startUrl, "activate GET /start/<key>", fileUrl, signal);
     if (first.includes("/api/file/getDownloadServer/")) return;
     await readText(
-        await request(kd, jar, fileUrl, { headers: { Referer: startUrl } }),
+        await request(kd, jar, fileUrl, { headers: { Referer: startUrl }, signal }),
         "activate GET /file/<key>",
     );
-    const second = await loadPage(kd, jar, startUrl, "activate retry GET /start/<key>", fileUrl);
+    const second = await loadPage(
+        kd,
+        jar,
+        startUrl,
+        "activate retry GET /start/<key>",
+        fileUrl,
+        signal,
+    );
     if (!second.includes("/api/file/getDownloadServer/")) {
         throw new Error("Workupload download session did not become active.");
     }

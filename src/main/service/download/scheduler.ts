@@ -1237,7 +1237,11 @@ export class DownloadScheduler {
             this.metrics.registerFile(collection.id, file.id, resumeOffset);
 
             try {
-                const session = await this.getWorkuploadSession(collection, file.remoteId);
+                const session = await this.getWorkuploadSession(
+                    collection,
+                    file.remoteId,
+                    controller.signal,
+                );
                 const { response } = await session.requestDownload(file.remoteId, {
                     start: resumeOffset,
                     end: file.size - 1,
@@ -1348,7 +1352,11 @@ export class DownloadScheduler {
         }
     }
 
-    private async getWorkuploadSession(collection: DownloadCollectionRow, fileKey: string) {
+    private async getWorkuploadSession(
+        collection: DownloadCollectionRow,
+        fileKey: string,
+        signal: AbortSignal,
+    ) {
         const cached = this.sessionCache.get(collection.id);
         if (cached?.kind === "workupload") {
             return cached.session;
@@ -1357,6 +1365,7 @@ export class DownloadScheduler {
         const session = await this.workuploadApi.createSession(collection.sourceUrl, {
             requestedFileKey: fileKey,
             password: collection.passwordPlain ?? undefined,
+            signal,
         });
         this.sessionCache.set(collection.id, {
             kind: "workupload",

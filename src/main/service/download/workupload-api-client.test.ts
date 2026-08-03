@@ -487,6 +487,36 @@ describe("WorkuploadApiClient", () => {
         expect(result.response.status).toBe(206);
     });
 
+    it("aborts an unmatched proof-of-work search after yielding", async () => {
+        const controller = new AbortController();
+        const request = vi.fn(async (url: string) => {
+            if (url.endsWith("/file/FileKey")) {
+                return new Response(`<script>fetch('/puzzle')</script>`);
+            }
+            if (url.endsWith("/puzzle")) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        data: { puzzle: "puzzle", range: 1_000_000, find: ["f".repeat(64)] },
+                    }),
+                );
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+
+        const session = createClient(request).createSession("https://workupload.com/file/FileKey", {
+            signal: controller.signal,
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        controller.abort();
+
+        await expect(session).rejects.toMatchObject({ name: "AbortError" });
+        expect(request).not.toHaveBeenCalledWith(
+            "https://workupload.com/captcha",
+            expect.anything(),
+        );
+    });
+
     it.each([
         "http://f12.workupload.com/download/FileKey",
         "https://evil.example/download/FileKey",
