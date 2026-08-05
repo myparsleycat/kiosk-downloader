@@ -442,6 +442,47 @@ describe("DownloadScheduler", () => {
         }
     });
 
+    it("keeps an exact Workupload body when the connection stays open after completion", async () => {
+        vi.useFakeTimers();
+        const scheduler = createSchedulerForStreamTest();
+        const reader = {
+            read: vi
+                .fn()
+                .mockResolvedValueOnce({
+                    done: false,
+                    value: Buffer.from("abc"),
+                })
+                .mockImplementationOnce(
+                    () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => undefined),
+                ),
+            cancel: vi.fn(async () => undefined),
+            releaseLock: vi.fn(),
+        };
+        const body = { getReader: () => reader } as unknown as ReadableStream<Uint8Array>;
+        const abortRequest = vi.fn();
+
+        try {
+            const result = collectBytes(
+                (scheduler as unknown as SchedulerInternals).streamWorkuploadBody(
+                    body,
+                    new AbortController().signal,
+                    3,
+                    abortRequest,
+                ),
+            );
+            const resolved = expect(result).resolves.toBe("abc");
+            await vi.advanceTimersByTimeAsync(2_000);
+
+            await resolved;
+            expect(abortRequest).toHaveBeenCalledOnce();
+            expect(reader.read).toHaveBeenCalledTimes(2);
+            expect(reader.cancel).toHaveBeenCalledOnce();
+        } finally {
+            scheduler.destroy();
+            vi.useRealTimers();
+        }
+    });
+
     it("persists resumable Workupload bytes before leaving the chunk pending", () => {
         const repository = createRepository([], []);
         const scheduler = new DownloadScheduler(

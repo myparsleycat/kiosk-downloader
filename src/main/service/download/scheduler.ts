@@ -25,7 +25,7 @@ import { TransferProgressBatcher } from "../transfer-progress-batcher";
 import { getBundleTempDirName, getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
 import { sleepWithAbort } from "./slow-chunk-monitor";
-import { TransferChunkPool, parseTransferNodeKey } from "./transfer-chunk-pool";
+import { parseTransferNodeKey, TransferChunkPool } from "./transfer-chunk-pool";
 import { parseWorkuploadFileSourceMeta } from "./types";
 import {
     WorkuploadHttpError,
@@ -83,7 +83,15 @@ type WorkuploadLogContext = {
 };
 
 const WORKUPLOAD_BODY_STALL_TIMEOUT_MS = 15_000;
+const WORKUPLOAD_TRAILING_READ_TIMEOUT_MS = 2_000;
 const WORKUPLOAD_PARTIAL_PERSIST_INTERVAL_MS = 1000;
+
+class WorkuploadBodyStallError extends Error {
+    public constructor() {
+        super("Workupload CDN body stalled.");
+        this.name = "WorkuploadBodyStallError";
+    }
+}
 
 function isActiveFileDownloadStatus(status: FileDownloadStatus | undefined) {
     return status === "downloading" || status === "inflating";
@@ -138,6 +146,7 @@ function readWorkuploadBodyChunk(
     reader: ReadableStreamDefaultReader<Uint8Array>,
     signal: AbortSignal,
     abortRequest?: () => void,
+    timeoutMs = WORKUPLOAD_BODY_STALL_TIMEOUT_MS,
 ) {
     return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
         let settled = false;
@@ -161,9 +170,9 @@ function readWorkuploadBodyChunk(
         };
 
         timer = setTimeout(() => {
-            settle(() => reject(new Error("Workupload CDN body stalled.")));
+            settle(() => reject(new WorkuploadBodyStallError()));
             abortRequest?.();
-        }, WORKUPLOAD_BODY_STALL_TIMEOUT_MS);
+        }, timeoutMs);
         signal.addEventListener("abort", onAbort, { once: true });
         if (signal.aborted) {
             onAbort();
@@ -1597,19 +1606,45 @@ export class DownloadScheduler {
                         `Workupload CDN returned more than the expected ${expectedBytes}B.`,
                     );
                 }
-                if (receivedBytes === expectedBytes) {
-                    let trailing = await readWorkuploadBodyChunk(reader, signal, abortRequest);
-                    while (!trailing.done && (!trailing.value || trailing.value.length === 0)) {
-                        trailing = await readWorkuploadBodyChunk(reader, signal, abortRequest);
-                    }
-                    if (!trailing.done) {
-                        throw new Error(
-                            `Workupload CDN returned more than the expected ${expectedBytes}B.`,
-                        );
-                    }
-                }
                 await this.kd.service.transfer.downloadBandwidth.take(value.length, signal);
                 yield value;
+                if (receivedBytes !== expectedBytes) {
+                    continue;
+                }
+                let trailing: ReadableStreamReadResult<Uint8Array>;
+                try {
+                    trailing = await readWorkuploadBodyChunk(
+                        reader,
+                        signal,
+                        abortRequest,
+                        WORKUPLOAD_TRAILING_READ_TIMEOUT_MS,
+                    );
+                } catch (error) {
+                    if (error instanceof WorkuploadBodyStallError) {
+                        return;
+                    }
+                    throw error;
+                }
+                while (!trailing.done && (!trailing.value || trailing.value.length === 0)) {
+                    try {
+                        trailing = await readWorkuploadBodyChunk(
+                            reader,
+                            signal,
+                            abortRequest,
+                            WORKUPLOAD_TRAILING_READ_TIMEOUT_MS,
+                        );
+                    } catch (error) {
+                        if (error instanceof WorkuploadBodyStallError) {
+                            return;
+                        }
+                        throw error;
+                    }
+                }
+                if (!trailing.done) {
+                    throw new Error(
+                        `Workupload CDN returned more than the expected ${expectedBytes}B.`,
+                    );
+                }
             }
         } finally {
             await reader.cancel().catch(() => undefined);
