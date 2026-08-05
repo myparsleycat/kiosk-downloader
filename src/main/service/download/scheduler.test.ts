@@ -200,25 +200,36 @@ describe("DownloadScheduler", () => {
         const finalPath = path.join(directory, file.path);
         await fse.outputFile(finalPath, "old");
         await fse.outputFile(`${finalPath}.part`, "new");
-        let abortChecks = 0;
+        let aborted = false;
         const signal = {
             get aborted() {
-                abortChecks += 1;
-                return abortChecks > 2;
+                return aborted;
             },
         } as AbortSignal;
+        const originalMove = fse.move.bind(fse);
+        const moveSpy = vi.spyOn(fse, "move");
 
         try {
+            moveSpy.mockImplementation(
+                async (src: string, dest: string, options?: fse.MoveOptions) => {
+                    const result = await originalMove(src, dest, options);
+                    aborted = true;
+                    return result;
+                },
+            );
+
             await (scheduler as unknown as SchedulerInternals).finalizeFile(
                 collection,
                 file,
                 signal,
             );
 
+            expect(aborted).toBe(true);
             expect(await fse.readFile(finalPath, "utf8")).toBe("new");
             expect(await fse.pathExists(`${finalPath}.part`)).toBe(false);
             expect(repository.completeFile).toHaveBeenCalledWith(file.id);
         } finally {
+            moveSpy.mockRestore();
             scheduler.destroy();
             await fse.remove(directory);
         }
