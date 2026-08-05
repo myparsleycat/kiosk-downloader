@@ -4,7 +4,6 @@ import type { DirNode, FileNode } from "@shared/types";
 
 export function uniquifyWorkuploadTree(tree: DirNode, normalizeName: (name: string) => string) {
     const used = new Set<string>();
-    const pathMap = new Map<string, string>();
     const files = tree.entries.map((entry) => {
         if (entry.kind !== "file") {
             throw new Error("Workupload collections must contain only flat files.");
@@ -18,7 +17,6 @@ export function uniquifyWorkuploadTree(tree: DirNode, normalizeName: (name: stri
     );
     const entries = files.map(({ file }) => {
         const name = namesById.get(file.id)!;
-        pathMap.set(file.name, name);
         return {
             kind: "file" as const,
             node: { ...file, name },
@@ -27,7 +25,6 @@ export function uniquifyWorkuploadTree(tree: DirNode, normalizeName: (name: stri
 
     return {
         tree: { ...tree, name: "", entries },
-        pathMap,
     };
 }
 

@@ -19,10 +19,7 @@ describe("uniquifyWorkuploadTree", () => {
         ]);
     });
 
-    it("returns the final display-path mapping and rejects nested nodes", () => {
-        const result = uniquifyWorkuploadTree(tree(["한글.txt"]), () => "hangul.txt");
-        expect(result.pathMap.get("한글.txt")).toBe("hangul.txt");
-
+    it("rejects nested nodes", () => {
         expect(() =>
             uniquifyWorkuploadTree(
                 {
@@ -46,7 +43,6 @@ describe("uniquifyWorkuploadTree", () => {
                     entry.node.name,
                 ]),
             );
-
         expect(toNames(first)).toEqual(
             new Map([
                 ["z-key", "a_b.txt"],
