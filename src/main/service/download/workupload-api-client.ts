@@ -19,6 +19,9 @@ const ORIGIN = "https://workupload.com";
 const WORKUPLOAD_HOST = "workupload.com";
 const AJAX_ACCEPT = "application/json, text/javascript, */*; q=0.01";
 const PUZZLE_SEARCH_BATCH_SIZE = 1_000;
+// ky applies `timeout` only until response headers arrive; the body stream is
+// guarded separately by the scheduler's stall timer.
+const WORKUPLOAD_CDN_HEADER_TIMEOUT_MS = 30_000;
 
 export class WorkuploadHttpError extends Error {
     public constructor(
@@ -453,7 +456,7 @@ export class WorkuploadSession {
                 signal: options.signal
                     ? AbortSignal.any([options.signal, requestController.signal])
                     : requestController.signal,
-                timeout: false,
+                timeout: WORKUPLOAD_CDN_HEADER_TIMEOUT_MS,
             }),
             abort: () => requestController.abort(),
         };

@@ -4,6 +4,7 @@ import {
     COLLECTION_INVALID_PASSWORD_ERROR,
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
+import ky from "ky";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -552,5 +553,61 @@ describe("WorkuploadApiClient", () => {
         await expect(session.resolveDownloadUrl("FileKey")).rejects.toThrow(
             "Unexpected Workupload CDN URL",
         );
+    });
+
+    it("times out a CDN download that never sends response headers", async () => {
+        vi.useFakeTimers();
+        const fileRequests = vi.fn(async () => new Response(FILE_HTML));
+        const startRequests = vi.fn(
+            async () => new Response("/api/file/getDownloadServer/FileKey"),
+        );
+        const resolverRequests = vi.fn(
+            async () =>
+                new Response(
+                    JSON.stringify({
+                        success: true,
+                        data: { url: "https://f12.workupload.com/download/FileKey" },
+                    }),
+                ),
+        );
+        let downloadSignal: AbortSignal | undefined;
+        const downloadRequests = vi.fn(async () => new Promise<Response>(() => undefined));
+        const fetchStub = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url =
+                typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+            if (url.endsWith("/file/FileKey")) return fileRequests();
+            if (url.endsWith("/start/FileKey")) return startRequests();
+            if (url.endsWith("/api/file/getDownloadServer/FileKey")) return resolverRequests();
+            if (url === "https://f12.workupload.com/download/FileKey") {
+                downloadSignal =
+                    input instanceof Request ? input.signal : (init?.signal ?? undefined);
+                return downloadRequests();
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+        const client = new WorkuploadApiClient({
+            http: {
+                request: async (url: string, options: Record<string, unknown> = {}) =>
+                    ky(url, {
+                        ...options,
+                        throwHttpErrors: false,
+                        retry: 0,
+                        fetch: fetchStub as typeof fetch,
+                    }),
+            },
+        } as never);
+
+        try {
+            const session = await client.createSession("https://workupload.com/file/FileKey");
+            const pending = expect(session.requestDownload("FileKey")).rejects.toThrow(
+                /timed out/i,
+            );
+            await vi.advanceTimersByTimeAsync(30_000);
+
+            await pending;
+            expect(downloadSignal?.aborted).toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
