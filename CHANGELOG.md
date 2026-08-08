@@ -1,3 +1,11 @@
+## [1.9.2](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.1...v1.9.2) (2026-08-08)
+
+
+### Bug Fixes
+
+* **download:** route outbound requests through Chromium net stack ([6761656](https://github.com/myparsleycat/kiosk-downloader/commit/6761656ba36d8991c3292e284ab27cf027a9342f))
+* **share-url:** accept unpadded and base64url-encoded download inputs ([400331a](https://github.com/myparsleycat/kiosk-downloader/commit/400331a8263b017f2f01d002afa5d97f63160407))
+
 ## [1.9.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.0...v1.9.1) (2026-08-08)
 
 
