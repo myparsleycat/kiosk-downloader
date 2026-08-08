@@ -2,6 +2,20 @@ import ky, { type Options } from "ky";
 
 import type { KioskDownloader } from "../index";
 
+type FetchInput = string | URL | Request;
+
+// Use Chromium's network stack instead of Node's bundled Undici. Undici's Happy
+// Eyeballs (internalConnectMultiple) can stall on broken IPv6 routes and surface
+// as ETIMEDOUT, whereas Chromium's network stack falls back to IPv4 robustly.
+// The fallback keeps unit tests runnable in pure Node.
+async function networkFetch(input: FetchInput, init?: RequestInit): Promise<Response> {
+    const { net } = await import("electron");
+    if (typeof net?.fetch === "function") {
+        return net.fetch(input instanceof URL ? input.toString() : input, init);
+    }
+    return globalThis.fetch(input, init);
+}
+
 export class HTTP {
     constructor(private readonly kd: KioskDownloader) {}
 
@@ -14,6 +28,7 @@ export class HTTP {
     public async request(url: string, options?: Options) {
         const resp = await ky(url, {
             ...options,
+            fetch: networkFetch,
             throwHttpErrors: false,
             headers: {
                 ...(options?.headers instanceof Headers
