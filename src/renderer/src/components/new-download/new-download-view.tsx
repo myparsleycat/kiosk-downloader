@@ -1,5 +1,6 @@
 import { FileTree } from "@renderer/components/tree/file-tree";
 import { RenameDialog, type RenameTarget } from "@renderer/components/tree/rename-dialog";
+import { Badge } from "@renderer/components/ui/badge";
 import { Button } from "@renderer/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@renderer/components/ui/field";
 import {
@@ -37,6 +38,7 @@ import {
 } from "@shared/download-errors";
 import {
   EXTENDED_SHARE_PREFIX,
+  type ParsedDownloadUrl,
   tryDecodeShareUrlBase64,
   tryParseDownloadUrl,
 } from "@shared/share-url";
@@ -78,6 +80,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const password = useNewDownloadDraft((state) => state.password);
   const savePath = useNewDownloadDraft((state) => state.savePath);
   const createCollectionSubfolder = useNewDownloadDraft((state) => state.createCollectionSubfolder);
+  const asciiFilenames = useNewDownloadDraft((state) => state.asciiFilenames);
   const passwordRequired = useNewDownloadDraft((state) => state.passwordRequired);
   const passwordInvalid = useNewDownloadDraft((state) => state.passwordInvalid);
   const collection = useNewDownloadDraft((state) => state.collection);
@@ -183,7 +186,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   );
 
   const tryAutoCollectionPasswords = React.useCallback(
-    async (trimmedUrl: string, shareId: string, seq: number) => {
+    async (trimmedUrl: string, shareId: string, seq: number, asciiFilenames: boolean) => {
       try {
         const settings = await window.api.invoke("setting:getMany", [
           "general.autoTryCollectionPasswords",
@@ -215,6 +218,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
               .invoke("download:loadCollection", {
                 url: trimmedUrl,
                 password: candidate,
+                asciiFilenames,
               })
               .then((loaded) => {
                 if (settled) {
@@ -273,10 +277,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       setLoading(true);
       setExtendedLoadProgress(extended ? { current: 0, total: 0 } : null);
 
+      let effectiveAsciiFilenames = false;
       try {
+        await hydrateSettings();
+        effectiveAsciiFilenames = useNewDownloadDraft.getState().asciiFilenames;
         const loaded = await window.api.invoke("download:loadCollection", {
           url: trimmedUrl,
           password: loadPassword || undefined,
+          asciiFilenames: effectiveAsciiFilenames,
         });
 
         if (seq !== loadSeqRef.current) {
@@ -287,7 +295,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         setSelected(collectAllPaths(loaded.tree));
         setPasswordRequired(false);
         setPasswordInvalid(false);
-        setProbedShareId(parsed?.id ?? trimmedUrl);
+        setProbedShareId(parsed ? downloadUrlIdentity(parsed) : trimmedUrl);
       } catch (error) {
         if (seq !== loadSeqRef.current) {
           return;
@@ -307,15 +315,16 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           !loadPassword &&
           (isCollectionPasswordRequiredError(error) || isExtendedSharePasswordRequiredError(error))
         ) {
-          setProbedShareId(parsed?.id ?? trimmedUrl);
+          setProbedShareId(parsed ? downloadUrlIdentity(parsed) : trimmedUrl);
           setPasswordRequired(true);
           setCollection(null);
           setSelected(new Set());
 
           const autoTried = await tryAutoCollectionPasswords(
             trimmedUrl,
-            parsed?.id ?? trimmedUrl,
+            parsed ? downloadUrlIdentity(parsed) : trimmedUrl,
             seq,
+            effectiveAsciiFilenames,
           );
           if (autoTried || seq !== loadSeqRef.current) {
             return;
@@ -345,6 +354,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       setPasswordRequired,
       setProbedShareId,
       setSelected,
+      hydrateSettings,
       tryAutoCollectionPasswords,
     ],
   );
@@ -365,8 +375,11 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   React.useEffect(() => {
     const trimmedUrl = url.trim();
     const parsed = tryParseDownloadUrl(trimmedUrl);
-    const identity =
-      parsed?.id ?? (trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX) ? trimmedUrl : null);
+    const identity = parsed
+      ? downloadUrlIdentity(parsed)
+      : trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX)
+        ? trimmedUrl
+        : null;
 
     if (!identity) {
       loadSeqRef.current += 1;
@@ -375,7 +388,10 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       return;
     }
 
-    if (identity === probedShareId || (parsed != null && parsed.id === collection?.shareId)) {
+    if (
+      identity === probedShareId ||
+      (parsed != null && parsed.provider !== "workupload" && parsed.id === collection?.shareId)
+    ) {
       return;
     }
 
@@ -464,13 +480,14 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     setSortDir("desc");
   };
 
+  const parsedCurrentUrl = tryParseDownloadUrl(url.trim());
   const currentShareId =
-    tryParseDownloadUrl(url.trim())?.id ??
-    (url.trim().startsWith(EXTENDED_SHARE_PREFIX) ? url.trim() : null);
+    parsedCurrentUrl?.id ?? (url.trim().startsWith(EXTENDED_SHARE_PREFIX) ? url.trim() : null);
+  const currentIdentity = parsedCurrentUrl ? downloadUrlIdentity(parsedCurrentUrl) : currentShareId;
   const collectionSynced =
     collection !== null &&
-    (collection.provider === "extended"
-      ? currentShareId === probedShareId
+    (collection.provider === "extended" || collection.provider === "workupload"
+      ? currentIdentity === probedShareId
       : currentShareId === collection.shareId) &&
     !loading;
   const canStart =
@@ -487,8 +504,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     if (
       !collection ||
       !canStart ||
-      (collection.provider === "extended"
-        ? currentShareId !== probedShareId
+      (collection.provider === "extended" || collection.provider === "workupload"
+        ? currentIdentity !== probedShareId
         : currentShareId !== collection.shareId) ||
       loading
     ) {
@@ -502,6 +519,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         savePath: savePath.trim(),
         selectedPaths: [...selected],
         zipPasswords: Object.keys(zipPasswords).length > 0 ? zipPasswords : undefined,
+        asciiFilenames,
         renames: Object.keys(renames).length > 0 ? renames : undefined,
       });
       if (!created) {
@@ -554,7 +572,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   <InputGroupInput
                     ref={urlInputRef}
                     id="url-input"
-                    placeholder="https://kio.ac/c/... 또는 .kds 파일"
+                    placeholder="Kiosk · Transfer.it · Workupload URL 또는 .kds"
                     value={url}
                     onChange={(e) => {
                       const value = e.target.value;
@@ -651,7 +669,16 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   >
                     {collection.name}
                   </MetaRow>
-                  <MetaRow icon={<HashIcon className="size-3" />} label="Share ID">
+                  <MetaRow
+                    icon={<HashIcon className="size-3" />}
+                    label={
+                      collection.provider === "workupload"
+                        ? collection.resource === "archive"
+                          ? "Workupload Archive ID"
+                          : "Workupload File ID"
+                        : "Share ID"
+                    }
+                  >
                     <span className="font-mono text-[11px]">{collection.shareId}</span>
                   </MetaRow>
                   <MetaRow icon={<ClockIcon className="size-3" />} label="만료">
@@ -746,7 +773,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   root={sortedTree ?? displayTree ?? collection.tree}
                   selected={selected}
                   onToggle={handleToggle}
-                  onExpandZip={collection.provider === "extended" ? undefined : handleExpandZip}
+                  onExpandZip={collection.provider === "kiosk" ? handleExpandZip : undefined}
                   zipLoadingPaths={zipLoadingPaths}
                   onRename={(key, kind) => {
                     setRenameError(null);
@@ -935,6 +962,8 @@ function SortButton({
   );
 }
 
+const SUPPORTED_PROVIDERS = ["Kiosk", "Transfer.it", "Workupload", "확장 공유 (.kds)"] as const;
+
 function EmptyState({ loading }: { loading: boolean }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
@@ -946,6 +975,15 @@ function EmptyState({ loading }: { loading: boolean }) {
       <span className="text-sm">
         {loading ? "컬렉션을 불러오는 중..." : "좌측에서 URL 또는 공유 파일을 불러오세요"}
       </span>
+      {!loading && (
+        <div className="flex flex-wrap items-center justify-center gap-1.5 px-6">
+          {SUPPORTED_PROVIDERS.map((name) => (
+            <Badge key={name} variant="outline" className="text-muted-foreground">
+              {name}
+            </Badge>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -961,4 +999,10 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
     if (file) files.push(file);
   }
   return files;
+}
+
+function downloadUrlIdentity(parsed: ParsedDownloadUrl) {
+  return parsed.provider === "workupload"
+    ? `${parsed.provider}:${parsed.kind}:${parsed.id}`
+    : `${parsed.provider}:${parsed.id}`;
 }

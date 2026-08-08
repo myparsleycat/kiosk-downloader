@@ -104,6 +104,31 @@ function createPayload(): DownloadTransferPayload {
     };
 }
 
+function createWorkuploadPayload() {
+    const payload = createPayload();
+    payload.collection.provider = "workupload";
+    payload.collection.shareId = "ZCs4dEavMjB";
+    payload.collection.rootId = "ZCs4dEavMjB";
+    payload.collection.sourceUrl = "https://workupload.com/file/ZCs4dEavMjB";
+    payload.collection.tree = {
+        type: "dir",
+        id: "ZCs4dEavMjB",
+        name: "",
+        entries: [
+            {
+                kind: "file",
+                node: { type: "file", id: "file", name: "file.bin", size: 12 },
+            },
+        ],
+    };
+    payload.files[0]!.path = "file.bin";
+    payload.files[0]!.sourceMetaJson = JSON.stringify({
+        originalName: "file.bin",
+        sha256: "ab".repeat(32),
+    });
+    return payload;
+}
+
 function encodeLegacyDownloadTransfer(payload: DownloadTransferPayload): Buffer {
     return compressZstdSync(Buffer.from(encodeCbor(payload)));
 }
@@ -112,6 +137,18 @@ describe("download transfer format", () => {
     it("round trips a valid payload", () => {
         const payload = createPayload();
 
+        expect(decodeDownloadTransfer(encodeDownloadTransfer(payload))).toEqual(payload);
+    });
+
+    it("round trips a Workupload payload without changing the transfer version", () => {
+        const payload = createWorkuploadPayload();
+        payload.files[0]!.sourceMetaJson = JSON.stringify({
+            originalName: "file.bin",
+            sha256: "ab".repeat(32),
+            rangeSupported: false,
+        });
+
+        expect(payload.version).toBe(1);
         expect(decodeDownloadTransfer(encodeDownloadTransfer(payload))).toEqual(payload);
     });
 
@@ -188,6 +225,50 @@ describe("download transfer format", () => {
             );
         },
     );
+
+    it.each([
+        ["missing metadata", null],
+        ["malformed JSON", "{"],
+        ["missing original name", JSON.stringify({ sha256: "ab".repeat(32) })],
+        ["invalid SHA-256", JSON.stringify({ originalName: "file.bin", sha256: "not-a-sha256" })],
+        [
+            "invalid range capability",
+            JSON.stringify({
+                originalName: "file.bin",
+                sha256: "ab".repeat(32),
+                rangeSupported: "yes",
+            }),
+        ],
+        [
+            "unexpected CDN URL",
+            JSON.stringify({
+                originalName: "file.bin",
+                sha256: "ab".repeat(32),
+                downloadUrl: "https://cdn.example/file",
+            }),
+        ],
+    ])("rejects Workupload %s", (_name, sourceMetaJson) => {
+        const payload = createWorkuploadPayload();
+        payload.files[0]!.sourceMetaJson = sourceMetaJson;
+
+        expect(() => requireDownloadTransferPayload(payload)).toThrow(
+            "Invalid transfer file entry at 0.",
+        );
+    });
+
+    it("rejects a Workupload ZIP entry source", () => {
+        const payload = createWorkuploadPayload();
+        payload.files[0]!.sourceKind = "zip_entry";
+        payload.files[0]!.zipEntryJson = JSON.stringify({ path: "file.bin" });
+        payload.files[0]!.sourceMetaJson = JSON.stringify({
+            originalName: "file.bin",
+            sha256: "ab".repeat(32),
+        });
+
+        expect(() => requireDownloadTransferPayload(payload)).toThrow(
+            "Invalid transfer file entry at 0.",
+        );
+    });
 
     it.each([
         [

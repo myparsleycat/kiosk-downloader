@@ -18,9 +18,11 @@ import {
 } from "@renderer/lib/file-tree-progress";
 import type {
   DirNode,
+  DownloadProvider,
   DownloadStatus,
   FileNode,
   FileProgress,
+  TransferControl,
   TreeEntry,
   ZipNode,
 } from "@renderer/lib/types";
@@ -38,6 +40,7 @@ import {
   MoreHorizontalIcon,
   PauseIcon,
   PlayIcon,
+  SquareIcon,
   Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
@@ -61,7 +64,8 @@ export interface FileTreeProgressProps {
   root: DirNode;
   progress: Record<string, FileProgress>;
   collectionStatus?: DownloadStatus;
-  onPauseFile?: (fileId: string) => void;
+  provider?: DownloadProvider;
+  onPauseFile?: (fileId: string, transferControl: TransferControl) => void;
   onResumeFile?: (fileId: string, force: boolean) => void;
   onIncludeFile?: (fileId: string) => void;
   onIncludeFolder?: (folderPath: string) => void;
@@ -207,6 +211,7 @@ function FileRow({
       selectionKey={selectionKey}
       progress={props.progress[selectionKey]}
       collectionStatus={props.collectionStatus}
+      provider={props.provider}
       onPauseFile={props.onPauseFile}
       onResumeFile={props.onResumeFile}
       onIncludeFile={props.onIncludeFile}
@@ -222,7 +227,8 @@ interface ProgressFileRowProps {
   selectionKey: string;
   progress?: FileProgress;
   collectionStatus?: DownloadStatus;
-  onPauseFile?: (fileId: string) => void;
+  provider?: DownloadProvider;
+  onPauseFile?: (fileId: string, transferControl: TransferControl) => void;
   onResumeFile?: (fileId: string, force: boolean) => void;
   onIncludeFile?: (fileId: string) => void;
   onError?: (errors: FileTreeError[]) => void;
@@ -235,6 +241,7 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
   selectionKey,
   progress: prog,
   collectionStatus,
+  provider,
   onPauseFile,
   onResumeFile,
   onIncludeFile,
@@ -250,6 +257,7 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
     status === "error"
       ? [{ path: selectionKey, message: prog?.error ?? "오류 정보가 없습니다." }]
       : [];
+  const transferControl = provider === "workupload" ? prog?.transferControl : ("pause" as const);
 
   return (
     <TreeRow
@@ -281,6 +289,8 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
               selected ? (prog?.completedElsewhere ? "completed_elsewhere" : status) : "skipped"
             }
             pct={pct}
+            transferControl={transferControl}
+            workupload={provider === "workupload"}
             onClick={errors.length > 0 ? () => onError?.(errors) : undefined}
           />
         </div>,
@@ -288,14 +298,19 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
           {selected &&
             prog &&
             (status === "downloading" || status === "inflating") &&
+            transferControl &&
             onPauseFile && (
               <button
                 type="button"
                 className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                onClick={() => onPauseFile(prog.fileId)}
-                title="일시정지"
+                onClick={() => onPauseFile(prog.fileId, transferControl)}
+                title={transferControl === "stop" ? "정지" : "일시정지"}
               >
-                <PauseIcon className="size-3" />
+                {transferControl === "stop" ? (
+                  <SquareIcon className="size-3" />
+                ) : (
+                  <PauseIcon className="size-3" />
+                )}
               </button>
             )}
           {selected &&
@@ -307,7 +322,13 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
                 type="button"
                 className="flex size-5 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
                 onClick={() => onResumeFile(prog.fileId, status === "error")}
-                title="시작"
+                title={
+                  status === "paused" && transferControl === "stop"
+                    ? "다시 시작"
+                    : status === "paused" && transferControl === "pause"
+                      ? "이어받기"
+                      : "시작"
+                }
               >
                 <PlayIcon className="size-3" />
               </button>
@@ -335,6 +356,7 @@ function areProgressFileRowPropsEqual(previous: ProgressFileRowProps, next: Prog
     previous.selectionKey === next.selectionKey &&
     previous.progress === next.progress &&
     previous.collectionStatus === next.collectionStatus &&
+    previous.provider === next.provider &&
     previous.rightCols === next.rightCols &&
     Boolean(previous.onPauseFile) === Boolean(next.onPauseFile) &&
     Boolean(previous.onResumeFile) === Boolean(next.onResumeFile) &&
@@ -826,10 +848,14 @@ function StatusPill({
   status,
   pct,
   onClick,
+  transferControl,
+  workupload,
 }: {
   status: string;
   pct: number;
   onClick?: () => void;
+  transferControl?: "pause" | "stop";
+  workupload?: boolean;
 }) {
   const label =
     status === "completed_elsewhere"
@@ -841,7 +867,9 @@ function StatusPill({
           : status === "downloading"
             ? `${pct.toFixed(0)}%`
             : status === "paused"
-              ? "일시정지"
+              ? transferControl === "stop" || (workupload && !transferControl)
+                ? "정지"
+                : "일시정지"
               : status === "error"
                 ? "오류"
                 : status === "skipped"

@@ -24,10 +24,12 @@ import type {
     DownloadFileRow,
     FlatTreeFile,
     TransferFileSourceMeta,
+    WorkuploadFileSourceMeta,
     ZipEntryStoredMeta,
 } from "./types";
 
 import { transferChunkLayoutMatches, transferChunkSizes } from "./transfer-it-crypto";
+import { parseWorkuploadFileSourceMeta } from "./types";
 import { buildZipEntrySegmentChunks, supportsZipEntryPoolDownload } from "./zip-segment-map";
 
 const COLLECTION_EXPIRED_ERROR = "Collection has expired.";
@@ -78,6 +80,14 @@ function tryParseZipEntryMeta(raw: string | null): ZipEntryStoredMeta | null {
         return JSON.parse(raw) as ZipEntryStoredMeta;
     } catch {
         return null;
+    }
+}
+
+function tryParseWorkuploadFileSourceMeta(raw: string | null) {
+    try {
+        return parseWorkuploadFileSourceMeta(raw);
+    } catch {
+        return undefined;
     }
 }
 
@@ -134,6 +144,20 @@ function transferSourceMetaJson(
     }
     const meta: TransferFileSourceMeta = { nodeKey };
     return JSON.stringify(meta);
+}
+
+function workuploadSourceMetaJson(
+    loaded: CreateDownloadRecord["loaded"],
+    remoteId: string,
+): string | null {
+    if (loaded.provider !== "workupload") {
+        return null;
+    }
+    const meta = loaded.fileMetaByRemoteId.get(remoteId);
+    if (!meta) {
+        throw new Error(`Missing Workupload source metadata for file: ${remoteId}.`);
+    }
+    return JSON.stringify(parseWorkuploadFileSourceMeta(JSON.stringify(meta)));
 }
 
 function normalizeTransferFile(file: DownloadFileRow) {
@@ -326,6 +350,18 @@ export class DownloadRepository {
                  WHERE "status" IN ('downloading', 'inflating')`,
                 [timestamp],
             );
+            tx.run(
+                `UPDATE "download_file"
+                 SET "downloaded_bytes" = COALESCE((
+                     SELECT MAX("downloaded_bytes")
+                     FROM "download_chunk"
+                     WHERE "file_id" = "download_file"."id"
+                 ), 0)
+                 WHERE "collection_id" IN (
+                     SELECT "id" FROM "download_collection" WHERE "provider" = 'workupload'
+                 )
+                   AND "status" != 'completed'`,
+            );
         });
     }
 
@@ -393,7 +429,9 @@ export class DownloadRepository {
                         timestamp,
                         file.sourceKind,
                         file.zipEntryJson,
-                        file.sourceMetaJson ?? transferSourceMetaJson(record.loaded, file.remoteId),
+                        file.sourceMetaJson ??
+                            transferSourceMetaJson(record.loaded, file.remoteId) ??
+                            workuploadSourceMetaJson(record.loaded, file.remoteId),
                     ],
                 );
             }
@@ -1321,6 +1359,26 @@ export class DownloadRepository {
         );
     }
 
+    public syncWorkuploadDownloadedBytes(fileId: string) {
+        const row = this.kd.lib.db.get<{ downloaded: number | null }>(
+            `SELECT MAX("downloaded_bytes") AS "downloaded"
+             FROM "download_chunk"
+             WHERE "file_id" = ?`,
+            [fileId],
+        );
+        const file = this.getFile(fileId);
+        if (!file) {
+            return;
+        }
+        const downloaded = Math.min(file.size, Math.max(0, Number(row?.downloaded ?? 0)));
+        this.kd.lib.db.run(
+            `UPDATE "download_file"
+             SET "downloaded_bytes" = ?, "updated_at" = ?
+             WHERE "id" = ?`,
+            [downloaded, nowIso(), fileId],
+        );
+    }
+
     public syncScaledDownloadedBytes(fileId: string, sourceTotal: number, displayTotal: number) {
         const row = this.kd.lib.db.get<{ downloaded: number | null }>(
             `SELECT SUM("downloaded_bytes") AS "downloaded"
@@ -1351,6 +1409,36 @@ export class DownloadRepository {
              WHERE "id" = ?`,
             [JSON.stringify(meta), nowIso(), fileId],
         );
+    }
+
+    public updateWorkuploadRangeSupported(fileId: string, rangeSupported: boolean) {
+        const file = this.getFile(fileId);
+        if (!file) {
+            return;
+        }
+        const meta: WorkuploadFileSourceMeta = {
+            ...parseWorkuploadFileSourceMeta(file.sourceMetaJson),
+            rangeSupported,
+        };
+        this.kd.lib.db.run(
+            `UPDATE "download_file"
+             SET "source_meta_json" = ?, "updated_at" = ?
+             WHERE "id" = ?`,
+            [JSON.stringify(meta), nowIso(), fileId],
+        );
+    }
+
+    public resetFileProgress(fileId: string) {
+        const timestamp = nowIso();
+        this.kd.lib.db.transaction((tx) => {
+            tx.run(`DELETE FROM "download_chunk" WHERE "file_id" = ?`, [fileId]);
+            tx.run(
+                `UPDATE "download_file"
+                 SET "downloaded_bytes" = 0, "updated_at" = ?, "error" = NULL
+                 WHERE "id" = ?`,
+                [timestamp, fileId],
+            );
+        });
     }
 
     public deleteAllChunksForFile(fileId: string) {
@@ -1493,6 +1581,38 @@ export class DownloadRepository {
                 .map((chunk) => [chunk.chunkIndex, chunk]),
         );
 
+        if ((collection.provider ?? "kiosk") === "workupload") {
+            if (file.size <= 0) {
+                return [];
+            }
+            const stored = storedByIndex.get(0);
+            if (stored) {
+                return [
+                    {
+                        ...stored,
+                        collectionId: collection.id,
+                        fileId: file.id,
+                        offset: 0,
+                        size: file.size,
+                    },
+                ];
+            }
+            return [
+                {
+                    collectionId: collection.id,
+                    fileId: file.id,
+                    chunkIndex: 0,
+                    offset: 0,
+                    size: file.size,
+                    status: "pending" as const,
+                    downloadedBytes: 0,
+                    attempts: 0,
+                    updatedAt: file.updatedAt,
+                    error: null,
+                },
+            ];
+        }
+
         if (file.sourceKind === "zip_entry") {
             if (file.size <= 0) {
                 return [];
@@ -1621,7 +1741,14 @@ export class DownloadRepository {
     private buildItem(collection: DownloadCollectionRow): DownloadItem {
         const progress: Record<string, FileProgress> = {};
         const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        const activeTransferControls: Array<"pause" | "stop" | undefined> = [];
         for (const file of this.listFiles(collection.id)) {
+            const rangeSupported =
+                collection.provider === "workupload"
+                    ? tryParseWorkuploadFileSourceMeta(file.sourceMetaJson)?.rangeSupported
+                    : undefined;
+            const transferControl =
+                rangeSupported === undefined ? undefined : rangeSupported ? "pause" : "stop";
             progress[file.path] = {
                 fileId: file.id,
                 path: file.path,
@@ -1631,8 +1758,18 @@ export class DownloadRepository {
                 selected: file.selected === 1,
                 completedElsewhere: file.completedElsewhere === 1 ? true : undefined,
                 error: file.error ?? undefined,
+                transferControl,
             };
             if (file.selected === 1) {
+                if (
+                    ((collection.status === "downloading" || collection.status === "inflating") &&
+                        (file.status === "downloading" || file.status === "inflating")) ||
+                    (collection.status === "paused" &&
+                        file.status === "paused" &&
+                        (transferControl !== undefined || file.downloadedBytes > 0))
+                ) {
+                    activeTransferControls.push(transferControl);
+                }
                 summary.transferredBytes += file.downloadedBytes;
                 summary.totalBytes += file.size;
                 summary.totalFiles += 1;
@@ -1653,6 +1790,10 @@ export class DownloadRepository {
             updatedAt: Date.parse(collection.updatedAt),
             elapsedMs: collection.elapsedMs,
             error: collection.error ?? undefined,
+            transferControl:
+                collection.provider === "workupload"
+                    ? aggregateTransferControls(activeTransferControls)
+                    : undefined,
         };
     }
 
@@ -1791,6 +1932,16 @@ function aggregateDownloadPieceStatus(files: DownloadFileRow[]): FileDownloadSta
     if (files.some((file) => file.status === "downloading")) return "downloading";
     if (files.some((file) => file.status === "paused")) return "paused";
     return "pending";
+}
+
+function aggregateTransferControls(controls: Array<"pause" | "stop" | undefined>) {
+    if (controls.some((control) => control === "stop")) {
+        return "stop" as const;
+    }
+    if (controls.length === 0 || controls.some((control) => control === undefined)) {
+        return undefined;
+    }
+    return "pause" as const;
 }
 
 function bundleSelectSql() {

@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
     SHARE_HOST,
     TRANSFER_HOST,
+    WORKUPLOAD_HOST,
     buildShareUrl,
     buildTransferUrl,
+    buildWorkuploadUrl,
     shareIdToUuidBytes,
     tryDecodeShareUrlBase64,
     tryExtractShareId,
@@ -12,6 +14,7 @@ import {
     tryParseDownloadUrl,
     tryParseShareUrl,
     tryParseTransferUrl,
+    tryParseWorkuploadUrl,
     uuidBytesToShareId,
 } from "./share-url";
 
@@ -161,18 +164,64 @@ describe("tryParseDownloadUrl", () => {
         });
     });
 
+    it("normalizes Workupload file and start URLs to the same file identity", () => {
+        expect(tryParseDownloadUrl("https://workupload.com/file/ZCs4dEavMjB")).toEqual({
+            provider: "workupload",
+            id: "ZCs4dEavMjB",
+            kind: "file",
+        });
+        expect(tryParseDownloadUrl("https://www.workupload.com/start/ZCs4dEavMjB")).toEqual({
+            provider: "workupload",
+            id: "ZCs4dEavMjB",
+            kind: "file",
+        });
+    });
+
+    it("classifies Workupload archive URLs separately", () => {
+        expect(tryParseDownloadUrl("https://workupload.com/archive/ZYH6u3LWkm/")).toEqual({
+            provider: "workupload",
+            id: "ZYH6u3LWkm",
+            kind: "archive",
+        });
+    });
+
     it("returns null for unknown URLs", () => {
         expect(tryParseDownloadUrl("https://example.com/something")).toBeNull();
         expect(tryParseDownloadUrl("garbage")).toBeNull();
     });
 });
 
-describe("buildShareUrl / buildTransferUrl", () => {
+describe("tryParseWorkuploadUrl", () => {
+    it("rejects unsafe or ambiguous URL variations", () => {
+        expect(tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEavMjB?x=1")).toBeNull();
+        expect(
+            tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEavMjB#download"),
+        ).toBeNull();
+        expect(tryParseWorkuploadUrl("https://user@workupload.com/file/ZCs4dEavMjB")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://workupload.com:444/file/ZCs4dEavMjB")).toBeNull();
+        expect(tryParseWorkuploadUrl("http://workupload.com/file/ZCs4dEavMjB")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://evil.workupload.com/file/ZCs4dEavMjB")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEavMjB/extra")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEav-MjB")).toBeNull();
+    });
+});
+
+describe("buildShareUrl / buildTransferUrl / buildWorkuploadUrl", () => {
     it("builds canonical URLs against the known hosts", () => {
         expect(buildShareUrl("aaaaaaaaaaaaaaaaaaaaaa")).toBe(
             `https://${SHARE_HOST}/c/aaaaaaaaaaaaaaaaaaaaaa`,
         );
         expect(buildTransferUrl("abcd1234ef56")).toBe(`https://${TRANSFER_HOST}/t/abcd1234ef56`);
+        expect(buildWorkuploadUrl("ZCs4dEavMjB")).toBe(
+            `https://${WORKUPLOAD_HOST}/file/ZCs4dEavMjB`,
+        );
+        expect(buildWorkuploadUrl("ZYH6u3LWkm", "archive")).toBe(
+            `https://${WORKUPLOAD_HOST}/archive/ZYH6u3LWkm`,
+        );
+    });
+
+    it("rejects invalid Workupload ids", () => {
+        expect(() => buildWorkuploadUrl("bad-id")).toThrow("Invalid Workupload id");
     });
 });
 
@@ -188,6 +237,11 @@ describe("tryDecodeShareUrlBase64", () => {
         const once = Buffer.from(url).toString("base64");
         const twice = Buffer.from(once).toString("base64");
         expect(tryDecodeShareUrlBase64(twice)).toBe(url);
+    });
+
+    it("decodes a Workupload archive URL", () => {
+        const url = "https://workupload.com/archive/ZYH6u3LWkm";
+        expect(tryDecodeShareUrlBase64(Buffer.from(url).toString("base64"))).toBe(url);
     });
 
     it("returns null when no layer resolves to a download URL within 5 iterations", () => {

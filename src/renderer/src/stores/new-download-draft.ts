@@ -15,6 +15,7 @@ type NewDownloadDraftState = {
     password: string;
     savePath: string;
     createCollectionSubfolder: boolean;
+    asciiFilenames: boolean;
     passwordRequired: boolean | null;
     passwordInvalid: boolean;
     collection: Collection | null;
@@ -57,6 +58,7 @@ const draftDefaults = {
     password: "",
     savePath: "",
     createCollectionSubfolder: true,
+    asciiFilenames: false,
     passwordRequired: null,
     passwordInvalid: false,
     collection: null,
@@ -178,11 +180,13 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
         const values = await window.api.invoke("setting:getMany", [
             "general.lastDownloadPath",
             "general.createCollectionSubfolder",
+            "general.asciiFilenames",
         ]);
 
         set({
             savePath: values["general.lastDownloadPath"] ?? "",
             createCollectionSubfolder: values["general.createCollectionSubfolder"] ?? true,
+            asciiFilenames: values["general.asciiFilenames"] ?? false,
             settingsHydrated: true,
         });
     },

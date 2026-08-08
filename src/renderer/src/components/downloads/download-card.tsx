@@ -57,10 +57,18 @@ export function DownloadCard({
             </span>
           </div>
           <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">
-            {collection.provider === "extended" ? "확장 공유" : collection.shareId}
+            {collection.provider === "extended"
+              ? "확장 공유"
+              : collection.provider === "workupload"
+                ? `Workupload · ${collection.shareId}`
+                : collection.shareId}
           </div>
         </div>
-        <StatusBadge status={status} />
+        <StatusBadge
+          status={status}
+          transferControl={item.transferControl}
+          workupload={collection.provider === "workupload"}
+        />
       </div>
 
       <div className="mt-2.5 flex flex-col gap-1">
@@ -112,11 +120,22 @@ export function DownloadCard({
   );
 }
 
-function StatusBadge({ status }: { status: DownloadItem["status"] }) {
+function StatusBadge({
+  status,
+  transferControl,
+  workupload,
+}: {
+  status: DownloadItem["status"];
+  transferControl?: DownloadItem["transferControl"];
+  workupload: boolean;
+}) {
   const map: Record<DownloadItem["status"], { label: string; cls: string }> = {
     downloading: { label: "다운로드", cls: "bg-primary/10 text-primary" },
     inflating: { label: "해제 중", cls: "bg-primary/10 text-primary" },
-    paused: { label: "일시정지", cls: "bg-muted text-muted-foreground" },
+    paused: {
+      label: transferControl === "stop" || (workupload && !transferControl) ? "정지" : "일시정지",
+      cls: "bg-muted text-muted-foreground",
+    },
     completed: { label: "완료", cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
     queued: { label: "대기", cls: "bg-muted text-muted-foreground" },
     error: { label: "오류", cls: "bg-destructive/10 text-destructive" },

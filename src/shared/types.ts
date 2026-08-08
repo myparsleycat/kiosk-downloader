@@ -76,7 +76,9 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
-export type DownloadProvider = "kiosk" | "transfer" | "extended";
+export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload";
+
+export type TransferControl = "pause" | "stop";
 
 export interface Collection {
     shareId: string;
@@ -86,6 +88,7 @@ export interface Collection {
     passwordProtected: boolean;
     tree: CollectionTree;
     provider?: DownloadProvider;
+    resource?: "file" | "archive";
 }
 
 export type DownloadStatus =
@@ -117,6 +120,7 @@ export interface FileProgress {
     completedElsewhere?: boolean;
     speedBps?: number;
     error?: string;
+    transferControl?: TransferControl;
 }
 
 export interface TransferProgressSummary {
@@ -148,6 +152,7 @@ export interface DownloadItem {
     createdAt: number;
     updatedAt: number;
     error?: string;
+    transferControl?: TransferControl;
 }
 
 export type DownloadProgressPatch = TransferProgressPatch<FileProgress, DownloadStatus>;
@@ -233,6 +238,7 @@ export interface CreateUploadPayload {
 export interface LoadCollectionPayload {
     url: string;
     password?: string;
+    asciiFilenames?: boolean;
 }
 
 export interface ProbeCollectionPayload {
@@ -248,6 +254,7 @@ export interface CreateDownloadPayload {
     password?: string;
     savePath: string;
     selectedPaths: string[];
+    asciiFilenames?: boolean;
     zipPasswords?: Record<string, string>;
     /** original relative node path → new basename (applied after collection load) */
     renames?: Record<string, string>;

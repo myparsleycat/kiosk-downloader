@@ -8,6 +8,7 @@ import { Button } from "@renderer/components/ui/button";
 import { Progress, ProgressLabel, ProgressValue } from "@renderer/components/ui/progress";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Separator } from "@renderer/components/ui/separator";
+import { useConfirmDownloadStop } from "@renderer/hooks/use-confirm-download-stop";
 import type { DownloadItem, SortDir, SortField } from "@renderer/lib/types";
 import { sortTree } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
@@ -23,6 +24,7 @@ import {
   PauseIcon,
   PlayIcon,
   ShareIcon,
+  SquareIcon,
   Trash2Icon,
 } from "lucide-react";
 import * as React from "react";
@@ -40,6 +42,7 @@ export function DownloadDetail({
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
   const [sortField, setSortField] = React.useState<SortField>("name");
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
+  const { runWithStopConfirmation, dialog: stopDialog } = useConfirmDownloadStop();
   const tree = item?.collection.tree;
 
   const sortedTree = React.useMemo(
@@ -71,6 +74,8 @@ export function DownloadDetail({
   const fileCount = summary.totalFiles;
   const completedCount = summary.completedFiles;
   const speedLabel = status === "downloading" ? formatSpeed(item.speedBps) : null;
+  const transferControl =
+    collection.provider === "workupload" ? item.transferControl : ("pause" as const);
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0
       ? formatTime(item.elapsedMs / 1000, navigator.language)
@@ -110,7 +115,9 @@ export function DownloadDetail({
               <span className="font-mono">
                 {collection.provider === "extended"
                   ? "Kiosk Downloader 확장 공유"
-                  : collection.shareId}
+                  : collection.provider === "workupload"
+                    ? `Workupload · ${collection.shareId}`
+                    : collection.shareId}
               </span>
               <Separator orientation="vertical" className="h-3" />
               <span className="flex items-center gap-1">
@@ -129,17 +136,25 @@ export function DownloadDetail({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {status === "downloading" || status === "inflating" ? (
+            {(status === "downloading" || status === "inflating") && transferControl ? (
               <Button
                 variant="outline"
                 size="sm"
                 isLoading={pendingAction === "pause"}
                 onClick={() =>
-                  runAction("pause", () => window.api.invoke("download:pauseCollection", item.id))
+                  runWithStopConfirmation(transferControl, "collection", () =>
+                    runAction("pause", () =>
+                      window.api.invoke("download:pauseCollection", item.id),
+                    ),
+                  )
                 }
               >
-                <PauseIcon className="size-3.5" />
-                일시정지
+                {transferControl === "stop" ? (
+                  <SquareIcon className="size-3.5" />
+                ) : (
+                  <PauseIcon className="size-3.5" />
+                )}
+                {transferControl === "stop" ? "정지" : "일시정지"}
               </Button>
             ) : status === "paused" || status === "queued" || status === "error" ? (
               <Button
@@ -158,7 +173,13 @@ export function DownloadDetail({
                 }
               >
                 <PlayIcon className="size-3.5" />
-                {status === "error" ? "재시도" : "시작"}
+                {status === "error"
+                  ? "재시도"
+                  : status === "paused" && transferControl === "stop"
+                    ? "다시 시작"
+                    : status === "paused" && transferControl === "pause"
+                      ? "이어받기"
+                      : "시작"}
               </Button>
             ) : null}
             <Button
@@ -204,7 +225,9 @@ export function DownloadDetail({
 
         <div className="flex flex-col gap-1">
           <Progress value={pct}>
-            <ProgressLabel>{statusLabel(status)}</ProgressLabel>
+            <ProgressLabel>
+              {statusLabel(status, transferControl, collection.provider === "workupload")}
+            </ProgressLabel>
             <ProgressValue>{() => `${pct.toFixed(1)}%`}</ProgressValue>
           </Progress>
           <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -225,6 +248,11 @@ export function DownloadDetail({
               </span>
             </span>
           </div>
+          {collection.provider === "workupload" && transferControl === "stop" && (
+            <p className="text-xs text-muted-foreground">
+              이어받기를 지원하지 않는 파일은 정지하면 진행 내용이 삭제됩니다.
+            </p>
+          )}
         </div>
       </div>
 
@@ -237,8 +265,11 @@ export function DownloadDetail({
             root={sortedTree ?? collection.tree}
             progress={progress}
             collectionStatus={status}
-            onPauseFile={(fileId) =>
-              runAction("file", () => window.api.invoke("download:pauseFile", item.id, fileId))
+            provider={collection.provider}
+            onPauseFile={(fileId, fileTransferControl) =>
+              runWithStopConfirmation(fileTransferControl, "file", () =>
+                runAction("file", () => window.api.invoke("download:pauseFile", item.id, fileId)),
+              )
             }
             onResumeFile={(fileId, force) =>
               runAction("file", () =>
@@ -269,18 +300,23 @@ export function DownloadDetail({
           <span className={cn("truncate font-mono")}>{item.savePath}</span>
         </div>
       </div>
+      {stopDialog}
     </div>
   );
 }
 
-function statusLabel(status: DownloadItem["status"]): string {
+function statusLabel(
+  status: DownloadItem["status"],
+  transferControl: DownloadItem["transferControl"],
+  workupload: boolean,
+): string {
   switch (status) {
     case "downloading":
       return "다운로드 중";
     case "inflating":
       return "해제 중";
     case "paused":
-      return "일시정지";
+      return transferControl === "stop" || (workupload && !transferControl) ? "정지" : "일시정지";
     case "completed":
       return "완료";
     case "queued":

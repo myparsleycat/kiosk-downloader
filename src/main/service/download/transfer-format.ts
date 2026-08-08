@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
+import { buildWorkuploadUrl, tryParseDownloadUrl } from "@shared/share-url";
 import type {
     CollectionTree,
     DownloadProvider,
@@ -10,6 +11,7 @@ import { DOWNLOAD_TRANSFER_KIND, DOWNLOAD_TRANSFER_VERSION } from "@shared/types
 import { decode, encode } from "cbor-x";
 
 import { compressZstdSync, decompressZstdSync } from "../../lib/zstd";
+import { parseWorkuploadFileSourceMeta } from "./types";
 
 export const MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES = 16 * 1024 * 1024;
 export const MAX_DOWNLOAD_TRANSFER_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
@@ -85,7 +87,12 @@ export function requireDownloadTransferPayload(input: unknown): DownloadTransfer
     if (!Array.isArray(input.files) || input.files.length === 0) {
         throw new Error("Transfer file has no files.");
     }
-    const files = input.files.map((file, index) => requireTransferFile(file, index));
+    const files = input.files.map((file, index) =>
+        requireTransferFile(file, index, collection.provider),
+    );
+    if (collection.provider === "workupload") {
+        requireWorkuploadTransferConsistency(collection, files);
+    }
     if (!files.some((file) => file.selected)) {
         throw new Error("No files selected.");
     }
@@ -96,6 +103,44 @@ export function requireDownloadTransferPayload(input: unknown): DownloadTransfer
         collection,
         files,
     };
+}
+
+function requireWorkuploadTransferConsistency(
+    collection: DownloadTransferPayload["collection"],
+    files: DownloadTransferFile[],
+) {
+    const parsed = tryParseDownloadUrl(collection.sourceUrl);
+    if (
+        parsed?.provider !== "workupload" ||
+        parsed.id !== collection.shareId ||
+        buildWorkuploadUrl(parsed.id, parsed.kind) !== collection.sourceUrl ||
+        collection.tree.entries.some((entry) => entry.kind !== "file") ||
+        collection.tree.entries.length !== files.length
+    ) {
+        throw new Error("Invalid Workupload transfer collection.");
+    }
+
+    const paths = new Set<string>();
+    const remoteIds = new Set<string>();
+    const filesByRemoteId = new Map(files.map((file) => [file.remoteId, file]));
+    for (const entry of collection.tree.entries) {
+        const node = entry.node;
+        const file = filesByRemoteId.get(node.id);
+        const pathKey = node.name.toLowerCase();
+        if (
+            !file ||
+            !("size" in node) ||
+            file.path !== node.name ||
+            file.name !== node.name ||
+            file.size !== node.size ||
+            paths.has(pathKey) ||
+            remoteIds.has(node.id)
+        ) {
+            throw new Error("Invalid Workupload transfer collection.");
+        }
+        paths.add(pathKey);
+        remoteIds.add(node.id);
+    }
 }
 
 function requireTransferCollection(input: unknown): DownloadTransferPayload["collection"] {
@@ -123,7 +168,11 @@ function requireTransferCollection(input: unknown): DownloadTransferPayload["col
     if (typeof input.asciiFilenames !== "boolean") {
         throw new Error("Invalid transfer collection.");
     }
-    if (input.provider !== "kiosk" && input.provider !== "transfer") {
+    if (
+        input.provider !== "kiosk" &&
+        input.provider !== "transfer" &&
+        input.provider !== "workupload"
+    ) {
         throw new Error("Invalid transfer collection.");
     }
     const tree = requireCollectionTree(input.tree);
@@ -142,7 +191,11 @@ function requireTransferCollection(input: unknown): DownloadTransferPayload["col
     };
 }
 
-function requireTransferFile(input: unknown, index: number): DownloadTransferFile {
+function requireTransferFile(
+    input: unknown,
+    index: number,
+    provider: DownloadProvider,
+): DownloadTransferFile {
     if (!isRecord(input)) {
         throw new Error(`Invalid transfer file entry at ${index}.`);
     }
@@ -172,6 +225,16 @@ function requireTransferFile(input: unknown, index: number): DownloadTransferFil
     }
     const zipEntryJson = typeof input.zipEntryJson === "string" ? input.zipEntryJson : null;
     const sourceMetaJson = typeof input.sourceMetaJson === "string" ? input.sourceMetaJson : null;
+    if (provider === "workupload") {
+        if (input.sourceKind !== "file" || zipEntryJson !== null) {
+            throw new Error(`Invalid transfer file entry at ${index}.`);
+        }
+        try {
+            parseWorkuploadFileSourceMeta(sourceMetaJson);
+        } catch {
+            throw new Error(`Invalid transfer file entry at ${index}.`);
+        }
+    }
     return {
         remoteId: input.remoteId,
         path: input.path,
