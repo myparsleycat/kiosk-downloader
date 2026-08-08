@@ -1,3 +1,11 @@
+## [1.9.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.0...v1.9.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* **download:** escalate stalled chunks after soft reconnects ([ea5731b](https://github.com/myparsleycat/kiosk-downloader/commit/ea5731b60cf506fdf398bf8aabb00adfff6090e3))
+* **download:** preserve original error on non-slow-chunk failure ([4a35119](https://github.com/myparsleycat/kiosk-downloader/commit/4a3511937a21fa469489c6a55d45c86a91e56d39))
+
 # [1.9.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.8.0...v1.9.0) (2026-08-08)
 
 
