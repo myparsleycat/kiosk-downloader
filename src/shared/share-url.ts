@@ -222,6 +222,13 @@ export function buildWorkuploadUrl(id: string, kind: WorkuploadShareKind = "file
 
 const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
+// Deliberately loose: accepts unpadded and partially-padded base64 as well as
+// the URL-safe alphabet (- / _). Partial padding (e.g. a single "=" where "==
+// is required) is tolerated because atob handles it and rejecting it would
+// needlessly exclude inputs that external base64url encoders produce.
+// The URL-safe character normalization (- -> +, _ -> /) is defensive: ASCII
+// download URLs never produce - or _ when base64url-encoded, but a user may
+// paste output from a tool that uses the URL-safe alphabet on other content.
 function decodeBase64Loose(input: string): string | null {
     if (!input || !BASE64_PATTERN.test(input) || input.length % 4 === 1) {
         return null;

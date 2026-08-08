@@ -260,9 +260,10 @@ describe("tryDecodeShareUrlBase64", () => {
         expect(tryDecodeShareUrlBase64(encoded)).toBe(url);
     });
 
-    it("decodes base64url-encoded input", () => {
+    it("decodes base64url-encoded input (unpadded)", () => {
         const url = "https://transfer.it/t/abcd1234ef56";
         const encoded = Buffer.from(url).toString("base64url");
+        expect(encoded).not.toContain("=");
         expect(tryDecodeShareUrlBase64(encoded)).toBe(url);
     });
 
@@ -275,6 +276,7 @@ describe("tryDecodeShareUrlBase64", () => {
     it("decodes a Workupload URL in base64url form", () => {
         const url = "https://workupload.com/archive/bbbbbbbbbb";
         const encoded = Buffer.from(url).toString("base64url");
+        expect(encoded).not.toContain("=");
         expect(tryDecodeShareUrlBase64(encoded)).toBe(url);
     });
 
