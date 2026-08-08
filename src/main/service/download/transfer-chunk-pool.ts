@@ -622,7 +622,10 @@ export class TransferChunkPool {
                 }
 
                 this.deps.repository.markChunkError(chunk, message);
-                throw new Error(message);
+                if (abortReason === "slow-chunk" || !(error instanceof Error)) {
+                    throw new Error(message);
+                }
+                throw error;
             } finally {
                 this.slowChunkMonitor.unregister(transfer.key);
                 controller.signal.removeEventListener("abort", onSessionAbort);
