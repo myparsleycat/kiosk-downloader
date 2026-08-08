@@ -1,3 +1,27 @@
+# [1.9.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.8.0...v1.9.0) (2026-08-08)
+
+
+### Bug Fixes
+
+* **download:** enrich Workupload error log context ([3f5c0f7](https://github.com/myparsleycat/kiosk-downloader/commit/3f5c0f7f40ed245b7292446273f2ad3583ccfed0))
+* **download:** guard transfer control metadata parsing ([a99f4d3](https://github.com/myparsleycat/kiosk-downloader/commit/a99f4d319110e4ec8cdd818c59d292cfda9e955c))
+* **download:** handle invalid Workupload metadata during restore ([294fdb9](https://github.com/myparsleycat/kiosk-downloader/commit/294fdb95ac92fda36d661f0ff933e16b5a84d42d))
+* **download:** keep Workupload names consistent ([f8ee6f1](https://github.com/myparsleycat/kiosk-downloader/commit/f8ee6f12b232afb841e0457b46cee6424d1e1815))
+* **download:** preserve zero-byte Workupload sizes ([b9dea61](https://github.com/myparsleycat/kiosk-downloader/commit/b9dea61ee1361ccab231cd42fbd9f133b8a4abd3))
+* **download:** retry stalled Workupload bodies ([59adf7e](https://github.com/myparsleycat/kiosk-downloader/commit/59adf7e5e9de9073c3006b15f5c44f8248d0103c))
+* **download:** throttle Workupload partial persistence ([83e37ca](https://github.com/myparsleycat/kiosk-downloader/commit/83e37ca38e040ba99fb0d4bbcd34aba97ab9e376))
+* **download:** time out stalled Workupload CDN requests ([779ceb4](https://github.com/myparsleycat/kiosk-downloader/commit/779ceb429cef85ba9b6e8dd452dd5383c9a02cf2))
+* **download:** tolerate invalid Workupload metadata ([62b778b](https://github.com/myparsleycat/kiosk-downloader/commit/62b778b9214eae2f1572664235a44c16a117618f))
+* **download:** tolerate open connections after Workupload body completion ([451c217](https://github.com/myparsleycat/kiosk-downloader/commit/451c217b454038a66fa9cd664ec453d0dc2584d2))
+* **download:** use loaded Workupload resource ([6b915d0](https://github.com/myparsleycat/kiosk-downloader/commit/6b915d0445cc0709a222aa6e219f2045f7b2f2c1))
+* **download:** yield Workupload puzzle search ([8159a8d](https://github.com/myparsleycat/kiosk-downloader/commit/8159a8d8e18eb806848b6af59f354b7561e239cd))
+
+
+### Features
+
+* **download:** add Workupload download support ([ec8c098](https://github.com/myparsleycat/kiosk-downloader/commit/ec8c098cc71a2b640180e42e5b4fedf0fb5da360))
+* **download:** show supported providers in empty state ([6c3e78b](https://github.com/myparsleycat/kiosk-downloader/commit/6c3e78b8386610833900a4473b24065d6a8979c7))
+
 # [1.8.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.7.2...v1.8.0) (2026-07-27)
 
 
