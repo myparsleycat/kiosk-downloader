@@ -531,7 +531,26 @@ export class TransferChunkPool {
                     continue;
                 }
 
-                if (isAbortError(error) && abortReason !== "slow-chunk") {
+                if (abortReason === "slow-chunk") {
+                    this.deps.kd.logger.warn(
+                        {
+                            channel: "transfer-download",
+                            reason: "slow-chunk-exhausted",
+                            detect: detect ?? "relative",
+                            fileId: registration.file.id,
+                            chunkIndex: chunk.chunkIndex,
+                            offset: chunk.offset,
+                            expectedSize: chunk.size,
+                            chunkSpeedBps,
+                            peerMedianBps,
+                            thresholdRatio: SLOW_CHUNK_THRESHOLD_RATIO,
+                            slowReconnect: slowReconnects,
+                            maxSlowReconnects: SLOW_CHUNK_MAX_RECONNECTS,
+                            transferredBytes,
+                        },
+                        "TransferChunkPool:fetchEncryptedRange",
+                    );
+                } else if (isAbortError(error)) {
                     this.deps.repository.markChunkPending(registration.file.id, chunk.chunkIndex);
                     throw error;
                 }
@@ -570,7 +589,10 @@ export class TransferChunkPool {
                 }
 
                 session.cdnUrl = null;
-                const message = toErrorMessage(error);
+                const message =
+                    abortReason === "slow-chunk"
+                        ? "Slow chunk stalled after reconnects"
+                        : toErrorMessage(error);
                 if (errorAttempt < maxAttempts) {
                     this.deps.kd.logger.warn(
                         {
@@ -600,7 +622,7 @@ export class TransferChunkPool {
                 }
 
                 this.deps.repository.markChunkError(chunk, message);
-                throw error instanceof Error ? error : new Error(message);
+                throw new Error(message);
             } finally {
                 this.slowChunkMonitor.unregister(transfer.key);
                 controller.signal.removeEventListener("abort", onSessionAbort);
