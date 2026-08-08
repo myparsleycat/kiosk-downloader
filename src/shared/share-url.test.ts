@@ -165,22 +165,22 @@ describe("tryParseDownloadUrl", () => {
     });
 
     it("normalizes Workupload file and start URLs to the same file identity", () => {
-        expect(tryParseDownloadUrl("https://workupload.com/file/ZCs4dEavMjB")).toEqual({
+        expect(tryParseDownloadUrl("https://workupload.com/file/aaaaaaaaaaa")).toEqual({
             provider: "workupload",
-            id: "ZCs4dEavMjB",
+            id: "aaaaaaaaaaa",
             kind: "file",
         });
-        expect(tryParseDownloadUrl("https://www.workupload.com/start/ZCs4dEavMjB")).toEqual({
+        expect(tryParseDownloadUrl("https://www.workupload.com/start/aaaaaaaaaaa")).toEqual({
             provider: "workupload",
-            id: "ZCs4dEavMjB",
+            id: "aaaaaaaaaaa",
             kind: "file",
         });
     });
 
     it("classifies Workupload archive URLs separately", () => {
-        expect(tryParseDownloadUrl("https://workupload.com/archive/ZYH6u3LWkm/")).toEqual({
+        expect(tryParseDownloadUrl("https://workupload.com/archive/bbbbbbbbbb/")).toEqual({
             provider: "workupload",
-            id: "ZYH6u3LWkm",
+            id: "bbbbbbbbbb",
             kind: "archive",
         });
     });
@@ -193,16 +193,16 @@ describe("tryParseDownloadUrl", () => {
 
 describe("tryParseWorkuploadUrl", () => {
     it("rejects unsafe or ambiguous URL variations", () => {
-        expect(tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEavMjB?x=1")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://workupload.com/file/aaaaaaaaaaa?x=1")).toBeNull();
         expect(
-            tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEavMjB#download"),
+            tryParseWorkuploadUrl("https://workupload.com/file/aaaaaaaaaaa#download"),
         ).toBeNull();
-        expect(tryParseWorkuploadUrl("https://user@workupload.com/file/ZCs4dEavMjB")).toBeNull();
-        expect(tryParseWorkuploadUrl("https://workupload.com:444/file/ZCs4dEavMjB")).toBeNull();
-        expect(tryParseWorkuploadUrl("http://workupload.com/file/ZCs4dEavMjB")).toBeNull();
-        expect(tryParseWorkuploadUrl("https://evil.workupload.com/file/ZCs4dEavMjB")).toBeNull();
-        expect(tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEavMjB/extra")).toBeNull();
-        expect(tryParseWorkuploadUrl("https://workupload.com/file/ZCs4dEav-MjB")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://user@workupload.com/file/aaaaaaaaaaa")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://workupload.com:444/file/aaaaaaaaaaa")).toBeNull();
+        expect(tryParseWorkuploadUrl("http://workupload.com/file/aaaaaaaaaaa")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://evil.workupload.com/file/aaaaaaaaaaa")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://workupload.com/file/aaaaaaaaaaa/extra")).toBeNull();
+        expect(tryParseWorkuploadUrl("https://workupload.com/file/aaaaaaaa-MjB")).toBeNull();
     });
 });
 
@@ -212,11 +212,11 @@ describe("buildShareUrl / buildTransferUrl / buildWorkuploadUrl", () => {
             `https://${SHARE_HOST}/c/aaaaaaaaaaaaaaaaaaaaaa`,
         );
         expect(buildTransferUrl("abcd1234ef56")).toBe(`https://${TRANSFER_HOST}/t/abcd1234ef56`);
-        expect(buildWorkuploadUrl("ZCs4dEavMjB")).toBe(
-            `https://${WORKUPLOAD_HOST}/file/ZCs4dEavMjB`,
+        expect(buildWorkuploadUrl("aaaaaaaaaaa")).toBe(
+            `https://${WORKUPLOAD_HOST}/file/aaaaaaaaaaa`,
         );
-        expect(buildWorkuploadUrl("ZYH6u3LWkm", "archive")).toBe(
-            `https://${WORKUPLOAD_HOST}/archive/ZYH6u3LWkm`,
+        expect(buildWorkuploadUrl("bbbbbbbbbb", "archive")).toBe(
+            `https://${WORKUPLOAD_HOST}/archive/bbbbbbbbbb`,
         );
     });
 
@@ -240,7 +240,7 @@ describe("tryDecodeShareUrlBase64", () => {
     });
 
     it("decodes a Workupload archive URL", () => {
-        const url = "https://workupload.com/archive/ZYH6u3LWkm";
+        const url = "https://workupload.com/archive/bbbbbbbbbb";
         expect(tryDecodeShareUrlBase64(Buffer.from(url).toString("base64"))).toBe(url);
     });
 
@@ -252,6 +252,30 @@ describe("tryDecodeShareUrlBase64", () => {
             current = Buffer.from(current).toString("base64");
         }
         expect(tryDecodeShareUrlBase64(current)).toBeNull();
+    });
+
+    it("decodes base64 with missing padding", () => {
+        const url = "https://kio.ac/c/aaaaaaaaaaaaaaaaaaaaaa";
+        const encoded = Buffer.from(url).toString("base64").replace(/=+$/, "");
+        expect(tryDecodeShareUrlBase64(encoded)).toBe(url);
+    });
+
+    it("decodes base64url-encoded input", () => {
+        const url = "https://transfer.it/t/abcd1234ef56";
+        const encoded = Buffer.from(url).toString("base64url");
+        expect(tryDecodeShareUrlBase64(encoded)).toBe(url);
+    });
+
+    it("decodes a Workupload URL with missing padding", () => {
+        const url = "https://workupload.com/file/aaaaaaaaaaa";
+        const encoded = Buffer.from(url).toString("base64").replace(/=+$/, "");
+        expect(tryDecodeShareUrlBase64(encoded)).toBe(url);
+    });
+
+    it("decodes a Workupload URL in base64url form", () => {
+        const url = "https://workupload.com/archive/bbbbbbbbbb";
+        const encoded = Buffer.from(url).toString("base64url");
+        expect(tryDecodeShareUrlBase64(encoded)).toBe(url);
     });
 
     it("returns null for empty or non-base64 input", () => {

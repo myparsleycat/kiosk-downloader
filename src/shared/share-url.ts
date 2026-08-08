@@ -1,5 +1,3 @@
-import validator from "validator";
-
 import type { DownloadProvider } from "./types";
 
 export type { DownloadProvider };
@@ -222,6 +220,21 @@ export function buildWorkuploadUrl(id: string, kind: WorkuploadShareKind = "file
     return `https://${WORKUPLOAD_HOST}${prefix}${id}`;
 }
 
+const BASE64_PATTERN = /^[A-Za-z0-9+/_-]+={0,2}$/;
+
+function decodeBase64Loose(input: string): string | null {
+    if (!input || !BASE64_PATTERN.test(input) || input.length % 4 === 1) {
+        return null;
+    }
+    const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    try {
+        return new TextDecoder().decode(Uint8Array.from(atob(padded), (c) => c.charCodeAt(0)));
+    } catch {
+        return null;
+    }
+}
+
 export function tryDecodeShareUrlBase64(input: string) {
     let current = input.trim();
     if (!current) {
@@ -229,16 +242,8 @@ export function tryDecodeShareUrlBase64(input: string) {
     }
 
     for (let i = 0; i < 5; i++) {
-        if (!validator.isBase64(current)) {
-            return null;
-        }
-
-        let decoded: string;
-        try {
-            decoded = new TextDecoder().decode(
-                Uint8Array.from(atob(current), (c) => c.charCodeAt(0)),
-            );
-        } catch {
+        const decoded = decodeBase64Loose(current);
+        if (decoded === null) {
             return null;
         }
 
