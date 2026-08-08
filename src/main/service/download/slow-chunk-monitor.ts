@@ -267,10 +267,6 @@ export class SlowChunkMonitor {
         const relativeCandidates: SlowAbortCandidate[] = [];
 
         for (const { entry, speed } of scored) {
-            if (entry.slowReconnects >= SLOW_CHUNK_MAX_RECONNECTS) {
-                entry.slowTickCount = 0;
-                continue;
-            }
             if (entry.abortReason !== null || entry.attemptController.signal.aborted) {
                 continue;
             }

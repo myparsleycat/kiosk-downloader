@@ -491,13 +491,36 @@ export class GlobalSegmentPool {
                     continue;
                 }
 
-                if (isAbortError(error) && abortReason !== "slow-chunk") {
+                if (abortReason === "slow-chunk") {
+                    this.deps.kd.logger.warn(
+                        {
+                            channel: "segment-download",
+                            reason: "slow-chunk-exhausted",
+                            detect: detect ?? "relative",
+                            fileId: file.id,
+                            chunkIndex: chunk.chunkIndex,
+                            offset: chunk.offset,
+                            expectedSize: chunk.size,
+                            segmentType: segment.type,
+                            chunkSpeedBps,
+                            peerMedianBps,
+                            thresholdRatio: SLOW_CHUNK_THRESHOLD_RATIO,
+                            slowReconnect: slowReconnects,
+                            maxSlowReconnects: SLOW_CHUNK_MAX_RECONNECTS,
+                            transferredBytes,
+                        },
+                        "DownloadService:streamSegment",
+                    );
+                } else if (isAbortError(error)) {
                     this.deps.repository.markChunkPending(file.id, chunk.chunkIndex);
                     releaseInFlight();
                     return;
                 }
 
-                const message = toErrorMessage(error);
+                const message =
+                    abortReason === "slow-chunk"
+                        ? "Slow chunk stalled after reconnects"
+                        : toErrorMessage(error);
                 if (errorAttempt < maxAttempts) {
                     this.deps.kd.logger.warn(
                         {

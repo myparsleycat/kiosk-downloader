@@ -272,7 +272,7 @@ describe("SlowChunkMonitor", () => {
         monitor.unregister(transfer.key);
     });
 
-    it("does not abort when slow reconnects are exhausted", () => {
+    it("still aborts on stall when slow reconnects are exhausted", () => {
         const monitor = new SlowChunkMonitor();
         const attemptController = new AbortController();
         const transfer = monitor.register({
@@ -286,8 +286,9 @@ describe("SlowChunkMonitor", () => {
         vi.advanceTimersByTime(3_000 + 15_000);
         monitor.evaluateNow();
 
-        expect(transfer.abortReason).toBeNull();
-        expect(attemptController.signal.aborted).toBe(false);
+        expect(transfer.abortReason).toBe("slow-chunk");
+        expect(transfer.detect).toBe("stall");
+        expect(attemptController.signal.aborted).toBe(true);
 
         monitor.unregister(transfer.key);
     });
