@@ -1,3 +1,10 @@
+## [1.9.3](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.2...v1.9.3) (2026-08-10)
+
+
+### Bug Fixes
+
+* **upload:** preserve undici for edge uploads ([8bcfca7](https://github.com/myparsleycat/kiosk-downloader/commit/8bcfca7ed12cd6a0b4e32724a3c634ec0dd9b49d))
+
 ## [1.9.2](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.1...v1.9.2) (2026-08-08)
 
 
