@@ -433,6 +433,7 @@ export class KioUploadClient {
         onProgress?.(0);
         const response = await this.kd.http.request(putUrl, {
             method: "PUT",
+            fetch: globalThis.fetch,
             body: createUploadStream(bytes, this.kd.service.transfer.uploadBandwidth, signal),
             headers: {
                 "Content-Length": bytes.byteLength.toString(),

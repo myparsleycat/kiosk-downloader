@@ -28,7 +28,7 @@ export class HTTP {
     public async request(url: string, options?: Options) {
         const resp = await ky(url, {
             ...options,
-            fetch: networkFetch,
+            fetch: options?.fetch ?? networkFetch,
             throwHttpErrors: false,
             headers: {
                 ...(options?.headers instanceof Headers
