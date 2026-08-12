@@ -200,6 +200,7 @@ app.on("window-all-closed", async () => {
 });
 
 app.on("before-quit", () => {
+    void kd.http.destroy().catch((error) => kd.logger.error(error, "App:destroy-http"));
     if (kd.isInstallingUpdate) {
         return;
     }

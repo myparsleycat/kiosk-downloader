@@ -1,10 +1,83 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { HTTP, TimeoutError } from "./http";
+const electronMocks = vi.hoisted(() => ({
+    resolveProxy: vi.fn(),
+    netFetch: vi.fn(),
+}));
+const undiciMocks = vi.hoisted(() => ({
+    fetch: vi.fn(),
+    agents: [] as Array<{ close: () => Promise<void>; options: unknown }>,
+    proxyAgents: [] as Array<{ close: () => Promise<void>; options: unknown }>,
+}));
+const socksMocks = vi.hoisted(() => ({
+    dispatchers: [] as Array<{
+        close: () => Promise<void>;
+        options: unknown;
+    }>,
+}));
+
+vi.mock("electron", () => ({
+    net: { fetch: electronMocks.netFetch },
+    session: { defaultSession: { resolveProxy: electronMocks.resolveProxy } },
+}));
+
+vi.mock("undici", () => {
+    class Agent {
+        public readonly close = vi.fn(async () => undefined);
+        public readonly options: unknown;
+
+        public constructor(options?: unknown) {
+            this.options = options;
+            undiciMocks.agents.push(this);
+        }
+    }
+
+    class ProxyAgent {
+        public readonly close = vi.fn(async () => undefined);
+
+        public constructor(public readonly options: unknown) {
+            undiciMocks.proxyAgents.push(this);
+        }
+    }
+
+    return {
+        Agent,
+        ProxyAgent,
+        Request: globalThis.Request,
+        fetch: undiciMocks.fetch,
+    };
+});
+
+vi.mock("fetch-socks", () => ({
+    socksDispatcher: vi.fn((options: unknown) => {
+        const dispatcher = { close: vi.fn(async () => undefined), options };
+        socksMocks.dispatchers.push(dispatcher);
+        return dispatcher;
+    }),
+}));
+
+import {
+    HTTP,
+    ProxyResolutionError,
+    TimeoutError,
+    delay,
+    ipv4Fetch,
+    plainUndiciFetch,
+} from "./http";
 
 describe("HTTP.request", () => {
-    afterEach(() => {
+    beforeEach(() => {
+        electronMocks.resolveProxy.mockReset().mockResolvedValue("DIRECT");
+        electronMocks.netFetch.mockReset().mockResolvedValue(new Response());
+        undiciMocks.fetch.mockReset().mockResolvedValue(new Response());
+        undiciMocks.agents.length = 0;
+        undiciMocks.proxyAgents.length = 0;
+        socksMocks.dispatchers.length = 0;
+    });
+
+    afterEach(async () => {
         vi.useRealTimers();
+        await new HTTP({} as never).destroy();
     });
 
     it("preserves a request-specific fetch implementation", async () => {
@@ -14,12 +87,216 @@ describe("HTTP.request", () => {
         await http.request("https://example.com", { fetch: customFetch });
 
         expect(customFetch).toHaveBeenCalledTimes(1);
+        expect(electronMocks.resolveProxy).not.toHaveBeenCalled();
+        expect(electronMocks.netFetch).not.toHaveBeenCalled();
     });
 
-    it("defaults to the IPv4-pinned undici fetch", async () => {
+    it("uses the IPv4-pinned dispatcher for direct connections by default", async () => {
+        electronMocks.resolveProxy.mockResolvedValue("DIRECT");
+        undiciMocks.fetch.mockResolvedValue(new Response());
         const http = new HTTP({} as never);
 
-        expect(http.pickFetch({})).toBeDefined();
+        expect(await http.pickFetch("https://example.com", {})).toBe(ipv4Fetch);
+        await ipv4Fetch("https://example.com");
+
+        expect(undiciMocks.agents[0]?.options).toEqual({ connect: { family: 4 } });
+    });
+
+    it("uses the plain dispatcher for direct connections when IPv4 pinning is disabled", async () => {
+        electronMocks.resolveProxy.mockResolvedValue("direct; DIRECT");
+        undiciMocks.fetch.mockResolvedValue(new Response());
+        const http = new HTTP({} as never);
+        http.setForceIpv4(false);
+
+        expect(await http.pickFetch("https://example.com", {})).toBe(plainUndiciFetch);
+        await plainUndiciFetch("https://example.com");
+
+        expect(undiciMocks.agents[0]?.options).toBeUndefined();
+    });
+
+    it("uses Chromium networking for ordinary proxied requests", async () => {
+        electronMocks.resolveProxy.mockResolvedValue("PROXY proxy.example:8080; DIRECT");
+        electronMocks.netFetch.mockResolvedValue(new Response("proxied"));
+        const http = new HTTP({} as never);
+
+        const response = await http.request("https://example.com", { retry: false });
+
+        expect(await response.text()).toBe("proxied");
+        expect(electronMocks.netFetch).toHaveBeenCalledTimes(1);
+        expect(undiciMocks.fetch).not.toHaveBeenCalled();
+    });
+
+    it("falls back to Chromium networking when ordinary proxy resolution fails", async () => {
+        electronMocks.resolveProxy.mockRejectedValue(new Error("PAC failed"));
+        electronMocks.netFetch.mockResolvedValue(new Response());
+        const http = new HTTP({} as never);
+
+        await http.request("https://example.com", { retry: false });
+
+        expect(electronMocks.netFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("falls back to Chromium networking when ordinary proxy resolution is empty", async () => {
+        electronMocks.resolveProxy.mockResolvedValue("");
+        electronMocks.netFetch.mockResolvedValue(new Response());
+        const http = new HTTP({} as never);
+
+        await http.request("https://example.com", { retry: false });
+
+        expect(electronMocks.netFetch).toHaveBeenCalledTimes(1);
+        expect(undiciMocks.fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ["PROXY proxy.example:8080", "http://proxy.example:8080"],
+        ["HTTPS proxy.example:8443", "https://proxy.example:8443"],
+    ])(
+        "uses an HTTP proxy-aware Undici dispatcher for streaming requests: %s",
+        async (result, uri) => {
+            electronMocks.resolveProxy.mockResolvedValue(result);
+            undiciMocks.fetch.mockResolvedValue(new Response());
+            const http = new HTTP({} as never);
+
+            const fetchImpl = await http.pickFetch("https://example.com", {
+                onUploadProgress: vi.fn(),
+            });
+            await fetchImpl("https://example.com");
+
+            expect(undiciMocks.proxyAgents[0]?.options).toBe(uri);
+        },
+    );
+
+    it.each([
+        ["SOCKS proxy.example:1080", 4],
+        ["SOCKS5 proxy.example:1080", 5],
+    ])("uses the correct SOCKS protocol for streaming requests: %s", async (result, type) => {
+        electronMocks.resolveProxy.mockResolvedValue(result);
+        const http = new HTTP({} as never);
+
+        const fetchImpl = await http.pickFetch("https://example.com", {
+            onUploadProgress: vi.fn(),
+        });
+        await fetchImpl("https://example.com");
+
+        expect(socksMocks.dispatchers[0]?.options).toEqual({
+            type,
+            host: "proxy.example",
+            port: 1080,
+        });
+    });
+
+    it("uses the first supported directive for streaming requests", async () => {
+        electronMocks.resolveProxy.mockResolvedValue(
+            "UNKNOWN unsupported.example:1080; HTTPS proxy.example:8443; DIRECT",
+        );
+        undiciMocks.fetch.mockResolvedValue(new Response());
+        const http = new HTTP({} as never);
+
+        const fetchImpl = await http.pickFetch("https://example.com", {
+            onUploadProgress: vi.fn(),
+        });
+        await fetchImpl("https://example.com");
+
+        expect(undiciMocks.proxyAgents[0]?.options).toBe("https://proxy.example:8443");
+    });
+
+    it("uses a direct dispatcher when DIRECT is the first supported streaming directive", async () => {
+        electronMocks.resolveProxy.mockResolvedValue("UNKNOWN unsupported.example:1080; DIRECT");
+        const http = new HTTP({} as never);
+
+        const fetchImpl = await http.pickFetch("https://example.com", {
+            onUploadProgress: vi.fn(),
+        });
+        await fetchImpl("https://example.com");
+
+        expect(undiciMocks.agents[0]?.options).toEqual({ connect: { family: 4 } });
+        expect(electronMocks.netFetch).not.toHaveBeenCalled();
+    });
+
+    it("reuses cached proxy dispatchers and closes them on destroy", async () => {
+        electronMocks.resolveProxy.mockResolvedValue("PROXY proxy.example:8080");
+        const http = new HTTP({} as never);
+        const options = { onUploadProgress: vi.fn() };
+
+        await (
+            await http.pickFetch("https://one.example", options)
+        )("https://one.example");
+        await (
+            await http.pickFetch("https://two.example", options)
+        )("https://two.example");
+
+        expect(undiciMocks.proxyAgents).toHaveLength(1);
+        await http.destroy();
+        expect(undiciMocks.proxyAgents[0]?.close).toHaveBeenCalledTimes(1);
+    });
+
+    it("separates proxy dispatcher caches by the IPv4 setting", async () => {
+        electronMocks.resolveProxy.mockResolvedValue("PROXY proxy.example:8080");
+        const http = new HTTP({} as never);
+        const options = { onUploadProgress: vi.fn() };
+
+        await (
+            await http.pickFetch("https://one.example", options)
+        )("https://one.example");
+        http.setForceIpv4(false);
+        await (
+            await http.pickFetch("https://two.example", options)
+        )("https://two.example");
+
+        expect(undiciMocks.proxyAgents).toHaveLength(2);
+    });
+
+    it.each(["", "UNKNOWN proxy.example:1080"])(
+        "rejects streaming requests without a supported proxy directive: %j",
+        async (result) => {
+            electronMocks.resolveProxy.mockResolvedValue(result);
+            const http = new HTTP({} as never);
+
+            await expect(
+                http.pickFetch("https://example.com", { onUploadProgress: vi.fn() }),
+            ).rejects.toBeInstanceOf(ProxyResolutionError);
+        },
+    );
+
+    it("rejects streaming requests when proxy resolution fails", async () => {
+        electronMocks.resolveProxy.mockRejectedValue(new Error("PAC failed"));
+        const http = new HTTP({} as never);
+
+        await expect(
+            http.pickFetch("https://example.com", { onUploadProgress: vi.fn() }),
+        ).rejects.toBeInstanceOf(ProxyResolutionError);
+    });
+
+    it("forwards RequestInit through plainUndiciFetch", async () => {
+        undiciMocks.fetch.mockResolvedValue(new Response());
+        const controller = new AbortController();
+
+        await plainUndiciFetch("https://example.com", {
+            method: "POST",
+            headers: { "X-Test": "yes" },
+            body: "payload",
+            signal: controller.signal,
+        });
+
+        expect(undiciMocks.fetch).toHaveBeenCalledWith(
+            "https://example.com",
+            expect.objectContaining({
+                method: "POST",
+                headers: { "X-Test": "yes" },
+                body: "payload",
+                signal: controller.signal,
+                dispatcher: expect.anything(),
+            }),
+        );
+    });
+
+    it("aborts shared delay immediately", async () => {
+        const controller = new AbortController();
+        const pending = delay(60_000, controller.signal);
+
+        controller.abort();
+
+        await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     });
 
     it("merges the default User-Agent header with request headers", async () => {

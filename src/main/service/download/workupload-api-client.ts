@@ -14,7 +14,7 @@ import type {
 import type { KioskDownloader } from "../..";
 import type { HttpRequestOptions } from "../../lib/http";
 
-import { isNetworkError } from "../../lib/http";
+import { TimeoutError, delay, isNetworkError } from "../../lib/http";
 import { COLLECTION_EXPIRES_NEVER } from "./transfer-it-crypto";
 
 const ORIGIN = "https://workupload.com";
@@ -992,25 +992,9 @@ function isRetryableCaptchaError(error: unknown) {
     return (
         error instanceof WorkuploadCaptchaRejectedError ||
         error instanceof WorkuploadHttpError ||
+        error instanceof TimeoutError ||
         (error instanceof Error && isNetworkError(error))
     );
-}
-
-async function delay(ms: number, signal?: AbortSignal) {
-    await new Promise<void>((resolve, reject) => {
-        if (signal) {
-            signal.throwIfAborted();
-            signal.addEventListener("abort", abortHandler, { once: true });
-        }
-        function abortHandler() {
-            clearTimeout(timeoutId);
-            reject(signal?.reason);
-        }
-        const timeoutId = setTimeout(() => {
-            signal?.removeEventListener("abort", abortHandler);
-            resolve();
-        }, ms);
-    });
 }
 
 async function activateFileSession(

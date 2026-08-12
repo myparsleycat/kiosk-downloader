@@ -1,22 +1,51 @@
-import { Agent, Request as UndiciRequest, fetch as undiciFetch } from "undici";
+import type { Dispatcher, RequestInit as UndiciRequestInit } from "undici";
 
 import type { KioskDownloader } from "../index";
 
 // Chromium's `net.fetch` crashes the main process when a response header
 // contains non-Latin-1 characters (e.g. Korean filenames in Content-Disposition),
-// so requests go through undici instead. Undici's Happy Eyeballs
-// (internalConnectMultiple) can stall on broken IPv6 routes and surface as
-// ETIMEDOUT; pinning the dispatcher to IPv4 avoids that without touching global
-// DNS behavior. The IPv4 pin can be toggled via `network.forceIpv4`.
-const ipv4Dispatcher = new Agent({ connect: { family: 4 } });
+// so direct requests go through Undici. Proxied ordinary requests still use
+// Chromium networking to preserve Electron session/PAC behavior. Undici's Happy
+// Eyeballs (internalConnectMultiple) can stall on broken IPv6 routes and surface
+// as ETIMEDOUT; pinning direct dispatchers to IPv4 avoids that without touching
+// global DNS behavior. The IPv4 pin can be toggled via `network.forceIpv4`.
+const dispatcherCache = new Map<string, Promise<Dispatcher>>();
+let undiciModulePromise: Promise<typeof import("undici")> | undefined;
+
+async function loadUndici() {
+    if (!undiciModulePromise) {
+        undiciModulePromise = (async () => {
+            // Electron's bundled Undici owns the legacy dispatcher used by global fetch.
+            // Initialize it before loading the npm package so the package import cannot
+            // replace that dispatcher as a module-load side effect.
+            if (typeof process.versions.electron === "string") {
+                await globalThis.fetch("data:,");
+            }
+            return import("undici");
+        })();
+    }
+    return undiciModulePromise;
+}
+
+function getDirectDispatcher(forceIpv4: boolean) {
+    const key = forceIpv4 ? "direct:ipv4" : "direct:auto";
+    const existing = dispatcherCache.get(key);
+    if (existing) return existing;
+    const created = loadUndici().then(
+        ({ Agent }) => new Agent(forceIpv4 ? { connect: { family: 4 } } : undefined),
+    );
+    dispatcherCache.set(key, created);
+    return created;
+}
 
 // The bundled undici used by globalThis Request is a different Request class than
 // the undici package imported here, so a Request built via globalThis.Request
 // is not recognized and would fail with "Failed to parse URL from [object Request]".
 // Rebuild the request with the imported undici's Request class when needed.
 function toUndiciInput(
-    input: Parameters<typeof undiciFetch>[0],
-): Parameters<typeof undiciFetch>[0] {
+    input: Parameters<typeof globalThis.fetch>[0],
+    UndiciRequest: typeof import("undici").Request,
+) {
     if (!(input instanceof Request)) {
         return input;
     }
@@ -32,29 +61,29 @@ function toUndiciInput(
 }
 
 async function undiciRequest(
-    input: Parameters<typeof undiciFetch>[0],
-    init?: Parameters<typeof undiciFetch>[1],
-    dispatcher?: Agent,
+    input: string | URL | Request,
+    init?: RequestInit,
+    dispatcher = getDirectDispatcher(false),
 ): Promise<Response> {
-    return undiciFetch(toUndiciInput(input), { ...init, dispatcher }) as unknown as Response;
+    const undici = await loadUndici();
+    return undici.fetch(toUndiciInput(input, undici.Request), {
+        ...(init as UndiciRequestInit),
+        dispatcher: await dispatcher,
+    }) as unknown as Response;
 }
 
 export async function ipv4Fetch(
     input: string | URL | Request,
     init?: RequestInit,
 ): Promise<Response> {
-    return undiciRequest(
-        input as Parameters<typeof undiciFetch>[0],
-        init as Parameters<typeof undiciFetch>[1],
-        ipv4Dispatcher,
-    );
+    return undiciRequest(input, init, getDirectDispatcher(true));
 }
 
 export async function plainUndiciFetch(
     input: string | URL | Request,
-    _init?: RequestInit,
+    init?: RequestInit,
 ): Promise<Response> {
-    return undiciRequest(input as Parameters<typeof undiciFetch>[0]);
+    return undiciRequest(input, init);
 }
 
 const DEFAULT_TIMEOUT_MS = 100_000;
@@ -167,7 +196,7 @@ function retryDelayMs(retry: NormalizedRetryOptions, attempt: number) {
     return Math.min(retry.backoffLimit, retry.delay(attempt));
 }
 
-function delay(ms: number, signal?: AbortSignal) {
+export function delay(ms: number, signal?: AbortSignal) {
     return new Promise<void>((resolve, reject) => {
         if (signal) {
             signal.throwIfAborted();
@@ -182,6 +211,80 @@ function delay(ms: number, signal?: AbortSignal) {
             resolve();
         }, ms);
     });
+}
+
+export class ProxyResolutionError extends Error {
+    public constructor(url: string, proxyResult?: string, cause?: unknown) {
+        super(
+            proxyResult
+                ? `No supported proxy directive was resolved for ${url}: ${proxyResult}`
+                : `Failed to resolve a proxy for ${url}`,
+            cause === undefined ? undefined : { cause },
+        );
+        this.name = "ProxyResolutionError";
+    }
+}
+
+type ProxyDirective =
+    | { type: "direct" }
+    | { type: "http" | "https" | "socks4" | "socks5"; address: string };
+
+function parseProxyDirectives(proxyResult: string): ProxyDirective[] {
+    return proxyResult
+        .split(";")
+        .map((value) => value.trim())
+        .flatMap((value): ProxyDirective[] => {
+            if (value.toUpperCase() === "DIRECT") return [{ type: "direct" }];
+            const match = /^(PROXY|HTTPS|SOCKS|SOCKS5)\s+(\S+)$/i.exec(value);
+            if (!match) return [];
+            const type = match[1].toUpperCase();
+            return [
+                {
+                    type:
+                        type === "PROXY"
+                            ? "http"
+                            : type === "HTTPS"
+                              ? "https"
+                              : type === "SOCKS"
+                                ? "socks4"
+                                : "socks5",
+                    address: match[2],
+                },
+            ];
+        });
+}
+
+function isDirectProxyResult(proxyResult: string) {
+    const directives = proxyResult
+        .split(";")
+        .map((value) => value.trim())
+        .filter(Boolean);
+    return directives.length > 0 && directives.every((value) => value.toUpperCase() === "DIRECT");
+}
+
+function getProxyDispatcher(
+    directive: Exclude<ProxyDirective, { type: "direct" }>,
+    forceIpv4: boolean,
+) {
+    const key = `proxy:${forceIpv4 ? "ipv4" : "auto"}:${directive.type}:${directive.address}`;
+    const existing = dispatcherCache.get(key);
+    if (existing) return existing;
+    const created =
+        directive.type === "socks4" || directive.type === "socks5"
+            ? loadUndici().then(async () => {
+                  const { socksDispatcher } = await import("fetch-socks");
+                  const url = new URL(`http://${directive.address}`);
+                  return socksDispatcher({
+                      type: directive.type === "socks4" ? 4 : 5,
+                      host: url.hostname,
+                      port: Number(url.port || 1080),
+                  });
+              })
+            : loadUndici().then(
+                  ({ ProxyAgent }) => new ProxyAgent(`${directive.type}://${directive.address}`),
+              );
+    dispatcherCache.set(key, created);
+    return created;
 }
 
 function getBodySize(body: BodyInit | null | undefined): number {
@@ -264,8 +367,41 @@ export class HTTP {
         this.forceIpv4 = value;
     }
 
-    public pickFetch(options: HttpRequestOptions): typeof fetch {
-        return options.fetch ?? (this.forceIpv4 ? ipv4Fetch : plainUndiciFetch);
+    public async pickFetch(url: string, options: HttpRequestOptions): Promise<typeof fetch> {
+        if (options.fetch) return options.fetch;
+
+        const { net, session } = await import("electron");
+        let proxyResult: string;
+        try {
+            proxyResult = await session.defaultSession.resolveProxy(url);
+        } catch (error) {
+            if (options.onUploadProgress) throw new ProxyResolutionError(url, undefined, error);
+            return (input, init) =>
+                net.fetch(input instanceof URL ? input.href : input, init) as Promise<Response>;
+        }
+
+        const directives = parseProxyDirectives(proxyResult);
+        if (!options.onUploadProgress) {
+            if (!isDirectProxyResult(proxyResult)) {
+                return (input, init) =>
+                    net.fetch(input instanceof URL ? input.href : input, init) as Promise<Response>;
+            }
+            return this.forceIpv4 ? ipv4Fetch : plainUndiciFetch;
+        }
+
+        const directive = directives[0];
+        if (!directive) throw new ProxyResolutionError(url, proxyResult);
+        if (directive.type === "direct") {
+            return this.forceIpv4 ? ipv4Fetch : plainUndiciFetch;
+        }
+        const dispatcher = getProxyDispatcher(directive, this.forceIpv4);
+        return (input, init) => undiciRequest(input, init, dispatcher);
+    }
+
+    public async destroy() {
+        const dispatchers = [...dispatcherCache.values()];
+        dispatcherCache.clear();
+        await Promise.all(dispatchers.map(async (dispatcher) => (await dispatcher).close()));
     }
 
     public async getHeaders(_url: string) {
@@ -280,7 +416,7 @@ export class HTTP {
         for (const [key, value] of Object.entries(await this.getHeaders(url))) {
             headers.set(key, value);
         }
-        const fetchImpl = this.pickFetch(options);
+        const fetchImpl = await this.pickFetch(url, options);
         const timeoutMs =
             options.timeout === false ? undefined : (options.timeout ?? DEFAULT_TIMEOUT_MS);
         const method = (options.method ?? "GET").toUpperCase();
