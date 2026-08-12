@@ -1,3 +1,11 @@
+## [1.9.4](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.3...v1.9.4) (2026-08-12)
+
+
+### Bug Fixes
+
+* **download:** fix workupload captcha rejection and add ipv4 option ([361c931](https://github.com/myparsleycat/kiosk-downloader/commit/361c931fc36574da99cfd997f3151e5eb72eef32))
+* **http:** preserve proxy routing and captcha retries ([007f5a7](https://github.com/myparsleycat/kiosk-downloader/commit/007f5a7688066f5b98eb2a621a1e5fc7c632c203))
+
 ## [1.9.3](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.2...v1.9.3) (2026-08-10)
 
 
