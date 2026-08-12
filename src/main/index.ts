@@ -137,6 +137,8 @@ export class KioskDownloader {
         const logLevel = await this.setting.get("general.logLevel");
         this.logger.setLevel(logLevel);
 
+        this.http.setForceIpv4(await this.setting.get("network.forceIpv4"));
+
         await this.window.main.createMainWindow();
         this.service.updater.initialize();
         await this.service.download.restoreStartupState();
