@@ -4,9 +4,9 @@ import {
     COLLECTION_INVALID_PASSWORD_ERROR,
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
-import ky from "ky";
 import { describe, expect, it, vi } from "vitest";
 
+import { HTTP, TimeoutError, type HttpRequestOptions } from "../../lib/http";
 import {
     WorkuploadApiClient,
     parseWorkuploadArchiveManifest,
@@ -48,7 +48,10 @@ function passwordForm(kind: "file" | "archive", key: string, invalid = false) {
 }
 
 function createClient(request: ReturnType<typeof vi.fn>) {
-    return new WorkuploadApiClient({ http: { request } } as never);
+    return new WorkuploadApiClient({
+        http: { request },
+        logger: { warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    } as never);
 }
 
 describe("Workupload parsers", () => {
@@ -466,7 +469,7 @@ describe("WorkuploadApiClient", () => {
                 if (url.endsWith("/captcha")) {
                     expect(String(options?.body)).toBe("captcha=1+");
                     expect(options?.headers?.get("cookie")).toContain("captcha=proof");
-                    return new Response(JSON.stringify({ success: true }), {
+                    return new Response("", {
                         headers: { "Set-Cookie": "token=session; Domain=.workupload.com" },
                     });
                 }
@@ -531,6 +534,259 @@ describe("WorkuploadApiClient", () => {
         );
     });
 
+    it("retries the security check when the page still shows the puzzle after captcha", async () => {
+        const target = crypto.createHash("sha256").update("puzzle1").digest("hex");
+        let fileRequests = 0;
+        let captchaRequests = 0;
+        const request = vi.fn(async (url: string) => {
+            if (url.endsWith("/file/FileKey")) {
+                fileRequests += 1;
+                if (fileRequests <= 2) {
+                    return new Response(`<script>fetch('/puzzle')</script>`);
+                }
+                return new Response(FILE_HTML);
+            }
+            if (url.endsWith("/puzzle")) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        data: { puzzle: "puzzle", range: 3, find: [target] },
+                    }),
+                );
+            }
+            if (url.endsWith("/captcha")) {
+                captchaRequests += 1;
+                return new Response("");
+            }
+            if (url.endsWith("/start/FileKey")) {
+                return new Response("/api/file/getDownloadServer/FileKey");
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+
+        const session = await createClient(request).createSession(
+            "https://workupload.com/file/FileKey",
+        );
+        expect(session.source.files[0]?.filename).toBe("Tom & Jerry 'final'.mp4");
+        expect(fileRequests).toBe(3);
+        expect(captchaRequests).toBe(2);
+    });
+
+    it("retries a rejected captcha with a fresh puzzle before succeeding", async () => {
+        vi.useFakeTimers();
+        const target = crypto.createHash("sha256").update("puzzle1").digest("hex");
+        let captchaRequests = 0;
+        let puzzleRequests = 0;
+        let captchaOk = false;
+        const request = vi.fn(async (url: string) => {
+            if (url.endsWith("/file/FileKey")) {
+                return new Response(captchaOk ? FILE_HTML : `<script>fetch('/puzzle')</script>`);
+            }
+            if (url.endsWith("/puzzle")) {
+                puzzleRequests += 1;
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        data: { puzzle: "puzzle", range: 3, find: [target] },
+                    }),
+                );
+            }
+            if (url.endsWith("/captcha")) {
+                captchaRequests += 1;
+                if (captchaRequests === 1) {
+                    return new Response("<html>Are you a human?</html>");
+                }
+                captchaOk = true;
+                return new Response("");
+            }
+            if (url.endsWith("/start/FileKey")) {
+                return new Response("/api/file/getDownloadServer/FileKey");
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+
+        try {
+            const pending = createClient(request).createSession(
+                "https://workupload.com/file/FileKey",
+            );
+            await vi.advanceTimersByTimeAsync(2_000);
+            const session = await pending;
+            expect(session.source.files[0]?.filename).toBe("Tom & Jerry 'final'.mp4");
+            expect(captchaRequests).toBe(2);
+            expect(puzzleRequests).toBe(2);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it.each(["puzzle", "captcha"])(
+        "retries a %s header timeout with a fresh puzzle before succeeding",
+        async (timeoutStage) => {
+            vi.useFakeTimers();
+            const target = crypto.createHash("sha256").update("puzzle1").digest("hex");
+            let timedOut = false;
+            let unlocked = false;
+            let puzzleRequests = 0;
+            const request = vi.fn(async (url: string) => {
+                if (url.endsWith("/file/FileKey")) {
+                    return new Response(unlocked ? FILE_HTML : `<script>fetch('/puzzle')</script>`);
+                }
+                if (url.endsWith("/puzzle")) {
+                    puzzleRequests += 1;
+                    if (timeoutStage === "puzzle" && !timedOut) {
+                        timedOut = true;
+                        throw new TimeoutError(new Request(url));
+                    }
+                    return new Response(
+                        JSON.stringify({
+                            success: true,
+                            data: { puzzle: "puzzle", range: 3, find: [target] },
+                        }),
+                    );
+                }
+                if (url.endsWith("/captcha")) {
+                    if (timeoutStage === "captcha" && !timedOut) {
+                        timedOut = true;
+                        throw new TimeoutError(new Request(url));
+                    }
+                    unlocked = true;
+                    return new Response("");
+                }
+                if (url.endsWith("/start/FileKey")) {
+                    return new Response("/api/file/getDownloadServer/FileKey");
+                }
+                throw new Error(`Unexpected request: ${url}`);
+            });
+
+            try {
+                const pending = createClient(request).createSession(
+                    "https://workupload.com/file/FileKey",
+                );
+                await vi.advanceTimersByTimeAsync(2_000);
+
+                const session = await pending;
+                expect(session.source.files[0]?.filename).toBe("Tom & Jerry 'final'.mp4");
+                expect(puzzleRequests).toBe(2);
+            } finally {
+                vi.useRealTimers();
+            }
+        },
+    );
+
+    it("gives up after repeated security-check timeouts", async () => {
+        vi.useFakeTimers();
+        let puzzleRequests = 0;
+        const request = vi.fn(async (url: string) => {
+            if (url.endsWith("/file/FileKey")) {
+                return new Response(`<script>fetch('/puzzle')</script>`);
+            }
+            if (url.endsWith("/puzzle")) {
+                puzzleRequests += 1;
+                throw new TimeoutError(new Request(url));
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+
+        try {
+            const pending = expect(
+                createClient(request).createSession("https://workupload.com/file/FileKey"),
+            ).rejects.toThrow(/still shows the security check after 3 attempts/);
+            await vi.advanceTimersByTimeAsync(10_000);
+
+            await pending;
+            expect(puzzleRequests).toBe(3);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("propagates abort while waiting to retry a security-check timeout", async () => {
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        const request = vi.fn(async (url: string) => {
+            if (url.endsWith("/file/FileKey")) {
+                return new Response(`<script>fetch('/puzzle')</script>`);
+            }
+            if (url.endsWith("/puzzle")) {
+                throw new TimeoutError(new Request(url));
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+
+        try {
+            const pending = createClient(request).createSession(
+                "https://workupload.com/file/FileKey",
+                { signal: controller.signal },
+            );
+            await vi.advanceTimersByTimeAsync(0);
+            controller.abort();
+
+            await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("gives up after repeated captcha rejections", async () => {
+        vi.useFakeTimers();
+        const target = crypto.createHash("sha256").update("puzzle1").digest("hex");
+        let captchaRequests = 0;
+        const request = vi.fn(async (url: string) => {
+            if (url.endsWith("/file/FileKey")) {
+                return new Response(`<script>fetch('/puzzle')</script>`);
+            }
+            if (url.endsWith("/puzzle")) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        data: { puzzle: "puzzle", range: 3, find: [target] },
+                    }),
+                );
+            }
+            if (url.endsWith("/captcha")) {
+                captchaRequests += 1;
+                return new Response("<html>Are you a human?</html>");
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+
+        try {
+            const pending = expect(
+                createClient(request).createSession("https://workupload.com/file/FileKey"),
+            ).rejects.toThrow(/still shows the security check after 3 attempts/);
+            await vi.advanceTimersByTimeAsync(10_000);
+            await pending;
+            expect(captchaRequests).toBe(3);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("fails after the security check retry limit", async () => {
+        const target = crypto.createHash("sha256").update("puzzle1").digest("hex");
+        const request = vi.fn(async (url: string) => {
+            if (url.endsWith("/file/FileKey")) {
+                return new Response(`<script>fetch('/puzzle')</script>`);
+            }
+            if (url.endsWith("/puzzle")) {
+                return new Response(
+                    JSON.stringify({
+                        success: true,
+                        data: { puzzle: "puzzle", range: 3, find: [target] },
+                    }),
+                );
+            }
+            if (url.endsWith("/captcha")) {
+                return new Response("");
+            }
+            throw new Error(`Unexpected request: ${url}`);
+        });
+
+        await expect(
+            createClient(request).createSession("https://workupload.com/file/FileKey"),
+        ).rejects.toThrow(/still shows the security check/);
+    });
+
     it.each([
         "http://f12.workupload.com/download/FileKey",
         "https://evil.example/download/FileKey",
@@ -585,15 +841,11 @@ describe("WorkuploadApiClient", () => {
             }
             throw new Error(`Unexpected request: ${url}`);
         });
+        const http = new HTTP({} as never);
         const client = new WorkuploadApiClient({
             http: {
-                request: async (url: string, options: Record<string, unknown> = {}) =>
-                    ky(url, {
-                        ...options,
-                        throwHttpErrors: false,
-                        retry: 0,
-                        fetch: fetchStub as typeof fetch,
-                    }),
+                request: (url: string, options: HttpRequestOptions = {}) =>
+                    http.request(url, { ...options, fetch: fetchStub as typeof fetch }),
             },
         } as never);
 

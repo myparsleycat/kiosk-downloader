@@ -137,6 +137,8 @@ export class KioskDownloader {
         const logLevel = await this.setting.get("general.logLevel");
         this.logger.setLevel(logLevel);
 
+        this.http.setForceIpv4(await this.setting.get("network.forceIpv4"));
+
         await this.window.main.createMainWindow();
         this.service.updater.initialize();
         await this.service.download.restoreStartupState();
@@ -198,6 +200,7 @@ app.on("window-all-closed", async () => {
 });
 
 app.on("before-quit", () => {
+    void kd.http.destroy().catch((error) => kd.logger.error(error, "App:destroy-http"));
     if (kd.isInstallingUpdate) {
         return;
     }

@@ -389,6 +389,15 @@ export class Setting {
                     this.kd.service.transfer.setUploadBandwidthLimitMibps(value);
                 },
             },
+            "network.forceIpv4": {
+                definition: APP_SETTINGS["network.forceIpv4"],
+                getDefault: () => true,
+                fromStored: (value) => parseBooleanSetting(value, true),
+                toStored: (value) => String(value),
+                afterSet: (value) => {
+                    this.kd.http.setForceIpv4(value);
+                },
+            },
         };
 
         return this.settingSpecs;

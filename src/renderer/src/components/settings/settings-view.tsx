@@ -92,6 +92,7 @@ const SETTING_KEYS = [
   "transfer.uploadStartupResumeMode",
   "transfer.downloadBandwidthLimitMibps",
   "transfer.uploadBandwidthLimitMibps",
+  "network.forceIpv4",
 ] as const;
 
 type SettingsState = {
@@ -119,6 +120,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.uploadStartupResumeMode": "auto",
   "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+  "network.forceIpv4": true,
 };
 
 const chunkRetryOptions = rangeOptions(CHUNK_RETRY_MIN, CHUNK_RETRY_MAX);
@@ -622,6 +624,16 @@ export function SettingsView() {
         </Section>
 
         <Section icon={<CpuIcon className="size-3.5" />} title="고급">
+          <SettingRow
+            title="IPv4 연결 우선"
+            description="다운로드·업로드 요청을 IPv4로만 시도합니다. IPv6 경로에서 연결이 멈추는 문제가 있다면 켜두세요."
+            control={
+              <Switch
+                checked={settings["network.forceIpv4"]}
+                onCheckedChange={(value) => void setSetting("network.forceIpv4", value)}
+              />
+            }
+          />
           <SettingRow
             title="로그 레벨"
             description="앱 로그의 상세 정도를 설정합니다."

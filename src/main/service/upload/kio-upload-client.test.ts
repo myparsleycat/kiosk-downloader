@@ -228,7 +228,7 @@ describe("KioUploadClient.uploadSegment", () => {
         expect(result).toEqual({ length: item.length, outcome: "uploaded" });
         expect(httpRequest).toHaveBeenCalledTimes(2);
         expect(String(httpRequest.mock.calls[1]?.[0])).toBe("https://edge.example/edge/v4/upload");
-        expect(httpRequest.mock.calls[1]?.[1]?.fetch).toBe(globalThis.fetch);
+        expect(httpRequest.mock.calls[1]?.[1]?.fetch).toBeUndefined();
     });
 
     it("re-registers via segment/upload on the next attempt after edge failure", async () => {

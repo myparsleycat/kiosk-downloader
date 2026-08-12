@@ -33,6 +33,7 @@ export interface AppSettings {
     "transfer.uploadStartupResumeMode": StartupResumeMode;
     "transfer.downloadBandwidthLimitMibps": number;
     "transfer.uploadBandwidthLimitMibps": number;
+    "network.forceIpv4": boolean;
 }
 
 export const CHUNK_RETRY_MIN = 3;
@@ -74,7 +75,7 @@ export const COLLECTION_PASSWORD_LIST_MAX = 10;
 
 export type SettingKey = keyof AppSettings;
 
-export type SettingScope = "general" | "transfer";
+export type SettingScope = "general" | "transfer" | "network";
 
 export interface SettingDefinition<K extends SettingKey = SettingKey> {
     publicKey: K;
@@ -188,5 +189,10 @@ export const APP_SETTINGS = {
         publicKey: "transfer.uploadBandwidthLimitMibps",
         scope: "transfer",
         storageKey: "transfer.uploadBandwidthLimitMibps",
+    },
+    "network.forceIpv4": {
+        publicKey: "network.forceIpv4",
+        scope: "network",
+        storageKey: "network.forceIpv4",
     },
 } as const satisfies Record<SettingKey, SettingDefinition>;

@@ -12,15 +12,23 @@ import type {
 } from "@shared/types";
 
 import type { KioskDownloader } from "../..";
+import type { HttpRequestOptions } from "../../lib/http";
 
+import { TimeoutError, delay, isNetworkError } from "../../lib/http";
 import { COLLECTION_EXPIRES_NEVER } from "./transfer-it-crypto";
 
 const ORIGIN = "https://workupload.com";
 const WORKUPLOAD_HOST = "workupload.com";
 const AJAX_ACCEPT = "application/json, text/javascript, */*; q=0.01";
 const PUZZLE_SEARCH_BATCH_SIZE = 1_000;
-// ky applies `timeout` only until response headers arrive; the body stream is
-// guarded separately by the scheduler's stall timer.
+const PUZZLE_RETRY_LIMIT = 3;
+// The server intermittently drops the security-check exchange (socket close on
+// /puzzle) or rejects a solved captcha with a 200 + HTML challenge page, so a
+// failed security check is re-attempted with a fresh puzzle before the page
+// retry loop gives up.
+const SECURITY_CHECK_RETRY_DELAY_BASE_MS = 1_000;
+// The request timeout applies only until response headers arrive; the body
+// stream is guarded separately by the scheduler's stall timer.
 const WORKUPLOAD_CDN_HEADER_TIMEOUT_MS = 30_000;
 
 export class WorkuploadHttpError extends Error {
@@ -662,9 +670,9 @@ async function request(
     kd: KioskDownloader,
     jar: CookieJar,
     url: string,
-    options: Record<string, unknown> = {},
+    options: HttpRequestOptions = {},
 ) {
-    const headers = new Headers(options.headers as HeadersInit | undefined);
+    const headers = new Headers(options.headers);
     headers.set("Connection", "close");
     if (!headers.has("Accept")) headers.set("Accept", "*/*");
     const cookieHeader = jar.header(url);
@@ -708,16 +716,50 @@ async function loadPage(
     referer = url,
     signal?: AbortSignal,
 ) {
-    const first = await readText(
-        await request(kd, jar, url, { headers: { Referer: referer }, signal }),
-        stage,
-    );
-    if (!first.includes("/puzzle")) return first;
-    await passSecurityCheck(kd, jar, url, signal);
-    return await readText(
-        await request(kd, jar, url, { headers: { Referer: referer }, signal }),
-        `${stage} retry`,
-    );
+    for (let attempt = 0; ; attempt += 1) {
+        const response = await request(kd, jar, url, {
+            headers: { Referer: referer },
+            signal,
+        });
+        const html = await readText(response, attempt === 0 ? stage : `${stage} retry ${attempt}`);
+        if (!html.includes("/puzzle")) return html;
+        // Workupload always serves the captcha page on first load, so this
+        // fires on the normal flow; keep it at debug and reserve warn for
+        // actual rejections or retries below.
+        kd.logger.debug(
+            {
+                stage,
+                url,
+                attempt,
+                status: response.status,
+                responseLength: html.length,
+                responseHead: html.slice(0, 200),
+            },
+            "Workupload:page-still-locked",
+        );
+        if (attempt >= PUZZLE_RETRY_LIMIT) {
+            throw new Error(
+                `Workupload ${stage} still shows the security check after ${PUZZLE_RETRY_LIMIT} attempts.`,
+            );
+        }
+        try {
+            await passSecurityCheck(kd, jar, url, signal);
+        } catch (error) {
+            throwIfAborted(signal);
+            if (!isRetryableCaptchaError(error)) throw error;
+            kd.logger.warn(
+                {
+                    stage,
+                    url,
+                    attempt,
+                    errorName: error instanceof Error ? error.name : undefined,
+                    errorMessage: error instanceof Error ? error.message : String(error),
+                },
+                "Workupload:security-check-retry",
+            );
+            await delay(SECURITY_CHECK_RETRY_DELAY_BASE_MS * 2 ** attempt, signal);
+        }
+    }
 }
 
 async function loadFileMetadata(
@@ -898,19 +940,16 @@ async function passSecurityCheck(
     referer: string,
     signal?: AbortSignal,
 ) {
-    const puzzle = parsePuzzle(
-        await readJson(
-            await request(kd, jar, `${ORIGIN}/puzzle`, {
-                headers: {
-                    Accept: AJAX_ACCEPT,
-                    Referer: referer,
-                    "X-Requested-With": "XMLHttpRequest",
-                },
-                signal,
-            }),
-            "puzzle",
-        ),
-    );
+    const puzzleResponse = await request(kd, jar, `${ORIGIN}/puzzle`, {
+        headers: {
+            Accept: AJAX_ACCEPT,
+            Referer: referer,
+            "X-Requested-With": "XMLHttpRequest",
+        },
+        signal,
+    });
+    const puzzle = parsePuzzle(await readJson(puzzleResponse, "puzzle"));
+    const captchaValue = await solvePuzzle(puzzle, signal);
     const response = await request(kd, jar, `${ORIGIN}/captcha`, {
         method: "POST",
         headers: {
@@ -919,10 +958,43 @@ async function passSecurityCheck(
             Referer: referer,
             "X-Requested-With": "XMLHttpRequest",
         },
-        body: new URLSearchParams({ captcha: await solvePuzzle(puzzle, signal) }),
+        body: new URLSearchParams({ captcha: captchaValue }),
         signal,
     });
-    await readText(response, "captcha");
+    const body = await readText(response, "captcha");
+    if (response.status !== 200 || body.trim() !== "") {
+        kd.logger.warn(
+            {
+                stage: "captcha",
+                referer,
+                puzzleStatus: puzzleResponse.status,
+                puzzleRange: puzzle.range,
+                puzzleFindCount: puzzle.find.length,
+                captchaStatus: response.status,
+                captchaResponseLength: body.length,
+                captchaResponseHead: body.slice(0, 200),
+                captchaValue,
+            },
+            "Workupload:captcha-rejected",
+        );
+        throw new WorkuploadCaptchaRejectedError(response.status);
+    }
+}
+
+class WorkuploadCaptchaRejectedError extends Error {
+    public constructor(status: number) {
+        super(`Workupload captcha was rejected (HTTP ${status}).`);
+        this.name = "WorkuploadCaptchaRejectedError";
+    }
+}
+
+function isRetryableCaptchaError(error: unknown) {
+    return (
+        error instanceof WorkuploadCaptchaRejectedError ||
+        error instanceof WorkuploadHttpError ||
+        error instanceof TimeoutError ||
+        (error instanceof Error && isNetworkError(error))
+    );
 }
 
 async function activateFileSession(
