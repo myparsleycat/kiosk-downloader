@@ -11,6 +11,7 @@ import {
     isZipInvalidPasswordError,
     isZipPasswordRequiredError,
 } from "@shared/download-errors";
+import type { TransferProviderRequestId } from "@shared/settings";
 import {
     buildShareUrl,
     buildWorkuploadUrl,
@@ -22,6 +23,7 @@ import type {
     Collection,
     CreateDownloadPayload,
     DownloadItem,
+    DownloadProvider,
     FileProgress,
     ListZipEntriesPayload,
     ListZipEntriesResult,
@@ -45,7 +47,7 @@ import type {
     LoadedWorkuploadCollection,
 } from "./types";
 
-import { withLoggedError } from "../../lib/logged-error";
+import { logCaughtError, withLoggedError } from "../../lib/logged-error";
 import {
     decodeExtendedShare,
     decodeExtendedShareFile,
@@ -121,6 +123,7 @@ export class DownloadService {
     private prepareController: AbortController | null = null;
     private prepareGeneration = 0;
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
+    private unsubscribeRequestPoolUsage?: () => void;
     private revision = 0;
 
     public constructor(private readonly kd: KioskDownloader) {
@@ -139,11 +142,22 @@ export class DownloadService {
                 if (id) await this.handleCollectionUpdate(id);
                 else await this.emitUpdate();
             },
-            async (id, fileIds) => {
-                await this.emitProgressUpdate(id, fileIds);
+            async (id, fileIds, usageDirty) => {
+                await this.emitProgressUpdate(id, fileIds, usageDirty);
             },
             (collection, file) => {
                 this.handleFileFinalized(collection, file);
+            },
+        );
+    }
+
+    public bindRequestPoolUsage() {
+        this.unsubscribeRequestPoolUsage = this.kd.service.transfer.onRequestPoolUsageChange(
+            (change) => {
+                if (change.direction !== "download") {
+                    return;
+                }
+                this.scheduler.markCollectionProgress(change.collectionId);
             },
         );
     }
@@ -243,6 +257,7 @@ export class DownloadService {
         this.prepareController?.abort();
         this.prepareController = null;
         this.preparedDraft = null;
+        this.unsubscribeRequestPoolUsage?.();
         this.scheduler.destroy();
     }
 
@@ -346,9 +361,11 @@ export class DownloadService {
                     message: "Preparation superseded.",
                 };
             }
-            this.kd.logger.error(
-                { error, channel: "download:prepare", stage: "load", url: sourceInput },
+            logCaughtError(
+                this.kd.logger,
                 "DownloadService:prepare",
+                { channel: "download:prepare", stage: "load", url: sourceInput },
+                error,
             );
             return {
                 status: "failed",
@@ -373,12 +390,13 @@ export class DownloadService {
     }
 
     public async listZipEntries(payload: ListZipEntriesPayload): Promise<ListZipEntriesResult> {
+        const staleDraft = {
+            status: "failed" as const,
+            code: "staleDraft" as const,
+            message: "Prepared download draft is no longer available.",
+        };
         if (!this.preparedDraft || this.preparedDraft.id !== payload.draftId) {
-            return {
-                status: "failed",
-                code: "staleDraft",
-                message: "Prepared download draft is no longer available.",
-            };
+            return staleDraft;
         }
         const draft = this.preparedDraft;
         if ("manifest" in draft.loaded || draft.loaded.provider !== "kiosk") {
@@ -413,6 +431,9 @@ export class DownloadService {
                     found.zip.size,
                     payload.zipPassword,
                 );
+                if (this.preparedDraft !== draft) {
+                    return staleDraft;
+                }
                 loaded.collection = {
                     ...loaded.collection,
                     tree: setZipEntries(loaded.collection.tree, payload.fileId, indexed.entries),
@@ -1280,6 +1301,11 @@ export class DownloadService {
         const subCollectionIds = isBundle
             ? this.repository.listBundleCollections(item.id).map((c) => c.id)
             : [];
+        const requestPoolUsage = this.kd.service.transfer.getRequestPoolUsageSum(
+            "download",
+            requestPoolProviderId(item.collection.provider),
+            isBundle ? subCollectionIds : [item.id],
+        );
         const progress: Record<string, FileProgress> = {};
 
         for (const [path, fileProgress] of Object.entries(item.progress)) {
@@ -1345,11 +1371,16 @@ export class DownloadService {
                     ? collectionSpeedBps
                     : undefined,
             elapsedMs,
+            requestPoolUsage,
         };
     }
 
-    private async emitProgressUpdate(collectionId: string, fileIds: Set<string>) {
-        if (fileIds.size === 0) {
+    private async emitProgressUpdate(
+        collectionId: string,
+        fileIds: Set<string>,
+        usageDirty: boolean,
+    ) {
+        if (fileIds.size === 0 && !usageDirty) {
             return;
         }
         const collection = this.repository.getCollection(collectionId);
@@ -1700,6 +1731,16 @@ export class DownloadService {
             .flatMap((collection) => this.repository.listFiles(collection.id))
             .filter((file) => (splitIds ? splitIds.has(file.remoteId) : file.path === target.path));
     }
+}
+
+function requestPoolProviderId(provider: DownloadProvider | undefined) {
+    if (provider === "transfer") {
+        return "transfer-it-download" satisfies TransferProviderRequestId;
+    }
+    if (provider === "workupload") {
+        return "workupload-download" satisfies TransferProviderRequestId;
+    }
+    return "kiosk-download" satisfies TransferProviderRequestId;
 }
 
 function tryParseWorkuploadFileSourceMeta(raw: string | null) {

@@ -130,6 +130,11 @@ export interface TransferProgressSummary {
     totalFiles: number;
 }
 
+export interface RequestPoolUsage {
+    inFlight: number;
+    pending: number;
+}
+
 export interface TransferListSnapshot<T> {
     revision: number;
     items: T[];
@@ -164,6 +169,7 @@ export interface DownloadItem {
     updatedAt: number;
     error?: string;
     transferControl?: TransferControl;
+    requestPoolUsage?: RequestPoolUsage;
 }
 
 export type DownloadProgressPatch = TransferProgressPatch<FileProgress, DownloadStatus>;
@@ -235,6 +241,7 @@ export interface UploadItem {
     shareValue?: string | null;
     shareKind?: "url" | "extended" | "compatibility-list";
     requiresReplacement?: boolean;
+    requestPoolUsage?: RequestPoolUsage;
 }
 
 export type UploadProgressPatch = TransferProgressPatch<UploadFileProgress, UploadStatus>;

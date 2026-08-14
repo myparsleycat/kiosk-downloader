@@ -193,7 +193,7 @@ describe("UploadScheduler", () => {
         await vi.advanceTimersByTimeAsync(1);
 
         expect(emitProgressUpdate).toHaveBeenCalledTimes(1);
-        expect(emitProgressUpdate).toHaveBeenCalledWith(COLLECTION_ID, new Set([file.id]));
+        expect(emitProgressUpdate).toHaveBeenCalledWith(COLLECTION_ID, new Set([file.id]), false);
         expect(emitUpdate).not.toHaveBeenCalled();
 
         finishUpload?.(file.size);

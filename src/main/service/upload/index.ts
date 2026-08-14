@@ -79,6 +79,7 @@ export class UploadService {
     private readonly bundleInitializations = new Map<string, Promise<unknown>>();
     /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
     private readonly draftSources = new Map<string, UploadSourceFile>();
+    private unsubscribeRequestPoolUsage?: () => void;
     private revision = 0;
 
     public constructor(private readonly kd: KioskDownloader) {
@@ -94,11 +95,22 @@ export class UploadService {
                 if (id) await this.handleCollectionUpdate(id);
                 else await this.emitUpdate();
             },
-            async (id, fileIds) => {
-                await this.emitProgressUpdate(id, fileIds);
+            async (id, fileIds, usageDirty) => {
+                await this.emitProgressUpdate(id, fileIds, usageDirty);
             },
         );
         this.preparationWorker = new PreparationWorkerClient(kd.logger);
+    }
+
+    public bindRequestPoolUsage() {
+        this.unsubscribeRequestPoolUsage = this.kd.service.transfer.onRequestPoolUsageChange(
+            (change) => {
+                if (change.direction !== "upload") {
+                    return;
+                }
+                this.scheduler.markCollectionProgress(change.collectionId);
+            },
+        );
     }
 
     public async solveTurnstile(): Promise<string> {
@@ -552,6 +564,7 @@ export class UploadService {
     public destroy() {
         this.preparationWorker.destroy();
         this.scheduler.destroy();
+        this.unsubscribeRequestPoolUsage?.();
         this.turnstile.destroy();
         this.clearDraftSources();
     }
@@ -847,6 +860,11 @@ export class UploadService {
         const subCollectionIds = isBundle
             ? this.repository.listBundleCollections(item.id).map((c) => c.id)
             : [];
+        const requestPoolUsage = this.kd.service.transfer.getRequestPoolUsageSum(
+            "upload",
+            "kiosk-upload",
+            isBundle ? subCollectionIds : [item.id],
+        );
         const progress: Record<string, UploadFileProgress> = {};
 
         for (const [pathKey, fileProgress] of Object.entries(item.progress)) {
@@ -907,11 +925,16 @@ export class UploadService {
                     ? collectionSpeedBps
                     : undefined,
             elapsedMs,
+            requestPoolUsage,
         };
     }
 
-    private async emitProgressUpdate(collectionId: string, fileIds: Set<string>) {
-        if (fileIds.size === 0) {
+    private async emitProgressUpdate(
+        collectionId: string,
+        fileIds: Set<string>,
+        usageDirty: boolean,
+    ) {
+        if (fileIds.size === 0 && !usageDirty) {
             return;
         }
         const collection = this.repository.getCollection(collectionId);

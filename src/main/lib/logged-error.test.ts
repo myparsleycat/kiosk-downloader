@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { Logger } from "../logger";
 
-import { withLoggedError } from "./logged-error";
+import { logCaughtError, withLoggedError } from "./logged-error";
 
 describe("withLoggedError", () => {
     it("sanitizes URL credentials and request data while preserving diagnostic context", async () => {
@@ -51,6 +51,34 @@ describe("withLoggedError", () => {
         expect(logError).toHaveBeenCalledWith(
             { url: "[invalid URL]", count: 3, message: "failed" },
             "test",
+        );
+    });
+});
+
+describe("logCaughtError", () => {
+    it("sanitizes URL context when logging an already-caught error", () => {
+        const logError = vi.fn();
+        const logger = { error: logError } as unknown as Logger;
+
+        logCaughtError(
+            logger,
+            "DownloadService:prepare",
+            {
+                channel: "download:prepare",
+                stage: "load",
+                url: "https://user:secret@example.com/share/abc123?token=sensitive#fragment",
+            },
+            new Error("remote down"),
+        );
+
+        expect(logError).toHaveBeenCalledWith(
+            {
+                channel: "download:prepare",
+                stage: "load",
+                url: "https://example.com/share/abc123",
+                message: "remote down",
+            },
+            "DownloadService:prepare",
         );
     });
 });

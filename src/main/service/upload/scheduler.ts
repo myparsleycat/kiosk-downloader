@@ -99,11 +99,15 @@ export class UploadScheduler {
         private readonly repository: UploadRepository,
         private readonly metrics: UploadTransferMetrics,
         private readonly emitUpdate: (collectionId?: string) => Promise<void>,
-        emitProgressUpdate: (collectionId: string, fileIds: Set<string>) => Promise<void>,
+        emitProgressUpdate: (
+            collectionId: string,
+            fileIds: Set<string>,
+            usageDirty: boolean,
+        ) => Promise<void>,
     ) {
         this.progressBatcher = new TransferProgressBatcher(
-            async (collectionId, fileIds) => {
-                await emitProgressUpdate(collectionId, fileIds);
+            async (collectionId, fileIds, usageDirty) => {
+                await emitProgressUpdate(collectionId, fileIds, usageDirty);
                 const activeFileIds = this.collections.get(collectionId)?.activeFileIds;
                 if (!activeFileIds || activeFileIds.size === 0) {
                     this.progressBatcher.deactivate(collectionId);
@@ -125,6 +129,10 @@ export class UploadScheduler {
 
     public hasActiveTransfers() {
         return this.activeCollections.size > 0;
+    }
+
+    public markCollectionProgress(collectionId: string) {
+        this.progressBatcher.markCollection(collectionId);
     }
 
     public getCollectionElapsedMs(collectionId: string) {

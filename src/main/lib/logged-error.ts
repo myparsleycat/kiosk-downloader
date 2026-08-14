@@ -2,6 +2,15 @@ import { toErrorMessage } from "@shared/utils";
 
 import type { Logger } from "../logger";
 
+export function logCaughtError(
+    logger: Logger,
+    where: string,
+    context: Record<string, unknown>,
+    error: unknown,
+) {
+    logger.error({ ...sanitizeLogContext(context), message: toErrorMessage(error) }, where);
+}
+
 export async function withLoggedError<T>(
     logger: Logger,
     where: string,
@@ -11,7 +20,7 @@ export async function withLoggedError<T>(
     try {
         return await fn();
     } catch (error) {
-        logger.error({ ...sanitizeLogContext(context), message: toErrorMessage(error) }, where);
+        logCaughtError(logger, where, context, error);
         throw error;
     }
 }

@@ -1,10 +1,11 @@
 import { REQUEST_POOL_SIZE_DEFAULT } from "@shared/settings";
+import type { TransferDirection, TransferProviderRequestId } from "@shared/settings";
 
 import type { KioskDownloader } from "..";
 
 import { BandwidthLimiter } from "./bandwidth-limiter";
 import { syncMainWindowProgressBar, type OsProgressTransfer } from "./os-progress-bar";
-import { TransferScheduler } from "./transfer-request-pool";
+import { TransferScheduler, type RequestPoolUsageChange } from "./transfer-request-pool";
 import { shutdownSystem } from "./util";
 
 const MIB = 1024 * 1024;
@@ -12,6 +13,9 @@ const MIB = 1024 * 1024;
 export class TransferService {
     private shutdownRequested = false;
     private shutdownScheduling = false;
+    private readonly requestPoolUsageListeners = new Set<
+        (change: RequestPoolUsageChange) => void
+    >();
     private activitySources: {
         listOsProgressTransfers: () => OsProgressTransfer[];
         hasActiveTransfers: () => boolean;
@@ -22,7 +26,11 @@ export class TransferService {
 
     public readonly downloadBandwidth = new BandwidthLimiter();
     public readonly uploadBandwidth = new BandwidthLimiter();
-    public readonly requestPool = new TransferScheduler(REQUEST_POOL_SIZE_DEFAULT);
+    public readonly requestPool = new TransferScheduler(REQUEST_POOL_SIZE_DEFAULT, (change) => {
+        for (const listener of this.requestPoolUsageListeners) {
+            listener(change);
+        }
+    });
 
     public constructor(private readonly kd: KioskDownloader) {}
 
@@ -40,6 +48,37 @@ export class TransferService {
 
     public setRequestPoolSize(size: number) {
         this.requestPool.resize(size);
+    }
+
+    public onRequestPoolUsageChange(listener: (change: RequestPoolUsageChange) => void) {
+        this.requestPoolUsageListeners.add(listener);
+        return () => {
+            this.requestPoolUsageListeners.delete(listener);
+        };
+    }
+
+    public getRequestPoolUsageSum(
+        direction: TransferDirection,
+        providerId: TransferProviderRequestId,
+        collectionIds: string[],
+    ) {
+        let inFlight = 0;
+        let pending = 0;
+        let found = false;
+        for (const collectionId of collectionIds) {
+            const usage = this.requestPool.getCollectionUsage({
+                direction,
+                providerId,
+                collectionId,
+            });
+            if (!usage) {
+                continue;
+            }
+            found = true;
+            inFlight += usage.inFlight;
+            pending += usage.pending;
+        }
+        return found ? { inFlight, pending } : undefined;
     }
 
     public async applyBandwidthLimitsFromSettings() {

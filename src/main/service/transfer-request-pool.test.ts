@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
     TransferRateLimitError,
     TransferScheduler,
+    type RequestPoolUsageChange,
     type TransferRequestContext,
 } from "./transfer-request-pool";
 
@@ -301,6 +302,92 @@ describe("TransferScheduler", () => {
         active.slice(5).forEach((release) => release());
         const releases = await Promise.all(pending);
         releases.forEach((release) => release());
+    });
+
+    it("reports per-collection pool usage while requests are in flight or queued", async () => {
+        const scheduler = new TransferScheduler(2);
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "a"))).toBeNull();
+
+        const first = scheduler.acquire(context("kiosk-download", "a"));
+        const second = scheduler.acquire(context("kiosk-download", "a"));
+        const third = scheduler.acquire(context("kiosk-download", "a"));
+        const other = scheduler.acquire(context("kiosk-download", "b"));
+
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "a"))).toEqual({
+            inFlight: 2,
+            pending: 1,
+        });
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "b"))).toEqual({
+            inFlight: 0,
+            pending: 1,
+        });
+
+        // Round-robin grants the waiting b before a's third request.
+        (await first)();
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "a"))).toEqual({
+            inFlight: 1,
+            pending: 1,
+        });
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "b"))).toEqual({
+            inFlight: 1,
+            pending: 0,
+        });
+
+        (await other)();
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "a"))).toEqual({
+            inFlight: 2,
+            pending: 0,
+        });
+        (await third)();
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "a"))).toEqual({
+            inFlight: 1,
+            pending: 0,
+        });
+        (await second)();
+        expect(scheduler.getCollectionUsage(context("kiosk-download", "a"))).toEqual({
+            inFlight: 0,
+            pending: 0,
+        });
+    });
+
+    it("emits usage changes as requests are queued, granted, and released", async () => {
+        const changes: RequestPoolUsageChange[] = [];
+        const scheduler = new TransferScheduler(4, (change) => changes.push(change));
+        const expected = (collectionId: string) => ({
+            direction: "download" as const,
+            providerId: "kiosk-download" as const,
+            collectionId,
+        });
+
+        const blockers = await reserve(scheduler, context("kiosk-download", "blocker"), 3);
+        changes.length = 0;
+
+        const first = scheduler.acquire(context("kiosk-download", "a"));
+        expect(changes).toEqual([expected("a"), expected("a")]);
+
+        const second = scheduler.acquire(context("kiosk-download", "b"));
+        expect(changes).toEqual([expected("a"), expected("a"), expected("b")]);
+
+        (await first)();
+        expect(changes).toEqual([
+            expected("a"),
+            expected("a"),
+            expected("b"),
+            expected("a"),
+            expected("b"),
+        ]);
+
+        (await second)();
+        expect(changes).toEqual([
+            expected("a"),
+            expected("a"),
+            expected("b"),
+            expected("a"),
+            expected("b"),
+            expected("b"),
+        ]);
+
+        blockers.forEach((release) => release());
     });
 });
 

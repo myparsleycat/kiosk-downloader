@@ -2,6 +2,7 @@ import {
     COLLECTION_INVALID_PASSWORD_ERROR,
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
+import type { TreeEntry, ZipNode } from "@shared/types";
 import { describe, expect, it, vi } from "vitest";
 
 import type { KioskDownloader } from "../..";
@@ -20,6 +21,13 @@ type DownloadServiceInternals = {
         payload: { url: string; password?: string; signal?: AbortSignal },
         asciiFilenames: boolean,
     ) => Promise<LoadedCollection>;
+    indexZipNode: (
+        loaded: LoadedCollection,
+        remoteFileId: string,
+        fileSize: number,
+        zipPassword?: string,
+    ) => Promise<{ entries: TreeEntry[]; indexed: [] }>;
+    preparedDraft: { id: string; loaded: LoadedCollection } | null;
     repository: {
         insertDownload: ReturnType<typeof vi.fn>;
     };
@@ -56,6 +64,44 @@ function loadedCollection(): LoadedCollection {
     };
 }
 
+function loadedZipCollection(): LoadedCollection {
+    const loaded = loadedCollection();
+    return {
+        ...loaded,
+        collection: {
+            ...loaded.collection,
+            tree: {
+                ...loaded.collection.tree,
+                entries: [
+                    {
+                        kind: "zip",
+                        node: {
+                            type: "zip",
+                            id: "zip-remote",
+                            name: "a.zip",
+                            size: 10,
+                            entries: null,
+                        },
+                    },
+                ],
+            },
+        },
+    };
+}
+
+function zipEntries(): TreeEntry[] {
+    return [
+        {
+            kind: "file",
+            node: { type: "file", id: "entry", name: "inside.txt", size: 1 },
+        },
+    ];
+}
+
+function zipNodeEntries(entry: TreeEntry | undefined) {
+    return entry?.kind === "zip" ? (entry.node as ZipNode).entries : undefined;
+}
+
 function createService(passwords: string[] = []) {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const kd = {
@@ -84,6 +130,7 @@ function createService(passwords: string[] = []) {
                 syncMainWindowProgressBar: vi.fn(),
                 refreshPowerSaveBlock: vi.fn(async () => undefined),
                 maybeShutdownAfterTransfer: vi.fn(async () => undefined),
+                onRequestPoolUsageChange: vi.fn(() => () => undefined),
             },
         },
     } as unknown as KioskDownloader;
@@ -222,5 +269,118 @@ describe("DownloadService prepared draft", () => {
             code: "staleDraft",
             message: "Prepared download draft is no longer available.",
         });
+    });
+
+    it("sanitizes share URL credentials when prepare fails", async () => {
+        const { service, logger } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockRejectedValue(
+            new Error("remote down"),
+        );
+
+        await expect(
+            service.prepare({
+                url: `https://user:secret@kio.ac/c/${"a".repeat(22)}?token=sensitive#frag`,
+            }),
+        ).resolves.toMatchObject({ status: "failed", code: "remoteFailure" });
+
+        expect(logger.error).toHaveBeenCalledWith(
+            {
+                channel: "download:prepare",
+                stage: "load",
+                url: `https://kio.ac/c/${"a".repeat(22)}`,
+                message: "remote down",
+            },
+            "DownloadService:prepare",
+        );
+        expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret");
+        expect(JSON.stringify(logger.error.mock.calls)).not.toContain("token=sensitive");
+    });
+
+    it("stores ZIP entries on the prepared draft after indexing", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedZipCollection(),
+        );
+        vi.spyOn(internals(service), "indexZipNode").mockResolvedValue({
+            entries: zipEntries(),
+            indexed: [],
+        });
+        const prepared = await service.prepare({ url: URL });
+        if (prepared.status !== "ready") throw new Error("Expected a prepared draft");
+
+        await expect(
+            service.listZipEntries({ draftId: prepared.draftId, fileId: "zip-remote" }),
+        ).resolves.toEqual({ status: "ready", entries: zipEntries() });
+
+        expect(
+            zipNodeEntries(internals(service).preparedDraft?.loaded.collection.tree.entries[0]),
+        ).toEqual(zipEntries());
+    });
+
+    it("returns a typed stale outcome if the draft is discarded while ZIP indexing is in flight", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedZipCollection(),
+        );
+        let releaseIndexing: () => void = () => undefined;
+        const index = vi.spyOn(internals(service), "indexZipNode").mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    releaseIndexing = () => resolve({ entries: zipEntries(), indexed: [] });
+                }),
+        );
+        const prepared = await service.prepare({ url: URL });
+        if (prepared.status !== "ready") throw new Error("Expected a prepared draft");
+        const firstDraft = internals(service).preparedDraft;
+
+        const pending = service.listZipEntries({
+            draftId: prepared.draftId,
+            fileId: "zip-remote",
+        });
+        await vi.waitFor(() => expect(index).toHaveBeenCalledTimes(1));
+        service.discardDraft({ draftId: prepared.draftId });
+        releaseIndexing();
+
+        await expect(pending).resolves.toEqual({
+            status: "failed",
+            code: "staleDraft",
+            message: "Prepared download draft is no longer available.",
+        });
+        expect(zipNodeEntries(firstDraft?.loaded.collection.tree.entries[0])).toBeNull();
+    });
+
+    it("does not attach ZIP entries to a replacement draft", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedZipCollection(),
+        );
+        let releaseIndexing: () => void = () => undefined;
+        const index = vi.spyOn(internals(service), "indexZipNode").mockImplementation(
+            () =>
+                new Promise((resolve) => {
+                    releaseIndexing = () => resolve({ entries: zipEntries(), indexed: [] });
+                }),
+        );
+        const prepared = await service.prepare({ url: URL });
+        if (prepared.status !== "ready") throw new Error("Expected a prepared draft");
+
+        const pending = service.listZipEntries({
+            draftId: prepared.draftId,
+            fileId: "zip-remote",
+        });
+        await vi.waitFor(() => expect(index).toHaveBeenCalledTimes(1));
+        const replacement = await service.prepare({ url: URL });
+        if (replacement.status !== "ready") throw new Error("Expected a replacement draft");
+        releaseIndexing();
+
+        await expect(pending).resolves.toEqual({
+            status: "failed",
+            code: "staleDraft",
+            message: "Prepared download draft is no longer available.",
+        });
+        expect(internals(service).preparedDraft?.id).toBe(replacement.draftId);
+        expect(
+            zipNodeEntries(internals(service).preparedDraft?.loaded.collection.tree.entries[0]),
+        ).toBeNull();
     });
 });

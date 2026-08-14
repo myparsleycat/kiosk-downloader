@@ -83,6 +83,8 @@ export class KioskDownloader {
             upload: new UploadService(this),
             updater: new Updater(this),
         };
+        this.service.download.bindRequestPoolUsage();
+        this.service.upload.bindRequestPoolUsage();
         this.service.transfer.bindActivitySources({
             listOsProgressTransfers: () => [
                 ...this.service.download.listOsProgressTransfers(),

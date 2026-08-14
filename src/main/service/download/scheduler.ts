@@ -115,6 +115,7 @@ export class DownloadScheduler {
         private readonly emitProgressUpdate: (
             collectionId: string,
             fileIds: Set<string>,
+            usageDirty: boolean,
         ) => Promise<void>,
         private readonly onFileFinalized?: (
             collection: DownloadCollectionRow,
@@ -122,8 +123,8 @@ export class DownloadScheduler {
         ) => void,
     ) {
         this.progressBatcher = new TransferProgressBatcher(
-            async (collectionId, fileIds) => {
-                await this.emitProgressUpdate(collectionId, fileIds);
+            async (collectionId, fileIds, usageDirty) => {
+                await this.emitProgressUpdate(collectionId, fileIds, usageDirty);
                 const activeFileIds = this.activeFilesByCollection.get(collectionId);
                 if (!activeFileIds || activeFileIds.size === 0) {
                     this.progressBatcher.deactivate(collectionId);
@@ -207,6 +208,10 @@ export class DownloadScheduler {
 
     public hasActiveTransfers() {
         return this.fileControllers.size > 0;
+    }
+
+    public markCollectionProgress(collectionId: string) {
+        this.progressBatcher.markCollection(collectionId);
     }
 
     public getCollectionElapsedMs(collectionId: string) {

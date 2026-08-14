@@ -39,8 +39,16 @@ type PendingRequest = {
     onAbort?: () => void;
 };
 
+export type RequestPoolUsageChange = {
+    direction: TransferDirection;
+    providerId: TransferProviderRequestId;
+    collectionId: string;
+};
+
 type CollectionState = {
     key: string;
+    direction: TransferDirection;
+    collectionId: string;
     providerId: TransferProviderRequestId;
     registrationOrder: number;
     lastGranted: number;
@@ -66,7 +74,10 @@ export class TransferScheduler {
     private readonly providerInFlight = new Map<TransferProviderRequestId, number>();
     private readonly collections = new Map<string, CollectionState>();
 
-    public constructor(poolSize: number) {
+    public constructor(
+        poolSize: number,
+        private readonly onUsageChange?: (change: RequestPoolUsageChange) => void,
+    ) {
         this.poolSize = clampPoolSize(poolSize);
     }
 
@@ -125,6 +136,14 @@ export class TransferScheduler {
         return error.state;
     }
 
+    public getCollectionUsage(context: TransferRequestContext) {
+        const collection = this.collections.get(collectionKey(context));
+        if (!collection) {
+            return null;
+        }
+        return { inFlight: collection.inFlight, pending: collection.pending.length };
+    }
+
     /** @deprecated Use runPayload so completion and provider feedback remain atomic. */
     public acquire(context: TransferRequestContext) {
         if (context.signal?.aborted) {
@@ -153,12 +172,14 @@ export class TransferScheduler {
                     collection.pending.splice(index, 1);
                     request.signal?.removeEventListener("abort", request.onAbort!);
                     request.reject(abortReason(request.signal!));
+                    this.onUsageChange?.(usageChange(collection));
                     this.drain();
                 };
                 context.signal.addEventListener("abort", request.onAbort, { once: true });
             }
 
             collection.pending.push(request);
+            this.onUsageChange?.(usageChange(collection));
             this.drain();
         });
     }
@@ -171,6 +192,8 @@ export class TransferScheduler {
     private registerCollection(key: string, context: TransferRequestContext) {
         const collection: CollectionState = {
             key,
+            direction: context.direction,
+            collectionId: context.collectionId,
             providerId: context.providerId,
             registrationOrder: this.nextRegistrationOrder,
             lastGranted: -1,
@@ -201,6 +224,7 @@ export class TransferScheduler {
                 request.signal?.removeEventListener("abort", request.onAbort);
             }
             collection.inFlight += 1;
+            this.onUsageChange?.(usageChange(collection));
             collection.lastGranted = this.nextGrantOrder;
             this.nextGrantOrder += 1;
             this.inFlight += 1;
@@ -216,6 +240,7 @@ export class TransferScheduler {
                 }
                 released = true;
                 collection.inFlight -= 1;
+                this.onUsageChange?.(usageChange(collection));
                 this.inFlight -= 1;
                 this.providerInFlight.set(
                     collection.providerId,
@@ -305,6 +330,14 @@ export class TransferScheduler {
 
 function collectionKey(context: TransferRequestContext) {
     return `${context.direction}\0${context.providerId}\0${context.collectionId}`;
+}
+
+function usageChange(collection: CollectionState): RequestPoolUsageChange {
+    return {
+        direction: collection.direction,
+        providerId: collection.providerId,
+        collectionId: collection.collectionId,
+    };
 }
 
 function validateDirection(context: TransferRequestContext) {

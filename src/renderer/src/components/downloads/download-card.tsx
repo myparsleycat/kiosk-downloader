@@ -1,3 +1,4 @@
+import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-pool-usage";
 import type { DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { isCollectionExpiresNever } from "@shared/download-errors";
@@ -109,6 +110,7 @@ export function DownloadCard({
           <ClockIcon className="size-2.5" />
           {expiresLabel}
         </span>
+        <RequestPoolUsageLabel usage={item.requestPoolUsage} active={status === "downloading"} />
         {collection.passwordProtected && (
           <span className="flex items-center gap-0.5">
             <LockIcon className="size-2.5" />

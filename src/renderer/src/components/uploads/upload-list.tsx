@@ -1,3 +1,4 @@
+import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-pool-usage";
 import { FileTree, type FileTreeError } from "@renderer/components/tree/file-tree";
 import {
   AlertDialog,
@@ -547,6 +548,10 @@ function UploadDetail({
               )}
             </span>
             <span className="flex items-center gap-2 tabular-nums">
+              <RequestPoolUsageLabel
+                usage={item.requestPoolUsage}
+                active={status === "uploading"}
+              />
               {speedLabel && <span className="text-primary">{speedLabel}</span>}
               <span>
                 {formatSize(uploadedBytes)} / {formatSize(totalBytes)}
