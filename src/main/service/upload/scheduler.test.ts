@@ -15,6 +15,96 @@ afterEach(() => {
 });
 
 describe("UploadScheduler", () => {
+    it("shares eight workers fairly across upload collections", async () => {
+        const firstFiles = Array.from({ length: 9 }, (_, index) =>
+            createFile(`first-${index}`, remoteId(index + 1), "collection-1"),
+        );
+        const secondFiles = Array.from({ length: 9 }, (_, index) =>
+            createFile(`second-${index}`, remoteId(index + 100), "collection-2"),
+        );
+        const repository = createRepository([...firstFiles, ...secondFiles]);
+        const api = createApi();
+        const emitUpdate = vi.fn(async () => undefined);
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(),
+            api.value,
+            repository.value,
+            createMetrics(),
+            emitUpdate,
+            vi.fn(async () => undefined),
+        );
+
+        scheduler.registerWorkItems(
+            "collection-1",
+            firstFiles.map((file) => ({ id: file.id, remoteId: file.remoteId })),
+            firstFiles.map((file, index) => createChunk(file, index)),
+        );
+        scheduler.registerWorkItems(
+            "collection-2",
+            secondFiles.map((file) => ({ id: file.id, remoteId: file.remoteId })),
+            secondFiles.map((file, index) => createChunk(file, index)),
+        );
+        await scheduler.schedule();
+
+        await vi.waitFor(() => expect(api.uploadSegment).toHaveBeenCalledTimes(18));
+        const firstEightPaths = vi
+            .mocked(api.uploadSegment)
+            .mock.calls.slice(0, 8)
+            .map(([chunk]) => chunk.relativePath);
+        expect(firstEightPaths.filter((path) => path.startsWith("first-"))).toHaveLength(4);
+        expect(firstEightPaths.filter((path) => path.startsWith("second-"))).toHaveLength(4);
+        expect(firstEightPaths.slice(0, 2)).toEqual([firstFiles[0].path, secondFiles[0].path]);
+        await vi.waitFor(() => expect(emitUpdate).toHaveBeenCalledTimes(2));
+
+        scheduler.destroy();
+    });
+
+    it("runs only the upload payload through the global request pool", async () => {
+        const file = createFile("file-1", remoteId(1));
+        const repository = createRepository([file]);
+        const run = vi.fn(async (_request, task: () => Promise<void>) => task());
+        const uploadSegment = vi.fn(
+            async (
+                chunk: ServerFileMapping,
+                _token: string,
+                _signal: AbortSignal,
+                _onProgress?: (bytes: number) => void,
+                runPayload?: (task: () => Promise<void>) => Promise<void>,
+            ) => {
+                await runPayload?.(async () => undefined);
+                return { length: chunk.length, outcome: "uploaded" as const };
+            },
+        );
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(run),
+            createApi(uploadSegment).value,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        scheduler.registerWorkItems(
+            COLLECTION_ID,
+            [{ id: file.id, remoteId: file.remoteId }],
+            [createChunk(file, 0)],
+        );
+        await scheduler.schedule();
+
+        await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        expect(run).toHaveBeenCalledWith(
+            expect.objectContaining({
+                collectionId: COLLECTION_ID,
+                direction: "upload",
+                providerId: "kiosk-upload",
+                signal: expect.any(AbortSignal),
+            }),
+            expect.any(Function),
+        );
+
+        scheduler.destroy();
+    });
+
     it("completes each single-chunk file once and emits only one terminal snapshot", async () => {
         const fileCount = 1_000;
         const files = Array.from({ length: fileCount }, (_, index) =>
@@ -232,7 +322,9 @@ describe("UploadScheduler", () => {
 });
 
 function createRepository(files: UploadFileRow[]) {
-    const collection = createCollection();
+    const collections = [...new Set(files.map((file) => file.collectionId))].map((collectionId) =>
+        createCollection(collectionId),
+    );
     const completeFile = vi.fn((fileId: string) => {
         const file = files.find((candidate) => candidate.id === fileId);
         if (file) {
@@ -243,9 +335,12 @@ function createRepository(files: UploadFileRow[]) {
     const completeUpload = vi.fn();
     const repository = {
         getCollectionElapsedMs: vi.fn(() => 0),
-        listRunnableCollections: vi.fn(() => [collection]),
+        listRunnableCollections: vi.fn(() => collections),
         listCompletedChunkIndexes: vi.fn(() => []),
-        getCollection: vi.fn(() => collection),
+        getCollection: vi.fn(
+            (collectionId: string) =>
+                collections.find((collection) => collection.id === collectionId) ?? null,
+        ),
         getFile: vi.fn((fileId: string) => files.find((file) => file.id === fileId) ?? null),
         markFileStatus: vi.fn(),
         markCollectionStatus: vi.fn(),
@@ -271,6 +366,7 @@ function createApi(
         token: string,
         signal: AbortSignal,
         onProgress?: (bytes: number) => void,
+        runPayload?: (task: () => Promise<void>) => Promise<void>,
     ) => Promise<{ length: number; outcome: "exists" | "conflict" | "uploaded" }> = vi.fn(
         async (chunk: ServerFileMapping) => ({
             length: chunk.length,
@@ -308,13 +404,12 @@ function createMetrics() {
     } as unknown as UploadTransferMetrics;
 }
 
-function createKioskDownloader() {
+function createKioskDownloader(
+    requestPoolRun = vi.fn(async (_request, task: () => Promise<void>) => task()),
+) {
     return {
         setting: {
             get: vi.fn(async (key: string) => {
-                if (key === "transfer.segmentPoolSize") {
-                    return 8;
-                }
                 if (key === "transfer.uploadMaxChunkRetries") {
                     return 2;
                 }
@@ -323,6 +418,7 @@ function createKioskDownloader() {
         },
         service: {
             transfer: {
+                requestPool: { runPayload: requestPoolRun },
                 refreshPowerSaveBlock: vi.fn(async () => undefined),
                 maybeShutdownAfterTransfer: vi.fn(async () => undefined),
             },
@@ -331,9 +427,9 @@ function createKioskDownloader() {
     } as unknown as KioskDownloader;
 }
 
-function createCollection(): UploadCollectionRow {
+function createCollection(collectionId = COLLECTION_ID): UploadCollectionRow {
     return {
-        id: COLLECTION_ID,
+        id: collectionId,
         name: "collection",
         description: "",
         passwordPlain: null,
@@ -355,10 +451,14 @@ function createCollection(): UploadCollectionRow {
     };
 }
 
-function createFile(id: string, remoteIdValue: string): UploadFileRow {
+function createFile(
+    id: string,
+    remoteIdValue: string,
+    collectionId = COLLECTION_ID,
+): UploadFileRow {
     return {
         id,
-        collectionId: COLLECTION_ID,
+        collectionId,
         remoteId: remoteIdValue,
         path: `${id}.txt`,
         name: `${id}.txt`,

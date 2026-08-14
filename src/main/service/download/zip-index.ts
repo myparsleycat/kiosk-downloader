@@ -107,6 +107,7 @@ async function verifyZipPassword(entries: Entry[], password: string | undefined)
 
 export async function indexZipFromSegments(options: {
     kd: KioskDownloader;
+    collectionId: string;
     shareId: string;
     remoteFileId: string;
     segments: SegmentDescriptor[];
@@ -128,6 +129,7 @@ export async function indexZipFromSegments(options: {
 
     const rangeReader = new ZipRangeReader({
         kd: options.kd,
+        collectionId: options.collectionId,
         segments: options.segments,
         segmentSize: options.segmentSize,
         fileSize: options.fileSize,
@@ -172,6 +174,7 @@ export async function indexZipFromSegments(options: {
 
 export async function openZipFileEntry(options: {
     kd: KioskDownloader;
+    collectionId: string;
     segments: SegmentDescriptor[];
     segmentSize: number;
     fileSize: number;
@@ -181,6 +184,7 @@ export async function openZipFileEntry(options: {
 }): Promise<{ entry: FileEntry; zipReader: ZipReader<null>; rangeReader: ZipRangeReader }> {
     const rangeReader = new ZipRangeReader({
         kd: options.kd,
+        collectionId: options.collectionId,
         segments: options.segments,
         segmentSize: options.segmentSize,
         fileSize: options.fileSize,

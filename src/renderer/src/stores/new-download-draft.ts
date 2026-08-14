@@ -10,17 +10,21 @@ import {
 } from "@shared/tree-rename";
 import { create } from "zustand";
 
+export type DownloadPreparationState =
+    | { status: "idle" }
+    | { status: "preparing" }
+    | { status: "passwordRequired"; invalid: boolean }
+    | { status: "ready"; draftId: string; collection: Collection }
+    | { status: "error"; message: string };
+
 type NewDownloadDraftState = {
     url: string;
     password: string;
     savePath: string;
     createCollectionSubfolder: boolean;
     asciiFilenames: boolean;
-    passwordRequired: boolean | null;
-    passwordInvalid: boolean;
-    collection: Collection | null;
+    preparation: DownloadPreparationState;
     selected: Set<string>;
-    probedShareId: string | null;
     settingsHydrated: boolean;
     zipPasswords: Record<string, string>;
     zipLoadingPaths: Set<string>;
@@ -33,12 +37,9 @@ type NewDownloadDraftActions = {
     setPassword: (password: string) => void;
     setSavePath: (savePath: string) => void;
     setCreateCollectionSubfolder: (createCollectionSubfolder: boolean) => void;
-    setPasswordRequired: (passwordRequired: boolean | null) => void;
-    setPasswordInvalid: (passwordInvalid: boolean) => void;
-    setCollection: (collection: Collection | null) => void;
+    setPreparation: (preparation: DownloadPreparationState) => void;
     setSelected: (selected: Set<string>) => void;
     updateSelected: (updater: (selected: Set<string>) => Set<string>) => void;
-    setProbedShareId: (probedShareId: string | null) => void;
     setZipPassword: (fileId: string, password: string) => void;
     setZipLoading: (path: string, loading: boolean) => void;
     renameNode: (
@@ -46,7 +47,7 @@ type NewDownloadDraftActions = {
         newName: string,
         displayTree: Collection["tree"],
     ) => string | null;
-    clearProbeState: () => void;
+    clearPreparation: () => void;
     resetDraft: () => void;
     hydrateSettings: () => Promise<void>;
 };
@@ -59,11 +60,8 @@ const draftDefaults = {
     savePath: "",
     createCollectionSubfolder: true,
     asciiFilenames: false,
-    passwordRequired: null,
-    passwordInvalid: false,
-    collection: null,
+    preparation: { status: "idle" },
     selected: new Set<string>(),
-    probedShareId: null,
     settingsHydrated: false,
     zipPasswords: {},
     zipLoadingPaths: new Set<string>(),
@@ -81,15 +79,15 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
 
     setCreateCollectionSubfolder: (createCollectionSubfolder) => set({ createCollectionSubfolder }),
 
-    setPasswordRequired: (passwordRequired) => set({ passwordRequired }),
-
-    setPasswordInvalid: (passwordInvalid) => set({ passwordInvalid }),
-
-    setCollection: (collection) =>
+    setPreparation: (preparation) =>
         set((state) => ({
-            collection,
+            preparation,
             renames:
-                collection === null || collection.shareId !== state.collection?.shareId
+                preparation.status !== "ready" ||
+                preparation.collection.shareId !==
+                    (state.preparation.status === "ready"
+                        ? state.preparation.collection.shareId
+                        : undefined)
                     ? {}
                     : state.renames,
         })),
@@ -97,8 +95,6 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
     setSelected: (selected) => set({ selected }),
 
     updateSelected: (updater) => set({ selected: updater(get().selected) }),
-
-    setProbedShareId: (probedShareId) => set({ probedShareId }),
 
     setZipPassword: (fileId, password) =>
         set({ zipPasswords: { ...get().zipPasswords, [fileId]: password } }),
@@ -114,7 +110,8 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
     },
 
     renameNode: (displayPath, newName, displayTree) => {
-        const collection = get().collection;
+        const preparation = get().preparation;
+        const collection = preparation.status === "ready" ? preparation.collection : null;
         if (!collection) {
             return "컬렉션이 없습니다.";
         }
@@ -147,14 +144,11 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
         return null;
     },
 
-    clearProbeState: () =>
+    clearPreparation: () =>
         set({
             password: "",
-            passwordRequired: null,
-            passwordInvalid: false,
-            collection: null,
+            preparation: { status: "idle" },
             selected: new Set(),
-            probedShareId: null,
             zipPasswords: {},
             zipLoadingPaths: new Set(),
             renames: {},
@@ -164,11 +158,8 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
         set({
             url: "",
             password: "",
-            passwordRequired: null,
-            passwordInvalid: false,
-            collection: null,
+            preparation: { status: "idle" },
             selected: new Set(),
-            probedShareId: null,
             zipPasswords: {},
             zipLoadingPaths: new Set(),
             renames: {},

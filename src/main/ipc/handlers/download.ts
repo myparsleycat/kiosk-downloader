@@ -1,8 +1,7 @@
 import type {
     CreateDownloadPayload,
     ListZipEntriesPayload,
-    LoadCollectionPayload,
-    ProbeCollectionPayload,
+    PrepareDownloadPayload,
     ResumePayload,
 } from "@shared/types";
 
@@ -11,14 +10,14 @@ import type { KioskDownloader } from "../..";
 import { rh } from "../helper";
 
 export function registerDownloadHandlers(kd: KioskDownloader) {
-    rh("download:loadCollection", (payload: LoadCollectionPayload) =>
-        kd.service.download.loadCollection(payload),
+    rh("download:discardDraft", (payload: { draftId?: string }) =>
+        kd.service.download.discardDraft(payload),
+    );
+    rh("download:prepare", (payload: PrepareDownloadPayload) =>
+        kd.service.download.prepare(payload),
     );
     rh("download:listZipEntries", (payload: ListZipEntriesPayload) =>
         kd.service.download.listZipEntries(payload),
-    );
-    rh("download:probeCollection", (payload: ProbeCollectionPayload) =>
-        kd.service.download.probeCollection(payload),
     );
     rh("download:create", (payload: CreateDownloadPayload) => kd.service.download.create(payload));
     rh("download:list", () => kd.service.download.list());

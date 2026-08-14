@@ -36,9 +36,9 @@ import {
   COLLECTION_PASSWORD_LIST_MAX,
   INFLATE_BUFFER_BYTES_DEFAULT,
   INFLATE_BUFFER_BYTES_OPTIONS,
-  SEGMENT_POOL_SIZE_DEFAULT,
-  SEGMENT_POOL_SIZE_MAX,
-  SEGMENT_POOL_SIZE_MIN,
+  REQUEST_POOL_SIZE_DEFAULT,
+  REQUEST_POOL_SIZE_MAX,
+  REQUEST_POOL_SIZE_MIN,
   SETTING_LOG_LEVELS,
   SETTING_THEMES,
   type SettingKey,
@@ -83,7 +83,7 @@ const SETTING_KEYS = [
   "general.collectionPasswordList",
   "general.logLevel",
   "general.theme",
-  "transfer.segmentPoolSize",
+  "transfer.requestPoolSize",
   "transfer.maxChunkRetries",
   "transfer.uploadMaxChunkRetries",
   "transfer.streamWriteBatchBytes",
@@ -111,7 +111,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.collectionPasswordList": [],
   "general.logLevel": "error",
   "general.theme": "system",
-  "transfer.segmentPoolSize": SEGMENT_POOL_SIZE_DEFAULT,
+  "transfer.requestPoolSize": REQUEST_POOL_SIZE_DEFAULT,
   "transfer.maxChunkRetries": CHUNK_RETRY_DEFAULT,
   "transfer.uploadMaxChunkRetries": UPLOAD_CHUNK_RETRY_DEFAULT,
   "transfer.streamWriteBatchBytes": STREAM_WRITE_BATCH_BYTES_DEFAULT,
@@ -498,14 +498,14 @@ export function SettingsView() {
 
         <Section icon={<ArrowLeftRightIcon className="size-3.5" />} title="전송 큐">
           <SettingRow
-            title="세그먼트 풀 크기"
-            description="다운로드·업로드가 공유하는 세그먼트 풀의 최대 크기입니다. 업로드 동시 세그먼트는 별도 제한이 적용됩니다."
+            title="요청 풀 크기"
+            description="모든 업로드·다운로드의 실제 데이터 전송 요청이 공유하는 동시 실행 상한입니다."
             control={
               <NumberSetting
-                value={settings["transfer.segmentPoolSize"]}
-                min={SEGMENT_POOL_SIZE_MIN}
-                max={SEGMENT_POOL_SIZE_MAX}
-                onChange={(value) => void setSetting("transfer.segmentPoolSize", value)}
+                value={settings["transfer.requestPoolSize"]}
+                min={REQUEST_POOL_SIZE_MIN}
+                max={REQUEST_POOL_SIZE_MAX}
+                onChange={(value) => void setSetting("transfer.requestPoolSize", value)}
               />
             }
           />

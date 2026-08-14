@@ -91,6 +91,7 @@ export class UploadScheduler {
     private readonly progressBatcher: TransferProgressBatcher;
     private targetWorkers = 0;
     private runningWorkers = 0;
+    private lastDequeuedCollectionId: string | null = null;
 
     public constructor(
         private readonly kd: KioskDownloader,
@@ -166,7 +167,6 @@ export class UploadScheduler {
 
     public async schedule() {
         const settings = await this.getSettings();
-        this.resize(settings.maxWorkers);
         for (const collection of this.repository.listRunnableCollections()) {
             const state = this.collections.get(collection.id) ?? this.restoreCollection(collection);
             if (!state || state.failed || state.completing) {
@@ -183,6 +183,7 @@ export class UploadScheduler {
                 this.enqueueFile(fileId);
             }
         }
+        this.resize(settings.maxWorkers);
         this.wakeWaiters();
     }
 
@@ -424,7 +425,7 @@ export class UploadScheduler {
     }
 
     private resize(maxWorkers: number) {
-        this.targetWorkers = maxWorkers;
+        this.targetWorkers = maxWorkers + Math.max(0, this.collections.size - 1);
         while (this.runningWorkers < this.targetWorkers) {
             this.runningWorkers += 1;
             void this.workerLoop(this.runningWorkers);
@@ -434,7 +435,7 @@ export class UploadScheduler {
     private async workerLoop(workerId: number) {
         try {
             while (workerId <= this.targetWorkers) {
-                const chunk = this.queue.shift();
+                const chunk = this.takeNextChunk();
                 if (!chunk) {
                     await this.waitForWork();
                     continue;
@@ -524,6 +525,16 @@ export class UploadScheduler {
                             this.markProgress(chunk.collectionId, chunk.localFileId);
                             resetStallTimer();
                         },
+                        (task) =>
+                            this.kd.service.transfer.requestPool.runPayload(
+                                {
+                                    collectionId: chunk.collectionId,
+                                    direction: "upload",
+                                    providerId: "kiosk-upload",
+                                    signal: attemptController.signal,
+                                },
+                                task,
+                            ),
                     );
                     clearTimeout(stallTimer);
                     file.controller.signal.removeEventListener("abort", onAbort);
@@ -623,6 +634,25 @@ export class UploadScheduler {
             collection.inFlight -= 1;
             await this.afterChunkSettled(chunk.collectionId, chunk.localFileId);
         }
+    }
+
+    private takeNextChunk() {
+        if (this.queue.length < 2) {
+            const chunk = this.queue.shift();
+            this.lastDequeuedCollectionId = chunk?.collectionId ?? null;
+            return chunk;
+        }
+        const collectionIds = [...new Set(this.queue.map((chunk) => chunk.collectionId))];
+        const previousIndex = this.lastDequeuedCollectionId
+            ? collectionIds.indexOf(this.lastDequeuedCollectionId)
+            : -1;
+        const nextCollectionId = collectionIds[(previousIndex + 1) % collectionIds.length];
+        const selectedIndex = this.queue.findIndex(
+            (chunk) => chunk.collectionId === nextCollectionId,
+        );
+        const chunk = this.queue.splice(selectedIndex, 1)[0];
+        this.lastDequeuedCollectionId = chunk.collectionId;
+        return chunk;
     }
 
     private async afterChunkSettled(collectionId: string, fileId: string) {
@@ -874,10 +904,7 @@ export class UploadScheduler {
 
     private async getSettings(): Promise<SchedulerSettings> {
         return {
-            maxWorkers: Math.min(
-                MAX_UPLOAD_IN_FLIGHT_SEGMENTS,
-                await this.kd.setting.get("transfer.segmentPoolSize"),
-            ),
+            maxWorkers: MAX_UPLOAD_IN_FLIGHT_SEGMENTS,
             maxChunkRetries: await this.kd.setting.get("transfer.uploadMaxChunkRetries"),
         };
     }

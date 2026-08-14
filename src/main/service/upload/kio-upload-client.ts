@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import { uuidBytesToShareId } from "@shared/share-url";
 import type { UploadOptions } from "@shared/types";
 import { decode, encode } from "cbor-x";
+import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
 import type {
@@ -281,6 +282,8 @@ export function buildSegmentWorkItems(
 }
 
 export class KioUploadClient {
+    private readonly controlPlane = pLimit(4);
+
     public constructor(private readonly kd: KioskDownloader) {}
 
     public async createCollection(
@@ -353,6 +356,7 @@ export class KioUploadClient {
         uploadToken: string,
         signal: AbortSignal,
         onProgress?: (transferredBytes: number) => void,
+        runPayload: (task: () => Promise<void>) => Promise<void> = (task) => task(),
     ): Promise<{ length: number; outcome: "exists" | "conflict" | "uploaded" }> {
         const bytes = await readSegmentBytes(item);
         const hash = crypto.createHash("sha256").update(bytes).digest();
@@ -413,7 +417,7 @@ export class KioUploadClient {
             );
         }
 
-        await this.edgePut(url, edgeToken, bytes, signal, onProgress);
+        await runPayload(() => this.edgePut(url, edgeToken, bytes, signal, onProgress));
         return { length: item.length, outcome: "uploaded" };
     }
 
@@ -431,7 +435,7 @@ export class KioUploadClient {
         }
 
         onProgress?.(0);
-        const response = await this.kd.http.request(putUrl, {
+        const response = await this.kd.http.payloadRequest(putUrl, {
             method: "PUT",
             body: createUploadStream(bytes, this.kd.service.transfer.uploadBandwidth, signal),
             headers: {
@@ -440,7 +444,6 @@ export class KioUploadClient {
             },
             signal,
             timeout: false,
-            retry: { limit: 0 },
             onUploadProgress: (progress) => {
                 onProgress?.(progress.transferredBytes);
             },
@@ -492,36 +495,38 @@ export class KioUploadClient {
         bodyObj: unknown,
         headers: Record<string, string> = {},
     ): Promise<CborResponse> {
-        const init: Record<string, unknown> = {
-            method,
-            headers: {
-                "content-type": "application/cbor",
-                accept: "application/cbor",
-                ...headers,
-            },
-        };
+        return await this.controlPlane(async () => {
+            const init: Record<string, unknown> = {
+                method,
+                headers: {
+                    "content-type": "application/cbor",
+                    accept: "application/cbor",
+                    ...headers,
+                },
+            };
 
-        if (bodyObj !== undefined) {
-            init.body = Buffer.from(encode(bodyObj)) as BodyInit;
-        }
-
-        const response = await this.kd.http.request(url, init);
-        const raw = Buffer.from(await response.arrayBuffer());
-
-        let decoded: unknown = null;
-        if (raw.length > 0) {
-            try {
-                decoded = decode(raw);
-            } catch {
-                decoded = null;
+            if (bodyObj !== undefined) {
+                init.body = Buffer.from(encode(bodyObj)) as BodyInit;
             }
-        }
 
-        return {
-            status: response.status,
-            raw,
-            body: decoded,
-        };
+            const response = await this.kd.http.controlRequest(url, init);
+            const raw = Buffer.from(await response.arrayBuffer());
+
+            let decoded: unknown = null;
+            if (raw.length > 0) {
+                try {
+                    decoded = decode(raw);
+                } catch {
+                    decoded = null;
+                }
+            }
+
+            return {
+                status: response.status,
+                raw,
+                body: decoded,
+            };
+        });
     }
 }
 

@@ -9,6 +9,7 @@ export type ZipRangeReaderOptions = {
     segments: SegmentDescriptor[];
     segmentSize: number;
     fileSize: number;
+    collectionId: string;
     signal?: AbortSignal;
 };
 
@@ -18,6 +19,7 @@ export class ZipRangeReader {
     private readonly segmentSize: number;
     private readonly fileSize: number;
     private readonly signal?: AbortSignal;
+    private readonly collectionId: string;
 
     public constructor(options: ZipRangeReaderOptions) {
         this.kd = options.kd;
@@ -25,6 +27,7 @@ export class ZipRangeReader {
         this.segmentSize = options.segmentSize;
         this.fileSize = options.fileSize;
         this.signal = options.signal;
+        this.collectionId = options.collectionId;
     }
 
     public get size() {
@@ -109,6 +112,7 @@ export class ZipRangeReader {
         return streamSegmentBytes(this.kd, segment, localStart, localEnd, signal, {
             label: "ZIP segment range",
             mode: "slice",
+            collectionId: this.collectionId,
         });
     }
 }

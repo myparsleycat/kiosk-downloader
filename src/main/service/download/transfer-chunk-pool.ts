@@ -7,6 +7,7 @@ import type { DownloadRepository } from "./repository";
 import type { FileDownloadOutcome } from "./segment-pool";
 import type { DownloadChunkRow, DownloadCollectionRow, DownloadFileRow } from "./types";
 
+import { TransferRateLimitError } from "../transfer-request-pool";
 import {
     SLOW_CHUNK_MAX_RECONNECTS,
     SLOW_CHUNK_THRESHOLD_RATIO,
@@ -17,7 +18,6 @@ import {
 } from "./slow-chunk-monitor";
 import {
     TRANSFER_RATE_LIMIT_ERROR,
-    TransferRateLimitError,
     parseTransferRetryAfterMs,
     type TransferItApiClient,
 } from "./transfer-it-api-client";
@@ -46,6 +46,7 @@ type TransferWorkItem = {
 
 type TransferSession = {
     id: string;
+    collectionId: string;
     registration: TransferFileRegistration;
     remainingChunks: number;
     inFlightChunks: number;
@@ -64,6 +65,8 @@ type TransferPoolDeps = {
     onProgress: (collectionId: string, fileId: string) => void;
 };
 
+class TransferCdnUrlExpiredError extends Error {}
+
 function compareWorkItems(a: TransferWorkItem, b: TransferWorkItem) {
     if (a.priority !== b.priority) {
         return a.priority - b.priority;
@@ -72,20 +75,12 @@ function compareWorkItems(a: TransferWorkItem, b: TransferWorkItem) {
 }
 
 export class TransferChunkPool {
-    private static readonly MAX_WORKERS = 4;
-    private static readonly SUCCESSES_PER_INCREASE = 2;
-    private static readonly RATE_LIMIT_DELAYS_MS = [2000, 5000, 10000] as const;
-
     private readonly sessions = new Map<string, TransferSession>();
     private readonly queue: TransferWorkItem[] = [];
     private nextOrder = 0;
-    private targetWorkers = 1;
+    private targetWorkers = 0;
     private runningWorkers = 0;
-    private successesAtCurrentConcurrency = 0;
-    private consecutiveRateLimits = 0;
-    private cooldownUntil = 0;
-    private cooldownWakeTimer: ReturnType<typeof setTimeout> | null = null;
-    private readonly waiters: Array<() => void> = [];
+    private lastClaimedCollectionId: string | null = null;
     private readonly slowChunkMonitor = new SlowChunkMonitor();
 
     public constructor(private readonly deps: TransferPoolDeps) {}
@@ -110,16 +105,27 @@ export class TransferChunkPool {
         return this.sessions.has(fileId);
     }
 
-    public start() {
+    public start(maxWorkers: number) {
+        this.targetWorkers = Math.max(1, Math.floor(maxWorkers));
         this.ensureWorkers();
     }
 
     private ensureWorkers() {
-        while (this.runningWorkers < this.targetWorkers) {
+        const activeCollectionCount = new Set(
+            [...this.sessions.values()]
+                .filter((session) => !session.failed && !session.aborted)
+                .map((session) => session.collectionId),
+        ).size;
+        const targetWorkers = Math.min(
+            this.targetWorkers === 0
+                ? 0
+                : this.targetWorkers + Math.max(0, activeCollectionCount - 1),
+            this.queue.length + this.runningWorkers,
+        );
+        while (this.runningWorkers < targetWorkers) {
             this.runningWorkers += 1;
-            void this.workerLoop(this.runningWorkers);
+            void this.workerLoop();
         }
-        this.wakeWaiters();
     }
 
     public register(registration: TransferFileRegistration) {
@@ -130,6 +136,7 @@ export class TransferChunkPool {
         return new Promise<FileDownloadOutcome>((resolve) => {
             const session: TransferSession = {
                 id: registration.file.id,
+                collectionId: registration.collection.id,
                 registration,
                 remainingChunks: registration.chunks.length,
                 inFlightChunks: 0,
@@ -145,19 +152,18 @@ export class TransferChunkPool {
                 registration.file.downloadedBytes,
             );
 
-            for (const chunk of registration.chunks) {
-                this.queue.push({
+            this.queue.push(
+                ...registration.chunks.map((chunk, index) => ({
                     priority: registration.priority,
-                    order: this.nextOrder,
+                    order: this.nextOrder + index,
                     sessionId: session.id,
                     chunk,
-                });
-                this.nextOrder += 1;
-            }
-
+                })),
+            );
             this.queue.sort(compareWorkItems);
+            this.nextOrder += registration.chunks.length;
             this.deps.onChunkSettled();
-            this.wakeWaiters();
+            this.ensureWorkers();
         });
     }
 
@@ -170,40 +176,49 @@ export class TransferChunkPool {
         session.aborted = true;
         this.removeSessionItemsFromQueue(fileId);
         this.tryCompleteSession(session);
-        this.wakeWaiters();
     }
 
     private compareAndClaimNext() {
-        if (this.queue.length === 0 || Date.now() < this.cooldownUntil) {
-            return null;
-        }
-
-        for (let index = 0; index < this.queue.length; index += 1) {
-            const item = this.queue[index];
-            if (!item) {
-                continue;
-            }
-
+        while (this.queue.length > 0) {
+            const availableCollectionIds = [
+                ...new Set(
+                    this.queue.flatMap((candidate) => {
+                        const candidateSession = this.sessions.get(candidate.sessionId);
+                        return candidateSession &&
+                            !candidateSession.failed &&
+                            !candidateSession.aborted
+                            ? [candidateSession.collectionId]
+                            : [];
+                    }),
+                ),
+            ];
+            const previousIndex = this.lastClaimedCollectionId
+                ? availableCollectionIds.indexOf(this.lastClaimedCollectionId)
+                : -1;
+            const nextCollectionId =
+                availableCollectionIds[(previousIndex + 1) % availableCollectionIds.length];
+            const nextCollectionIndex = this.queue.findIndex((candidate) => {
+                const candidateSession = this.sessions.get(candidate.sessionId);
+                return candidateSession?.collectionId === nextCollectionId;
+            });
+            const item = this.queue.splice(nextCollectionIndex < 0 ? 0 : nextCollectionIndex, 1)[0];
             const session = this.sessions.get(item.sessionId);
             if (!session || session.failed || session.aborted) {
                 continue;
             }
-
-            this.queue.splice(index, 1);
             session.inFlightChunks += 1;
-            if (session.remainingChunks <= 1) {
-                this.deps.onChunkSettled();
-            }
+            this.lastClaimedCollectionId = session.collectionId;
             return { item, session };
         }
-
         return null;
     }
 
     private removeSessionItemsFromQueue(sessionId: string) {
-        const remaining = this.queue.filter((item) => item.sessionId !== sessionId);
-        this.queue.length = 0;
-        this.queue.push(...remaining);
+        for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+            if (this.queue[index].sessionId === sessionId) {
+                this.queue.splice(index, 1);
+            }
+        }
     }
 
     private tryCompleteSession(session: TransferSession) {
@@ -217,14 +232,6 @@ export class TransferChunkPool {
         this.sessions.delete(session.id);
         if (session.failed) {
             session.resolve("failed");
-            if (this.sessions.size === 0) {
-                this.consecutiveRateLimits = 0;
-                this.cooldownUntil = 0;
-                if (this.cooldownWakeTimer) {
-                    clearTimeout(this.cooldownWakeTimer);
-                    this.cooldownWakeTimer = null;
-                }
-            }
             return;
         }
         if (session.aborted) {
@@ -234,151 +241,63 @@ export class TransferChunkPool {
         session.resolve("completed");
     }
 
-    private wakeWaiters() {
-        const waiters = this.waiters.splice(0, this.waiters.length);
-        for (const wake of waiters) {
-            wake();
-        }
-    }
+    private async workerLoop() {
+        try {
+            while (true) {
+                const claimed = this.compareAndClaimNext();
+                if (!claimed) {
+                    return;
+                }
 
-    private waitForWork() {
-        return new Promise<void>((resolve) => {
-            this.waiters.push(resolve);
-        });
-    }
-
-    private async workerLoop(workerId: number) {
-        while (workerId <= this.targetWorkers) {
-            const claimed = this.compareAndClaimNext();
-            if (!claimed) {
-                await this.waitForWork();
-                continue;
-            }
-
-            const { item, session } = claimed;
-            try {
-                if (session.aborted || session.registration.controller.signal.aborted) {
-                    session.aborted = true;
-                } else if (!session.failed) {
-                    const completed = await this.processChunk(session, item.chunk, workerId);
-                    if (completed) {
-                        session.remainingChunks = Math.max(0, session.remainingChunks - 1);
-                        this.recordChunkSuccess();
+                const { item, session } = claimed;
+                try {
+                    if (session.aborted || session.registration.controller.signal.aborted) {
+                        session.aborted = true;
+                    } else if (!session.failed) {
+                        const completed = await this.processChunk(session, item.chunk);
+                        if (completed) {
+                            session.remainingChunks = Math.max(0, session.remainingChunks - 1);
+                        }
                     }
+                } catch (error) {
+                    if (session.failed) {
+                        // Another in-flight chunk already failed this session.
+                    } else if (
+                        isAbortError(error) ||
+                        session.registration.controller.signal.aborted ||
+                        session.aborted
+                    ) {
+                        session.aborted = true;
+                    } else {
+                        session.failed = true;
+                        this.removeSessionItemsFromQueue(session.id);
+                        const message = toErrorMessage(error);
+                        this.deps.repository.markFileStatus(session.id, "error", message);
+                        this.deps.kd.logger.error(
+                            {
+                                stage: "transfer-chunk",
+                                fileId: session.id,
+                                chunkIndex: item.chunk.chunkIndex,
+                                message,
+                            },
+                            "TransferChunkPool:processChunk",
+                        );
+                    }
+                } finally {
+                    session.inFlightChunks = Math.max(0, session.inFlightChunks - 1);
+                    this.tryCompleteSession(session);
+                    this.deps.onChunkSettled();
                 }
-            } catch (error) {
-                if (session.failed) {
-                    // Another in-flight chunk already failed this session.
-                } else if (
-                    isAbortError(error) ||
-                    session.registration.controller.signal.aborted ||
-                    session.aborted
-                ) {
-                    session.aborted = true;
-                } else {
-                    session.failed = true;
-                    this.removeSessionItemsFromQueue(session.id);
-                    const message = toErrorMessage(error);
-                    this.deps.repository.markFileStatus(session.id, "error", message);
-                    this.deps.kd.logger.error(
-                        {
-                            stage: "transfer-chunk",
-                            fileId: session.id,
-                            chunkIndex: item.chunk.chunkIndex,
-                            message,
-                        },
-                        "TransferChunkPool:processChunk",
-                    );
-                }
-            } finally {
-                session.inFlightChunks = Math.max(0, session.inFlightChunks - 1);
-                this.tryCompleteSession(session);
-                this.deps.onChunkSettled();
             }
+        } finally {
+            this.runningWorkers -= 1;
+            this.ensureWorkers();
         }
-
-        this.runningWorkers = Math.max(0, this.runningWorkers - 1);
-        this.ensureWorkers();
-    }
-
-    private recordChunkSuccess() {
-        if (Date.now() >= this.cooldownUntil) {
-            this.consecutiveRateLimits = 0;
-        }
-        if (
-            Date.now() < this.cooldownUntil ||
-            this.targetWorkers >= TransferChunkPool.MAX_WORKERS
-        ) {
-            return;
-        }
-        this.successesAtCurrentConcurrency += 1;
-        if (this.successesAtCurrentConcurrency < TransferChunkPool.SUCCESSES_PER_INCREASE) {
-            return;
-        }
-        this.successesAtCurrentConcurrency = 0;
-        this.targetWorkers += 1;
-        this.deps.kd.logger.info(
-            {
-                channel: "transfer-download",
-                currentWorkers: this.targetWorkers,
-                maxWorkers: TransferChunkPool.MAX_WORKERS,
-            },
-            "TransferChunkPool:increaseConcurrency",
-        );
-        this.ensureWorkers();
-    }
-
-    private registerRateLimit(error: TransferRateLimitError) {
-        const now = Date.now();
-        const isNewEpisode = now >= this.cooldownUntil;
-        if (isNewEpisode) {
-            this.consecutiveRateLimits += 1;
-            this.targetWorkers = 1;
-            this.successesAtCurrentConcurrency = 0;
-            const delayMs = Math.max(
-                TransferChunkPool.RATE_LIMIT_DELAYS_MS[
-                    Math.min(
-                        this.consecutiveRateLimits - 1,
-                        TransferChunkPool.RATE_LIMIT_DELAYS_MS.length - 1,
-                    )
-                ],
-                error.retryAfterMs ?? 0,
-            );
-            this.cooldownUntil = now + delayMs;
-            if (this.cooldownWakeTimer) {
-                clearTimeout(this.cooldownWakeTimer);
-            }
-            this.cooldownWakeTimer = setTimeout(() => {
-                this.cooldownWakeTimer = null;
-                this.wakeWaiters();
-            }, delayMs);
-        }
-        return {
-            consecutiveRateLimits: this.consecutiveRateLimits,
-            cooldownMs: Math.max(0, this.cooldownUntil - now),
-            isNewEpisode,
-        };
-    }
-
-    private requeueChunk(session: TransferSession, chunk: DownloadChunkRow) {
-        if (session.failed || session.aborted || session.registration.controller.signal.aborted) {
-            return;
-        }
-        this.queue.push({
-            priority: session.registration.priority,
-            order: this.nextOrder,
-            sessionId: session.id,
-            chunk,
-        });
-        this.nextOrder += 1;
-        this.queue.sort(compareWorkItems);
-        this.wakeWaiters();
     }
 
     private async processChunk(
         session: TransferSession,
         chunk: DownloadChunkRow,
-        workerId: number,
     ): Promise<boolean> {
         const { registration } = session;
         const controller = registration.controller;
@@ -556,7 +475,7 @@ export class TransferChunkPool {
                 }
 
                 if (error instanceof TransferRateLimitError) {
-                    const rateLimit = this.registerRateLimit(error);
+                    const rateLimit = error.state;
                     this.deps.repository.markChunkPending(registration.file.id, chunk.chunkIndex);
                     this.deps.kd.logger.warn(
                         {
@@ -566,24 +485,21 @@ export class TransferChunkPool {
                             chunkIndex: chunk.chunkIndex,
                             offset: chunk.offset,
                             expectedSize: chunk.size,
-                            currentWorkers: this.targetWorkers,
-                            maxWorkers: TransferChunkPool.MAX_WORKERS,
-                            consecutiveRateLimits: rateLimit.consecutiveRateLimits,
-                            cooldownMs: rateLimit.cooldownMs,
+                            consecutiveRateLimits: rateLimit?.consecutiveRateLimits ?? 1,
+                            cooldownMs: rateLimit?.cooldownMs ?? error.retryAfterMs ?? 0,
                             retryAfterMs: error.retryAfterMs,
-                            coalesced: !rateLimit.isNewEpisode,
+                            coalesced: rateLimit ? !rateLimit.isNewEpisode : false,
                         },
                         "TransferChunkPool:rateLimited",
                     );
-                    if (rateLimit.consecutiveRateLimits >= 3) {
+                    if (rateLimit?.terminal) {
                         this.deps.repository.markChunkError(chunk, TRANSFER_RATE_LIMIT_ERROR);
                         throw new Error(TRANSFER_RATE_LIMIT_ERROR);
                     }
-                    await sleepWithAbort(rateLimit.cooldownMs, controller.signal);
-                    if (workerId > this.targetWorkers) {
-                        this.requeueChunk(session, chunk);
-                        return false;
-                    }
+                    await sleepWithAbort(
+                        rateLimit?.cooldownMs ?? error.retryAfterMs ?? 0,
+                        controller.signal,
+                    );
                     needsMarkDownloading = true;
                     continue;
                 }
@@ -642,11 +558,23 @@ export class TransferChunkPool {
             throw new DOMException("The operation was aborted.", "AbortError");
         }
         const { collection, file, authPw } = session.registration;
-        const result = await this.deps.api.getDownloadUrl(
-            collection.shareId,
-            file.remoteId,
-            authPw,
-        );
+        let result: Awaited<ReturnType<TransferItApiClient["getDownloadUrl"]>>;
+        try {
+            result = await this.deps.api.getDownloadUrl(collection.shareId, file.remoteId, authPw);
+        } catch (error) {
+            if (error instanceof TransferRateLimitError) {
+                this.deps.kd.service.transfer.requestPool.reportRateLimit(
+                    {
+                        collectionId: session.collectionId,
+                        direction: "download",
+                        providerId: "transfer-it-download",
+                        signal,
+                    },
+                    error,
+                );
+            }
+            throw error;
+        }
         session.cdnUrl = result.url;
         return result.url;
     }
@@ -662,110 +590,137 @@ export class TransferChunkPool {
         let url = await this.ensureCdnUrl(session, signal);
         const requestStart = chunk.offset + alreadyWritten;
         const range = `bytes=${requestStart}-${chunk.offset + chunk.size - 1}`;
+        const deps = this.deps;
+        const nodeKey = session.registration.nodeKey;
 
-        let response = await this.deps.kd.http.request(url, {
-            method: "GET",
-            headers: { Range: range },
-            signal,
-            timeout: false,
-        });
+        for (let requestAttempt = 0; requestAttempt < 2; requestAttempt += 1) {
+            try {
+                yield* deps.kd.service.transfer.requestPool.runPayloadStream(
+                    {
+                        collectionId: session.collectionId,
+                        direction: "download",
+                        providerId: "transfer-it-download",
+                        signal,
+                    },
+                    async function* () {
+                        const response = await deps.kd.http.payloadRequest(url, {
+                            method: "GET",
+                            headers: { Range: range },
+                            signal,
+                            timeout: false,
+                        });
+                        if (response.status === 403 || response.status === 404) {
+                            await response.body?.cancel().catch(() => undefined);
+                            throw new TransferCdnUrlExpiredError();
+                        }
+                        if (response.status === 509) {
+                            await response.body?.cancel().catch(() => undefined);
+                            throw new TransferRateLimitError(
+                                parseTransferRetryAfterMs(response.headers.get("retry-after")),
+                            );
+                        }
+                        if (response.status !== 206 && response.status !== 200) {
+                            await response.body?.cancel().catch(() => undefined);
+                            throw new Error(`Transfer CDN HTTP ${response.status}.`);
+                        }
+                        if (!response.body) {
+                            throw new Error("Transfer CDN response has no body.");
+                        }
 
-        if (response.status === 403 || response.status === 404) {
-            session.cdnUrl = null;
-            url = await this.ensureCdnUrl(session, signal);
-            response = await this.deps.kd.http.request(url, {
-                method: "GET",
-                headers: { Range: range },
-                signal,
-                timeout: false,
-            });
-        }
+                        const contentRange = response.headers.get("content-range");
+                        if (
+                            response.status === 206 &&
+                            !contentRange?.startsWith(`bytes ${requestStart}-`)
+                        ) {
+                            await response.body.cancel().catch(() => undefined);
+                            throw new Error(
+                                `Transfer CDN returned invalid Content-Range for ${range}.`,
+                            );
+                        }
 
-        if (response.status === 509) {
-            await response.body?.cancel().catch(() => undefined);
-            throw new TransferRateLimitError(
-                parseTransferRetryAfterMs(response.headers.get("retry-after")),
-            );
-        }
-        if (response.status !== 206 && response.status !== 200) {
-            throw new Error(`Transfer CDN HTTP ${response.status}.`);
-        }
-        if (!response.body) {
-            throw new Error("Transfer CDN response has no body.");
-        }
+                        const reader = response.body.getReader();
+                        let transferred = 0;
+                        let skipped = 0;
+                        const skip = response.status === 200 ? requestStart : 0;
+                        const expected = chunk.size - alreadyWritten;
 
-        const contentRange = response.headers.get("content-range");
-        if (response.status === 206 && !contentRange?.startsWith(`bytes ${requestStart}-`)) {
-            await response.body.cancel().catch(() => undefined);
-            throw new Error(`Transfer CDN returned invalid Content-Range for ${range}.`);
-        }
+                        try {
+                            while (true) {
+                                if (signal.aborted) {
+                                    throw new DOMException(
+                                        "The operation was aborted.",
+                                        "AbortError",
+                                    );
+                                }
 
-        const reader = response.body.getReader();
-        let transferred = 0;
-        let skipped = 0;
-        const skip = response.status === 200 ? requestStart : 0;
-        const expected = chunk.size - alreadyWritten;
+                                onPhaseChange?.("network");
+                                const { done, value } = await reader.read();
+                                if (done) {
+                                    break;
+                                }
+                                if (!value || value.length === 0) {
+                                    continue;
+                                }
 
-        try {
-            while (true) {
-                if (signal.aborted) {
-                    throw new DOMException("The operation was aborted.", "AbortError");
-                }
+                                onPhaseChange?.("bandwidth-wait");
+                                await deps.kd.service.transfer.downloadBandwidth.take(
+                                    value.length,
+                                    signal,
+                                );
+                                onPhaseChange?.("network");
+                                let encrypted = value;
+                                if (skipped < skip) {
+                                    const skipBytes = Math.min(encrypted.length, skip - skipped);
+                                    skipped += skipBytes;
+                                    encrypted = encrypted.subarray(skipBytes);
+                                }
+                                if (encrypted.length === 0) {
+                                    continue;
+                                }
+                                const remaining = expected - transferred;
+                                if (encrypted.length > remaining) {
+                                    encrypted = encrypted.subarray(0, remaining);
+                                }
+                                const plain = decryptTransferChunk(
+                                    nodeKey,
+                                    requestStart + transferred,
+                                    Buffer.from(encrypted),
+                                );
+                                transferred += encrypted.length;
+                                onTransferProgress?.(transferred);
+                                yield plain;
+                                if (transferred >= expected) {
+                                    break;
+                                }
+                            }
+                        } finally {
+                            try {
+                                await reader.cancel();
+                            } catch {
+                                // response may already be closed
+                            }
+                            try {
+                                reader.releaseLock();
+                            } catch {
+                                // already released after cancel
+                            }
+                        }
 
-                onPhaseChange?.("network");
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
-                }
-                if (!value || value.length === 0) {
-                    continue;
-                }
-
-                onPhaseChange?.("bandwidth-wait");
-                await this.deps.kd.service.transfer.downloadBandwidth.take(value.length, signal);
-                onPhaseChange?.("network");
-                let encrypted = value;
-                if (skipped < skip) {
-                    const skipBytes = Math.min(encrypted.length, skip - skipped);
-                    skipped += skipBytes;
-                    encrypted = encrypted.subarray(skipBytes);
-                }
-                if (encrypted.length === 0) {
-                    continue;
-                }
-                const remaining = expected - transferred;
-                if (encrypted.length > remaining) {
-                    encrypted = encrypted.subarray(0, remaining);
-                }
-                const plain = decryptTransferChunk(
-                    session.registration.nodeKey,
-                    requestStart + transferred,
-                    Buffer.from(encrypted),
+                        if (transferred !== expected) {
+                            throw new Error(
+                                `Transfer CDN returned ${transferred}B, expected ${expected}B for range ${range}.`,
+                            );
+                        }
+                    },
                 );
-                transferred += encrypted.length;
-                onTransferProgress?.(transferred);
-                yield plain;
-                if (transferred >= expected) {
-                    break;
+                return;
+            } catch (error) {
+                if (!(error instanceof TransferCdnUrlExpiredError) || requestAttempt > 0) {
+                    throw error;
                 }
+                session.cdnUrl = null;
+                url = await this.ensureCdnUrl(session, signal);
             }
-        } finally {
-            try {
-                await reader.cancel();
-            } catch {
-                // response may already be closed
-            }
-            try {
-                reader.releaseLock();
-            } catch {
-                // already released after cancel
-            }
-        }
-
-        if (transferred !== expected) {
-            throw new Error(
-                `Transfer CDN returned ${transferred}B, expected ${expected}B for range ${range}.`,
-            );
         }
     }
 }

@@ -4,15 +4,10 @@ import {
     COLLECTION_INVALID_PASSWORD_ERROR,
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
-import type {
-    DirNode,
-    LoadCollectionPayload,
-    ProbeCollectionPayload,
-    ProbeCollectionResult,
-} from "@shared/types";
+import type { DirNode, LoadCollectionPayload } from "@shared/types";
 
 import type { KioskDownloader } from "../..";
-import type { HttpRequestOptions } from "../../lib/http";
+import type { PayloadRequestOptions } from "../../lib/http";
 
 import { TimeoutError, delay, isNetworkError } from "../../lib/http";
 import { COLLECTION_EXPIRES_NEVER } from "./transfer-it-crypto";
@@ -441,6 +436,15 @@ export class WorkuploadSession {
 
     public async requestDownload(fileKey: string, options: RequestDownloadOptions = {}) {
         const url = await this.resolveDownloadUrl(fileKey);
+        return await this.requestResolvedDownload(fileKey, url, options);
+    }
+
+    public async requestResolvedDownload(
+        fileKey: string,
+        url: string,
+        options: RequestDownloadOptions = {},
+    ) {
+        this.requireChild(fileKey);
         const requestController = new AbortController();
         const headers: Record<string, string> = {};
         if (options.start !== undefined) {
@@ -459,13 +463,19 @@ export class WorkuploadSession {
         }
         return {
             url,
-            response: await request(this.kd, this.jar, url, {
-                headers,
-                signal: options.signal
-                    ? AbortSignal.any([options.signal, requestController.signal])
-                    : requestController.signal,
-                timeout: WORKUPLOAD_CDN_HEADER_TIMEOUT_MS,
-            }),
+            response: await request(
+                this.kd,
+                this.jar,
+                url,
+                {
+                    headers,
+                    signal: options.signal
+                        ? AbortSignal.any([options.signal, requestController.signal])
+                        : requestController.signal,
+                    timeout: WORKUPLOAD_CDN_HEADER_TIMEOUT_MS,
+                },
+                "payload",
+            ),
             abort: () => requestController.abort(),
         };
     }
@@ -480,26 +490,13 @@ export class WorkuploadSession {
 export class WorkuploadApiClient {
     public constructor(private readonly kd: KioskDownloader) {}
 
-    public async probeCollection(payload: ProbeCollectionPayload): Promise<ProbeCollectionResult> {
-        const resource = parseWorkuploadInput(payload.url);
-        const jar = new CookieJar();
-        return {
-            passwordRequired: hasPasswordForm(
-                await loadPage(
-                    this.kd,
-                    jar,
-                    resource.sourceUrl,
-                    `probe GET /${resource.kind}/${resource.key}`,
-                ),
-                resource,
-            ),
-        };
-    }
-
     public async loadCollection(
-        payload: LoadCollectionPayload,
+        payload: LoadCollectionPayload & { signal?: AbortSignal },
     ): Promise<WorkuploadLoadedCollection> {
-        const session = await this.createSession(payload.url, { password: payload.password });
+        const session = await this.createSession(payload.url, {
+            password: payload.password,
+            signal: payload.signal,
+        });
         const resource = parseWorkuploadInput(payload.url);
         const tree: DirNode = {
             type: "dir",
@@ -670,19 +667,22 @@ async function request(
     kd: KioskDownloader,
     jar: CookieJar,
     url: string,
-    options: HttpRequestOptions = {},
+    options: PayloadRequestOptions = {},
+    transport: "control" | "payload" = "control",
 ) {
     const headers = new Headers(options.headers);
     headers.set("Connection", "close");
     if (!headers.has("Accept")) headers.set("Accept", "*/*");
     const cookieHeader = jar.header(url);
     if (cookieHeader) headers.set("Cookie", cookieHeader);
-    const response = await kd.http.request(url, {
-        ...options,
-        headers,
-        redirect: "manual",
-        retry: 0,
-    });
+    const response = await kd.http[transport === "payload" ? "payloadRequest" : "controlRequest"](
+        url,
+        {
+            ...options,
+            headers,
+            redirect: "manual",
+        },
+    );
     jar.store(response, url);
     return response;
 }

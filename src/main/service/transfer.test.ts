@@ -175,7 +175,12 @@ function createPowerSaveService(options: { active?: boolean; error?: Error } = {
         window: { main: { window: null } },
     } as unknown as KioskDownloader;
 
-    return { service: new TransferService(kd), preventAppSuspension, logger };
+    const service = new TransferService(kd);
+    service.bindActivitySources({
+        listOsProgressTransfers: () => [],
+        hasActiveTransfers: () => active,
+    });
+    return { service, preventAppSuspension, logger };
 }
 
 function createService(options: {
@@ -233,8 +238,14 @@ function createService(options: {
         },
     } as unknown as KioskDownloader;
 
+    const service = new TransferService(kd);
+    service.bindActivitySources({
+        listOsProgressTransfers: () =>
+            [...options.downloadTransfers, ...options.uploadTransfers] as never,
+        hasActiveTransfers: () => false,
+    });
     return {
-        service: new TransferService(kd),
+        service,
         getShutdownAfterTransfer,
         setShutdownAfterTransfer,
     };

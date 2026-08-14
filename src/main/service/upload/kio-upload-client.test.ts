@@ -140,7 +140,7 @@ describe("KioUploadClient.uploadSegment", () => {
 
     function createClient() {
         return new KioUploadClient({
-            http: { request: httpRequest },
+            http: { controlRequest: httpRequest, payloadRequest: httpRequest },
             service: {
                 transfer: {
                     uploadBandwidth: {
@@ -176,21 +176,26 @@ describe("KioUploadClient.uploadSegment", () => {
 
     it("returns length when segment already exists without edge PUT", async () => {
         const item = await createSegmentFixture();
+        const runPayload = vi.fn(async (task: () => Promise<void>) => task());
         httpRequest.mockResolvedValueOnce(cborResponse(200, { exists: true }));
 
         const result = await createClient().uploadSegment(
             item,
             "token",
             new AbortController().signal,
+            undefined,
+            runPayload,
         );
 
         expect(result).toEqual({ length: item.length, outcome: "exists" });
         expect(httpRequest).toHaveBeenCalledTimes(1);
+        expect(runPayload).not.toHaveBeenCalled();
         expect(String(httpRequest.mock.calls[0]?.[0])).toContain("/segment/upload");
     });
 
     it("treats segment_hash_conflict as successful idempotent retry", async () => {
         const item = await createSegmentFixture();
+        const runPayload = vi.fn(async (task: () => Promise<void>) => task());
         httpRequest.mockResolvedValueOnce(
             cborResponse(409, {
                 code: "collection:segment_hash_conflict",
@@ -202,14 +207,18 @@ describe("KioUploadClient.uploadSegment", () => {
             item,
             "token",
             new AbortController().signal,
+            undefined,
+            runPayload,
         );
 
         expect(result).toEqual({ length: item.length, outcome: "conflict" });
         expect(httpRequest).toHaveBeenCalledTimes(1);
+        expect(runPayload).not.toHaveBeenCalled();
     });
 
     it("uploads via edge PUT after segment/upload issues credentials", async () => {
         const item = await createSegmentFixture();
+        const runPayload = vi.fn(async (task: () => Promise<void>) => task());
         httpRequest
             .mockResolvedValueOnce(
                 cborResponse(200, {
@@ -223,10 +232,13 @@ describe("KioUploadClient.uploadSegment", () => {
             item,
             "token",
             new AbortController().signal,
+            undefined,
+            runPayload,
         );
 
         expect(result).toEqual({ length: item.length, outcome: "uploaded" });
         expect(httpRequest).toHaveBeenCalledTimes(2);
+        expect(runPayload).toHaveBeenCalledTimes(1);
         expect(String(httpRequest.mock.calls[1]?.[0])).toBe("https://edge.example/edge/v4/upload");
         expect(httpRequest.mock.calls[1]?.[1]?.fetch).toBeUndefined();
     });

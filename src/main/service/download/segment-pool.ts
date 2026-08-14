@@ -80,9 +80,9 @@ export class GlobalSegmentPool {
     private targetWorkers = 0;
     private runningWorkers = 0;
     private nextOrder = 0;
+    private lastClaimedCollectionId: string | null = null;
     private readonly queue: SegmentWorkItem[] = [];
     private readonly sessions = new Map<string, FileDownloadSession>();
-    private readonly waiters: Array<() => void> = [];
     private readonly slowChunkMonitor = new SlowChunkMonitor();
 
     public constructor(private readonly deps: SegmentPoolDeps) {}
@@ -105,13 +105,31 @@ export class GlobalSegmentPool {
         return total;
     }
 
+    public getTargetWorkers() {
+        return this.targetWorkers;
+    }
+
     public resize(maxWorkers: number) {
         this.targetWorkers = Math.max(1, Math.floor(maxWorkers));
-        while (this.runningWorkers < this.targetWorkers) {
+        this.ensureWorkers();
+    }
+
+    private ensureWorkers() {
+        const activeCollectionCount = new Set(
+            [...this.sessions.values()]
+                .filter((session) => !session.failed && !session.aborted)
+                .map((session) => session.collectionId),
+        ).size;
+        const targetWorkers = Math.min(
+            this.targetWorkers === 0
+                ? 0
+                : this.targetWorkers + Math.max(0, activeCollectionCount - 1),
+            this.queue.length + this.runningWorkers,
+        );
+        while (this.runningWorkers < targetWorkers) {
             this.runningWorkers += 1;
-            void this.workerLoop(this.runningWorkers);
+            void this.workerLoop();
         }
-        this.wakeWaiters();
     }
 
     public register(registration: FileDownloadRegistration) {
@@ -139,19 +157,18 @@ export class GlobalSegmentPool {
                 registration.file.downloadedBytes,
             );
 
-            for (const chunk of registration.chunks) {
-                this.queue.push({
+            this.queue.push(
+                ...registration.chunks.map((chunk, index) => ({
                     priority: registration.priority,
-                    order: this.nextOrder,
+                    order: this.nextOrder + index,
                     sessionId: session.id,
                     chunk,
-                });
-                this.nextOrder += 1;
-            }
-
+                })),
+            );
             this.queue.sort(compareWorkItems);
+            this.nextOrder += registration.chunks.length;
             this.deps.onChunkSettled();
-            this.wakeWaiters();
+            this.ensureWorkers();
         });
     }
 
@@ -164,40 +181,49 @@ export class GlobalSegmentPool {
         session.aborted = true;
         this.removeSessionItemsFromQueue(fileId);
         this.tryCompleteSession(session);
-        this.wakeWaiters();
     }
 
     private compareAndClaimNext() {
-        if (this.queue.length === 0) {
-            return null;
-        }
-
-        for (let index = 0; index < this.queue.length; index += 1) {
-            const item = this.queue[index];
-            if (!item) {
-                continue;
-            }
-
+        while (this.queue.length > 0) {
+            const availableCollectionIds = [
+                ...new Set(
+                    this.queue.flatMap((candidate) => {
+                        const candidateSession = this.sessions.get(candidate.sessionId);
+                        return candidateSession &&
+                            !candidateSession.failed &&
+                            !candidateSession.aborted
+                            ? [candidateSession.collectionId]
+                            : [];
+                    }),
+                ),
+            ];
+            const previousIndex = this.lastClaimedCollectionId
+                ? availableCollectionIds.indexOf(this.lastClaimedCollectionId)
+                : -1;
+            const nextCollectionId =
+                availableCollectionIds[(previousIndex + 1) % availableCollectionIds.length];
+            const nextCollectionIndex = this.queue.findIndex((candidate) => {
+                const candidateSession = this.sessions.get(candidate.sessionId);
+                return candidateSession?.collectionId === nextCollectionId;
+            });
+            const item = this.queue.splice(nextCollectionIndex < 0 ? 0 : nextCollectionIndex, 1)[0];
             const session = this.sessions.get(item.sessionId);
             if (!session || session.failed || session.aborted) {
                 continue;
             }
-
-            this.queue.splice(index, 1);
             session.inFlightChunks += 1;
-            if (session.remainingChunks <= 1) {
-                this.deps.onChunkSettled();
-            }
+            this.lastClaimedCollectionId = session.collectionId;
             return { item, session };
         }
-
         return null;
     }
 
     private removeSessionItemsFromQueue(sessionId: string) {
-        const remaining = this.queue.filter((item) => item.sessionId !== sessionId);
-        this.queue.length = 0;
-        this.queue.push(...remaining);
+        for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+            if (this.queue[index].sessionId === sessionId) {
+                this.queue.splice(index, 1);
+            }
+        }
     }
 
     private tryCompleteSession(session: FileDownloadSession) {
@@ -225,38 +251,19 @@ export class GlobalSegmentPool {
         session.resolve(outcome);
     }
 
-    private wakeWaiters() {
-        while (this.waiters.length > 0) {
-            this.waiters.shift()?.();
-        }
-    }
-
-    private waitForWork() {
-        return new Promise<void>((resolve) => {
-            this.waiters.push(resolve);
-        });
-    }
-
-    private async workerLoop(workerId: number) {
+    private async workerLoop() {
         try {
             while (true) {
-                if (workerId > this.targetWorkers) {
-                    return;
-                }
-
                 const claimed = this.compareAndClaimNext();
                 if (!claimed) {
-                    await this.waitForWork();
-                    continue;
+                    return;
                 }
 
                 await this.processChunk(claimed.session, claimed.item.chunk);
             }
         } finally {
             this.runningWorkers -= 1;
-            if (this.runningWorkers < this.targetWorkers) {
-                this.resize(this.targetWorkers);
-            }
+            this.ensureWorkers();
         }
     }
 
@@ -279,7 +286,7 @@ export class GlobalSegmentPool {
             session.inFlightChunks -= 1;
             this.tryCompleteSession(session);
             this.deps.onChunkSettled();
-            this.wakeWaiters();
+            this.ensureWorkers();
         };
 
         if (session.failed || session.aborted || controller.signal.aborted) {
@@ -353,6 +360,7 @@ export class GlobalSegmentPool {
                 const source =
                     mode === "byte-range" && range
                         ? this.deps.api.streamSegmentRange(
+                              collection.id,
                               segment,
                               {
                                   localStart: range.localStart + resumeOffset,
@@ -363,6 +371,7 @@ export class GlobalSegmentPool {
                               resumeOffset > 0,
                           )
                         : this.deps.api.streamSegment(
+                              collection.id,
                               segment,
                               chunk,
                               attemptController.signal,

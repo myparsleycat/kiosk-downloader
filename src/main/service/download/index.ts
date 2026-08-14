@@ -4,23 +4,32 @@ import path from "node:path";
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import { buildDirTreeFromFiles } from "@shared/dir-tree";
 import {
+    isCollectionInvalidPasswordError,
+    isCollectionPasswordRequiredError,
+    isExtendedShareInvalidPasswordError,
+    isExtendedSharePasswordRequiredError,
+    isZipInvalidPasswordError,
+    isZipPasswordRequiredError,
+} from "@shared/download-errors";
+import {
     buildShareUrl,
     buildWorkuploadUrl,
     tryParseDownloadUrl,
     uuidBytesToShareId,
 } from "@shared/share-url";
-import { applyRenamesToTree, toDisplayPath } from "@shared/tree-rename";
+import { applyRenamesToTree, toDisplayPath, validateNodeName } from "@shared/tree-rename";
 import type {
     Collection,
     CreateDownloadPayload,
     DownloadItem,
-    DownloadProgressPatch,
     FileProgress,
     ListZipEntriesPayload,
     ListZipEntriesResult,
     LoadCollectionPayload,
-    ProbeCollectionPayload,
+    PrepareDownloadPayload,
+    PrepareDownloadResult,
     ResumePayload,
+    ZipNode,
 } from "@shared/types";
 import { findZipNodeById, isZipExtractMode, listZipNodes, setZipEntries } from "@shared/zip-tree";
 import { shell } from "electron";
@@ -76,6 +85,14 @@ type LoadedExtendedCollection = {
     manifest: ExtendedSharePayload;
 };
 
+type PreparedDownloadDraft = {
+    id: string;
+    sourceInput: string;
+    password?: string;
+    asciiFilenames: boolean;
+    loaded: LoadedCollection | LoadedExtendedCollection;
+};
+
 type StoredExtendedManifest = {
     renames: Record<string, string>;
     selectedPaths?: string[];
@@ -100,10 +117,11 @@ export class DownloadService {
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
-    private readonly extendedDrafts = new Map<string, LoadedExtendedCollection>();
+    private preparedDraft: PreparedDownloadDraft | null = null;
+    private prepareController: AbortController | null = null;
+    private prepareGeneration = 0;
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
-    private readonly pendingBundleProgress = new Map<string, Set<string>>();
-    private bundleProgressFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    private revision = 0;
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
@@ -165,6 +183,10 @@ export class DownloadService {
         return this.scheduler.hasActiveTransfers();
     }
 
+    public refreshRequestScheduling() {
+        void this.scheduler.schedule();
+    }
+
     private async resetNonResumableWorkuploadStartupState() {
         for (const item of this.repository.listItems()) {
             if (item.collection.provider !== "workupload") {
@@ -217,115 +239,211 @@ export class DownloadService {
     }
 
     public destroy() {
-        if (this.bundleProgressFlushTimer) {
-            clearTimeout(this.bundleProgressFlushTimer);
-            this.bundleProgressFlushTimer = null;
-        }
-        this.pendingBundleProgress.clear();
+        this.prepareGeneration += 1;
+        this.prepareController?.abort();
+        this.prepareController = null;
+        this.preparedDraft = null;
         this.scheduler.destroy();
     }
 
-    public async loadCollection(payload: LoadCollectionPayload) {
-        return withLoggedError(
-            this.kd.logger,
-            "DownloadService:loadCollection",
-            {
-                channel: "download:loadCollection",
-                stage: "load",
-                url: payload.url,
-            },
-            async () => {
-                if (payload.url.trim().startsWith(EXTENDED_SHARE_PREFIX)) {
-                    const loaded = await this.loadExtendedCollection(payload);
-                    this.extendedDrafts.clear();
-                    this.extendedDrafts.set(payload.url.trim(), loaded);
-                    return loaded.collection;
+    public async prepare(payload: PrepareDownloadPayload): Promise<PrepareDownloadResult> {
+        this.prepareController?.abort();
+        const controller = new AbortController();
+        this.prepareController = controller;
+        const generation = ++this.prepareGeneration;
+        this.preparedDraft = null;
+        const sourceInput = payload.url.trim();
+        const parsed = tryParseDownloadUrl(sourceInput);
+        if (!parsed && !sourceInput.startsWith(EXTENDED_SHARE_PREFIX)) {
+            this.prepareController = null;
+            return { status: "failed", code: "invalidUrl", message: "Invalid share URL." };
+        }
+
+        const asciiFilenames =
+            payload.asciiFilenames ?? (await this.kd.setting.get("general.asciiFilenames"));
+        const attempt = async (password?: string) => {
+            const loadPayload = { url: sourceInput, password, signal: controller.signal };
+            const loaded = sourceInput.startsWith(EXTENDED_SHARE_PREFIX)
+                ? await this.loadExtendedCollection(loadPayload)
+                : await this.loadCollectionUnlocked(loadPayload, asciiFilenames);
+            if (generation !== this.prepareGeneration) {
+                throw new DOMException("The operation was aborted.", "AbortError");
+            }
+            return { loaded, password };
+        };
+
+        try {
+            let prepared: Awaited<ReturnType<typeof attempt>>;
+            try {
+                prepared = await attempt(payload.password);
+            } catch (error) {
+                const invalid =
+                    isCollectionInvalidPasswordError(error) ||
+                    isExtendedShareInvalidPasswordError(error);
+                const required =
+                    isCollectionPasswordRequiredError(error) ||
+                    isExtendedSharePasswordRequiredError(error);
+                if (payload.password && invalid) {
+                    return { status: "passwordRequired", invalid: true };
                 }
-                const asciiFilenames =
-                    payload.asciiFilenames ?? (await this.kd.setting.get("general.asciiFilenames"));
-                const loaded = await this.loadCollectionUnlocked(payload, asciiFilenames);
-                return loaded.provider === "workupload"
-                    ? { ...loaded.collection, resource: loaded.resource }
-                    : loaded.collection;
-            },
-        );
+                if (!payload.password && required) {
+                    const settings = await this.kd.setting.getMany([
+                        "general.autoTryCollectionPasswords",
+                        "general.collectionPasswordList",
+                    ]);
+                    if (!settings["general.autoTryCollectionPasswords"]) {
+                        return { status: "passwordRequired", invalid: false };
+                    }
+                    let matched: Awaited<ReturnType<typeof attempt>> | null = null;
+                    for (const candidate of settings["general.collectionPasswordList"]) {
+                        if (generation !== this.prepareGeneration) {
+                            throw new DOMException("The operation was aborted.", "AbortError");
+                        }
+                        try {
+                            matched = await attempt(candidate);
+                            break;
+                        } catch (candidateError) {
+                            if (
+                                !isCollectionInvalidPasswordError(candidateError) &&
+                                !isExtendedShareInvalidPasswordError(candidateError)
+                            ) {
+                                throw candidateError;
+                            }
+                        }
+                    }
+                    if (!matched) {
+                        return { status: "passwordRequired", invalid: false };
+                    }
+                    prepared = matched;
+                } else {
+                    throw error;
+                }
+            }
+
+            const id = randomUUID();
+            this.preparedDraft = {
+                id,
+                sourceInput,
+                password: prepared.password,
+                asciiFilenames,
+                loaded: prepared.loaded,
+            };
+            this.prepareController = null;
+            const collection = prepared.loaded.collection;
+            return {
+                status: "ready",
+                draftId: id,
+                collection:
+                    "resource" in prepared.loaded
+                        ? { ...collection, resource: prepared.loaded.resource }
+                        : collection,
+            };
+        } catch (error) {
+            if (generation !== this.prepareGeneration) {
+                return {
+                    status: "failed",
+                    code: "remoteFailure",
+                    message: "Preparation superseded.",
+                };
+            }
+            this.kd.logger.error(
+                { error, channel: "download:prepare", stage: "load", url: sourceInput },
+                "DownloadService:prepare",
+            );
+            return {
+                status: "failed",
+                code: "remoteFailure",
+                message: error instanceof Error ? error.message : String(error),
+            };
+        } finally {
+            if (this.prepareController === controller) {
+                this.prepareController = null;
+            }
+        }
+    }
+
+    public discardDraft(payload: { draftId?: string }) {
+        if (payload.draftId && this.preparedDraft?.id !== payload.draftId) {
+            return;
+        }
+        this.prepareGeneration += 1;
+        this.prepareController?.abort();
+        this.prepareController = null;
+        this.preparedDraft = null;
     }
 
     public async listZipEntries(payload: ListZipEntriesPayload): Promise<ListZipEntriesResult> {
+        if (!this.preparedDraft || this.preparedDraft.id !== payload.draftId) {
+            return {
+                status: "failed",
+                code: "staleDraft",
+                message: "Prepared download draft is no longer available.",
+            };
+        }
+        const draft = this.preparedDraft;
+        if ("manifest" in draft.loaded || draft.loaded.provider !== "kiosk") {
+            return {
+                status: "failed",
+                code: "unsupportedProvider",
+                message: "ZIP entry browsing is not supported for this provider.",
+            };
+        }
+        const loaded = draft.loaded;
+        const found = findZipNodeById(loaded.collection.tree, payload.fileId);
+        if (!found) {
+            return {
+                status: "failed",
+                code: "zipNotFound",
+                message: `ZIP file not found: ${payload.fileId}`,
+            };
+        }
         return withLoggedError(
             this.kd.logger,
             "DownloadService:listZipEntries",
             {
                 channel: "download:listZipEntries",
                 stage: "index",
-                url: payload.url,
+                draftId: payload.draftId,
                 fileId: payload.fileId,
             },
             async () => {
-                if (payload.url.trim().startsWith(EXTENDED_SHARE_PREFIX)) {
-                    throw new Error("확장 공유의 ZIP 파일은 다운로드 완료 후 열 수 있습니다.");
-                }
-                const loaded = await this.loadCollectionUnlocked(
-                    payload,
-                    await this.kd.setting.get("general.asciiFilenames"),
-                );
-                if (loaded.provider === "transfer") {
-                    throw new Error("ZIP entry browsing is not supported for transfer.it.");
-                }
-                if (loaded.provider === "workupload") {
-                    throw new Error("ZIP entry browsing is not supported for Workupload.");
-                }
-                const found = findZipNodeById(loaded.collection.tree, payload.fileId);
-                if (!found) {
-                    throw new Error(`ZIP file not found: ${payload.fileId}`);
-                }
                 const indexed = await this.indexZipNode(
                     loaded,
                     found.zip.id,
                     found.zip.size,
                     payload.zipPassword,
                 );
-                return { entries: indexed.entries };
+                loaded.collection = {
+                    ...loaded.collection,
+                    tree: setZipEntries(loaded.collection.tree, payload.fileId, indexed.entries),
+                };
+                return { status: "ready" as const, entries: indexed.entries };
             },
-        );
-    }
-
-    public async probeCollection(payload: ProbeCollectionPayload) {
-        return withLoggedError(
-            this.kd.logger,
-            "DownloadService:probeCollection",
-            {
-                channel: "download:probeCollection",
-                stage: "probe",
-                url: payload.url,
-            },
-            async () => {
-                const parsed = tryParseDownloadUrl(payload.url);
-                if (!parsed) {
-                    throw new Error("Invalid share URL.");
-                }
-                if (parsed.provider === "transfer") {
-                    return await this.transferApi.probeCollection(payload);
-                }
-                if (parsed.provider === "workupload") {
-                    return await this.workuploadApi.probeCollection(payload);
-                }
-                return await this.api.probeCollection(payload);
-            },
-        );
+        ).catch((error) => {
+            if (isZipPasswordRequiredError(error) || isZipInvalidPasswordError(error)) {
+                return {
+                    status: "passwordRequired",
+                    invalid: isZipInvalidPasswordError(error),
+                } as const;
+            }
+            throw error;
+        });
     }
 
     public async create(payload: CreateDownloadPayload) {
-        if (payload.url.trim().startsWith(EXTENDED_SHARE_PREFIX)) {
-            return await this.createExtendedDownload(payload);
+        const draft = this.requirePreparedDraft(payload.draftId);
+        if ("manifest" in draft.loaded) {
+            return await this.createExtendedDownload(payload, draft);
         }
         const basePath = payload.savePath.trim();
-        const [createCollectionSubfolder, configuredAsciiFilenames] = await Promise.all([
-            this.kd.setting.get("general.createCollectionSubfolder"),
-            this.kd.setting.get("general.asciiFilenames"),
-        ]);
-        const asciiFilenames = payload.asciiFilenames ?? configuredAsciiFilenames;
-        const loaded = await this.loadCollectionUnlocked(payload, asciiFilenames);
+        if (!basePath || !path.isAbsolute(basePath)) {
+            throw new Error("Download save path must be absolute.");
+        }
+        const createCollectionSubfolder = await this.kd.setting.get(
+            "general.createCollectionSubfolder",
+        );
+        const asciiFilenames = draft.asciiFilenames;
+        const loaded = draft.loaded;
         const selectedPaths = new Set(payload.selectedPaths);
         const renames = payload.renames ?? {};
         let tree = loaded.collection.tree;
@@ -336,13 +454,15 @@ export class DownloadService {
                 if (!isZipExtractMode(displayZipPath, selectedPaths)) {
                     continue;
                 }
-                const zipPassword = payload.zipPasswords?.[zip.id];
-                const indexed = await this.indexZipNode(loaded, zip.id, zip.size, zipPassword);
-                tree = setZipEntries(tree, zip.id, indexed.entries);
+                if (!zip.entries) {
+                    const zipPassword = payload.zipPasswords?.[zip.id];
+                    const indexed = await this.indexZipNode(loaded, zip.id, zip.size, zipPassword);
+                    tree = setZipEntries(tree, zip.id, indexed.entries);
+                }
             }
         }
 
-        tree = applyRenamesToTree(tree, renames);
+        tree = validateDraftTreeMutation(tree, payload.selectedPaths, renames);
         if (loaded.provider === "workupload") {
             const usedNames = new Set<string>();
             for (const entry of tree.entries) {
@@ -382,8 +502,8 @@ export class DownloadService {
             url:
                 enriched.provider === "workupload"
                     ? buildWorkuploadUrl(enriched.collection.shareId, enriched.resource)
-                    : payload.url,
-            password: enriched.passwordProtected ? payload.password : undefined,
+                    : draft.sourceInput,
+            password: enriched.passwordProtected ? draft.password : undefined,
             savePath,
             selectedPaths: payload.selectedPaths,
             asciiFilenames,
@@ -392,13 +512,26 @@ export class DownloadService {
         await this.emitUpdate(collectionId);
         void this.scheduler.schedule();
         void this.kd.setting.set("general.lastDownloadPath", basePath);
-        return this.getEnrichedItem(collectionId);
+        const item = this.getEnrichedItem(collectionId);
+        if (!item) {
+            throw new Error("Created download item is missing.");
+        }
+        this.preparedDraft = null;
+        return item;
+    }
+
+    private requirePreparedDraft(draftId: string) {
+        if (!this.preparedDraft || this.preparedDraft.id !== draftId) {
+            throw new Error("Prepared download draft is no longer available.");
+        }
+        return this.preparedDraft;
     }
 
     private async loadCollectionUnlocked(
         payload: {
             url: string;
             password?: string;
+            signal?: AbortSignal;
         },
         asciiFilenames: boolean,
     ): Promise<LoadedCollection> {
@@ -434,12 +567,18 @@ export class DownloadService {
     }
 
     private async loadExtendedCollection(
-        payload: LoadCollectionPayload,
+        payload: LoadCollectionPayload & { signal?: AbortSignal },
     ): Promise<LoadedExtendedCollection> {
+        if (payload.signal?.aborted) {
+            throw payload.signal.reason;
+        }
         const sourceInput = payload.url.trim();
         const manifest = await decodeExtendedShare(sourceInput, payload.password);
         const sources: LoadedKioskCollection[] = [];
         for (const [index, collectionId] of manifest.collectionIds.entries()) {
+            if (payload.signal?.aborted) {
+                throw payload.signal.reason;
+            }
             this.kd.ipc.sendToMainWindow("download:extended-load-progress", {
                 current: index + 1,
                 total: manifest.collectionIds.length,
@@ -448,6 +587,7 @@ export class DownloadService {
                 await this.api.loadCollection({
                     url: buildShareUrl(uuidBytesToShareId(collectionId)),
                     password: payload.password,
+                    signal: payload.signal,
                 }),
             );
         }
@@ -504,19 +644,29 @@ export class DownloadService {
         };
     }
 
-    private async createExtendedDownload(payload: CreateDownloadPayload) {
-        const sourceInput = payload.url.trim();
-        const loaded =
-            this.extendedDrafts.get(sourceInput) ??
-            (await this.loadExtendedCollection({ url: sourceInput, password: payload.password }));
+    private async createExtendedDownload(
+        payload: CreateDownloadPayload,
+        draft: PreparedDownloadDraft,
+    ) {
+        if (!("manifest" in draft.loaded)) {
+            throw new Error("Prepared draft is not an extended share.");
+        }
+        const sourceInput = draft.sourceInput;
+        const loaded = draft.loaded;
         const renames = payload.renames ?? {};
-        const logicalTree = applyRenamesToTree(loaded.collection.tree, renames);
+        const logicalTree = validateDraftTreeMutation(
+            loaded.collection.tree,
+            payload.selectedPaths,
+            renames,
+        );
         const basePath = payload.savePath.trim();
-        const [createCollectionSubfolder, configuredAsciiFilenames] = await Promise.all([
-            this.kd.setting.get("general.createCollectionSubfolder"),
-            this.kd.setting.get("general.asciiFilenames"),
-        ]);
-        const asciiFilenames = payload.asciiFilenames ?? configuredAsciiFilenames;
+        if (!basePath || !path.isAbsolute(basePath)) {
+            throw new Error("Download save path must be absolute.");
+        }
+        const createCollectionSubfolder = await this.kd.setting.get(
+            "general.createCollectionSubfolder",
+        );
+        const asciiFilenames = draft.asciiFilenames;
         const savePath = shouldCreateCollectionSubfolder(
             logicalTree,
             loaded.collection.name,
@@ -550,7 +700,7 @@ export class DownloadService {
         this.repository.insertBundle({
             id: bundleId,
             sourceInput,
-            password: payload.password,
+            password: draft.password,
             name: loaded.collection.name,
             treeJson: JSON.stringify(logicalTree),
             manifestJson: JSON.stringify(storedManifest),
@@ -584,7 +734,7 @@ export class DownloadService {
                 this.repository.insertDownload({
                     loaded: source,
                     url: buildShareUrl(source.collection.shareId),
-                    password: payload.password,
+                    password: draft.password,
                     savePath: path.join(
                         savePath,
                         getBundleTempDirName(bundleId),
@@ -603,12 +753,16 @@ export class DownloadService {
             throw error;
         }
 
-        this.extendedDrafts.delete(sourceInput);
         this.createReassemblyCoordinator(bundleId, storedManifest);
         await this.emitUpdate(bundleId);
         void this.scheduler.schedule();
         void this.kd.setting.set("general.lastDownloadPath", basePath);
-        return this.getEnrichedItem(bundleId);
+        const item = this.getEnrichedItem(bundleId);
+        if (!item) {
+            throw new Error("Created extended download item is missing.");
+        }
+        this.preparedDraft = null;
+        return item;
     }
 
     private async indexZipNode(
@@ -620,6 +774,7 @@ export class DownloadService {
         const segments = await this.api.getSegments(remoteFileId, loaded.cat);
         return indexZipFromSegments({
             kd: this.kd,
+            collectionId: loaded.collection.shareId,
             shareId: loaded.collection.shareId,
             remoteFileId,
             segments,
@@ -630,7 +785,10 @@ export class DownloadService {
     }
 
     public async list() {
-        return this.repository.listItems().map((item) => this.enrichItem(item));
+        return {
+            revision: this.revision,
+            items: this.repository.listItems().map((item) => this.enrichItem(item)),
+        };
     }
 
     public async pauseCollection(collectionId: string) {
@@ -817,7 +975,7 @@ export class DownloadService {
             await fse
                 .remove(path.join(bundle.savePath, getBundleTempDirName(bundle.id)))
                 .catch(() => undefined);
-            await this.emitUpdate();
+            await this.emitRemoved(collectionId);
             await this.kd.service.transfer.refreshPowerSaveBlock();
             return;
         }
@@ -828,7 +986,7 @@ export class DownloadService {
         if (collection) {
             await this.scheduler.cleanupPartFiles(collection, files);
         }
-        await this.emitUpdate();
+        await this.emitRemoved(collectionId);
         await this.kd.service.transfer.refreshPowerSaveBlock();
     }
 
@@ -1198,161 +1356,36 @@ export class DownloadService {
         if (!collection) {
             return;
         }
-        if (collection.bundleId) {
-            this.queueBundleProgressUpdate(collection.bundleId, fileIds);
-            return;
-        }
-
-        const progress: Record<string, FileProgress> = {};
-        for (const file of this.repository.getFilesByIds(collectionId, fileIds)) {
-            const snapshot = this.metrics.sampleFile(file.id, file.downloadedBytes);
-            const liveDownloaded = Math.min(file.size, snapshot.liveDownloaded);
-            const downloaded =
-                file.status === "downloading" && file.size > 0
-                    ? Math.min(liveDownloaded, Math.floor(file.size * 0.99))
-                    : liveDownloaded;
-            progress[file.path] = {
-                fileId: file.id,
-                path: file.path,
-                status: file.status,
-                downloaded,
-                size: file.size,
-                selected: file.selected === 1,
-                completedElsewhere: file.completedElsewhere === 1 ? true : undefined,
-                speedBps:
-                    file.status === "downloading" &&
-                    liveDownloaded < file.size &&
-                    snapshot.speedBps > 0
-                        ? snapshot.speedBps
-                        : undefined,
-                error: file.error ?? undefined,
-                transferControl:
-                    collection.provider === "workupload"
-                        ? workuploadTransferControl(file.sourceMetaJson)
-                        : undefined,
-            };
-        }
-
-        const collectionSnapshot = this.metrics.getCollectionSnapshot(collectionId);
-        const summary = this.repository.getSummary(collectionId);
-        const patch: DownloadProgressPatch = {
-            id: collectionId,
-            progress,
-            summary: {
-                ...summary,
-                transferredBytes: Math.min(
-                    summary.totalBytes,
-                    summary.transferredBytes + collectionSnapshot.activeTransferredBytes,
-                ),
-            },
-            status: collection.status,
-            speedBps:
-                collection.status === "downloading"
-                    ? this.metrics.sampleCollection(collectionId) || null
-                    : null,
-            elapsedMs: this.scheduler.getCollectionElapsedMs(collectionId),
-            updatedAt: Date.parse(collection.updatedAt),
-        };
-        this.kd.ipc.sendToMainWindow("download:progress-update", patch);
-        this.kd.service.transfer.syncMainWindowProgressBar();
-    }
-
-    private queueBundleProgressUpdate(bundleId: string, fileIds: ReadonlySet<string>) {
-        const pending = this.pendingBundleProgress.get(bundleId) ?? new Set<string>();
-        for (const fileId of fileIds) {
-            pending.add(fileId);
-        }
-        this.pendingBundleProgress.set(bundleId, pending);
-        if (this.bundleProgressFlushTimer) {
-            return;
-        }
-        this.bundleProgressFlushTimer = setTimeout(() => {
-            this.bundleProgressFlushTimer = null;
-            this.flushPendingBundleProgress();
-        }, 0);
-        this.bundleProgressFlushTimer.unref?.();
-    }
-
-    private flushPendingBundleProgress() {
-        const pending = [...this.pendingBundleProgress.entries()];
-        this.pendingBundleProgress.clear();
-        for (const [bundleId, fileIds] of pending) {
-            this.emitBundleProgressUpdate(bundleId, fileIds);
-        }
-    }
-
-    private emitBundleProgressUpdate(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
-        const snapshot = this.repository.getBundleProgressSnapshot(bundleId, dirtyFileIds);
-        if (!snapshot) {
-            return;
-        }
-        const progress: Record<string, FileProgress> = {};
-        for (const [pathKey, fileProgress] of Object.entries(snapshot.progress)) {
-            const physicalFileId = fileProgress.fileId.split("::", 1)[0];
-            const metricsSnapshot =
-                fileProgress.status === "downloading"
-                    ? this.metrics.sampleFile(physicalFileId, fileProgress.downloaded)
-                    : this.metrics.getFileSnapshot(physicalFileId, fileProgress.downloaded);
-            const liveDownloaded = Math.min(fileProgress.size, metricsSnapshot.liveDownloaded);
-            const downloaded =
-                fileProgress.status === "downloading" && fileProgress.size > 0
-                    ? Math.min(liveDownloaded, Math.floor(fileProgress.size * 0.99))
-                    : liveDownloaded;
-            progress[pathKey] = {
-                ...fileProgress,
-                downloaded,
-                speedBps:
-                    fileProgress.status === "downloading" &&
-                    liveDownloaded < fileProgress.size &&
-                    metricsSnapshot.speedBps > 0
-                        ? metricsSnapshot.speedBps
-                        : undefined,
-            };
-        }
-        const bundleSnapshot = this.metrics.getBundleSnapshot(bundleId, snapshot.subCollectionIds);
-        const speedBps =
-            snapshot.status === "downloading"
-                ? this.metrics.sampleBundle(bundleId, snapshot.subCollectionIds)
-                : 0;
-        if (snapshot.status !== "downloading") {
-            this.metrics.clearBundle(bundleId);
-        }
-        const patch: DownloadProgressPatch = {
-            id: bundleId,
-            progress,
-            summary: {
-                ...snapshot.summary,
-                transferredBytes: Math.min(
-                    snapshot.summary.totalBytes,
-                    snapshot.summary.transferredBytes + bundleSnapshot.activeTransferredBytes,
-                ),
-            },
-            status: snapshot.status,
-            speedBps: snapshot.status === "downloading" && speedBps > 0 ? speedBps : null,
-            elapsedMs: snapshot.elapsedMs,
-            updatedAt: snapshot.updatedAt,
-        };
-        this.kd.ipc.sendToMainWindow("download:progress-update", patch);
-        this.kd.service.transfer.syncMainWindowProgressBar();
+        await this.emitUpdate(collection.bundleId ?? collectionId, { sampleSpeeds: true });
     }
 
     private async emitUpdate(collectionId?: string, options: { sampleSpeeds?: boolean } = {}) {
         if (collectionId) {
             const item = this.repository.getItem(collectionId);
             if (item) {
-                this.kd.ipc.sendToMainWindow(
-                    "download:item-update",
-                    this.enrichItem(item, options),
-                );
+                this.emitChanged(collectionId, this.enrichItem(item, options));
             }
             this.kd.service.transfer.syncMainWindowProgressBar();
             return;
         }
 
-        this.kd.ipc.sendToMainWindow(
-            "download:update",
-            this.repository.listItems().map((item) => this.enrichItem(item, options)),
-        );
+        for (const item of this.repository.listItems()) {
+            this.emitChanged(item.id, this.enrichItem(item, options));
+        }
+        this.kd.service.transfer.syncMainWindowProgressBar();
+    }
+
+    private emitChanged(id: string, item: DownloadItem | null) {
+        this.revision += 1;
+        this.kd.ipc.sendToMainWindow("download:changed", {
+            revision: this.revision,
+            id,
+            item,
+        });
+    }
+
+    private async emitRemoved(id: string) {
+        this.emitChanged(id, null);
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
@@ -1669,21 +1702,81 @@ export class DownloadService {
     }
 }
 
-function workuploadTransferControl(sourceMetaJson: string | null) {
-    const rangeSupported = tryParseWorkuploadFileSourceMeta(sourceMetaJson)?.rangeSupported;
-    return rangeSupported === undefined
-        ? undefined
-        : rangeSupported
-          ? ("pause" as const)
-          : ("stop" as const);
-}
-
 function tryParseWorkuploadFileSourceMeta(raw: string | null) {
     try {
         return parseWorkuploadFileSourceMeta(raw);
     } catch {
         return null;
     }
+}
+
+function validateDraftTreeMutation(
+    tree: Collection["tree"],
+    selectedPaths: string[],
+    renames: Record<string, string>,
+) {
+    const originalPaths = new Set<string>();
+    const collectOriginalPaths = (dir: Collection["tree"], prefix: string) => {
+        for (const entry of dir.entries) {
+            const originalPath = prefix ? `${prefix}/${entry.node.name}` : entry.node.name;
+            originalPaths.add(originalPath);
+            if (entry.kind === "dir") {
+                collectOriginalPaths(entry.node as Collection["tree"], originalPath);
+            } else if (entry.kind === "zip" && (entry.node as ZipNode).entries) {
+                const zip = entry.node as ZipNode;
+                collectOriginalPaths(
+                    { type: "dir", id: zip.id, name: "", entries: zip.entries ?? [] },
+                    originalPath,
+                );
+            }
+        }
+    };
+    collectOriginalPaths(tree, "");
+
+    for (const [originalPath, name] of Object.entries(renames)) {
+        if (!originalPaths.has(originalPath)) {
+            throw new Error(`Rename target is not part of the prepared draft: ${originalPath}`);
+        }
+        const error = validateNodeName(name);
+        if (error) {
+            throw new Error(error);
+        }
+    }
+
+    const renamed = applyRenamesToTree(tree, renames);
+    const selectablePaths = new Set<string>();
+    const validateRenamedTree = (dir: Collection["tree"], prefix: string) => {
+        const siblingNames = new Set<string>();
+        for (const entry of dir.entries) {
+            const key = entry.node.name.toLowerCase();
+            if (siblingNames.has(key)) {
+                throw new Error(`Renamed entries collide in ${prefix || "the collection root"}.`);
+            }
+            siblingNames.add(key);
+            const displayPath = prefix ? `${prefix}/${entry.node.name}` : entry.node.name;
+            selectablePaths.add(displayPath);
+            if (entry.kind === "dir") {
+                validateRenamedTree(entry.node as Collection["tree"], displayPath);
+            } else if (entry.kind === "zip" && (entry.node as ZipNode).entries) {
+                const zip = entry.node as ZipNode;
+                validateRenamedTree(
+                    { type: "dir", id: zip.id, name: "", entries: zip.entries ?? [] },
+                    displayPath,
+                );
+            }
+        }
+    };
+    validateRenamedTree(renamed, "");
+
+    if (selectedPaths.length === 0) {
+        throw new Error("No files selected.");
+    }
+    for (const selectedPath of selectedPaths) {
+        if (!selectablePaths.has(selectedPath)) {
+            throw new Error(`Selected path is not part of the prepared draft: ${selectedPath}`);
+        }
+    }
+    return renamed;
 }
 
 function flattenRemoteFiles(

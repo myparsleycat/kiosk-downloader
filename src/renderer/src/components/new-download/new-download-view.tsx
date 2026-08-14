@@ -26,19 +26,9 @@ import {
 import { cn } from "@renderer/lib/utils";
 import { useNewDownloadDraft } from "@renderer/stores/new-download-draft";
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
-import {
-  getIpcErrorCause,
-  isCollectionExpiresNever,
-  isCollectionInvalidPasswordError,
-  isCollectionPasswordRequiredError,
-  isExtendedShareInvalidPasswordError,
-  isExtendedSharePasswordRequiredError,
-  isZipInvalidPasswordError,
-  isZipPasswordRequiredError,
-} from "@shared/download-errors";
+import { getIpcErrorCause, isCollectionExpiresNever } from "@shared/download-errors";
 import {
   EXTENDED_SHARE_PREFIX,
-  type ParsedDownloadUrl,
   tryDecodeShareUrlBase64,
   tryParseDownloadUrl,
 } from "@shared/share-url";
@@ -80,22 +70,20 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const password = useNewDownloadDraft((state) => state.password);
   const savePath = useNewDownloadDraft((state) => state.savePath);
   const createCollectionSubfolder = useNewDownloadDraft((state) => state.createCollectionSubfolder);
-  const asciiFilenames = useNewDownloadDraft((state) => state.asciiFilenames);
-  const passwordRequired = useNewDownloadDraft((state) => state.passwordRequired);
-  const passwordInvalid = useNewDownloadDraft((state) => state.passwordInvalid);
-  const collection = useNewDownloadDraft((state) => state.collection);
+  const preparation = useNewDownloadDraft((state) => state.preparation);
+  const collection = preparation.status === "ready" ? preparation.collection : null;
+  const draftId = preparation.status === "ready" ? preparation.draftId : null;
+  const passwordRequired = preparation.status === "passwordRequired";
+  const passwordInvalid = passwordRequired && preparation.invalid;
+  const loading = preparation.status === "preparing";
   const selected = useNewDownloadDraft((state) => state.selected);
-  const probedShareId = useNewDownloadDraft((state) => state.probedShareId);
   const setUrl = useNewDownloadDraft((state) => state.setUrl);
   const setPassword = useNewDownloadDraft((state) => state.setPassword);
   const setSavePath = useNewDownloadDraft((state) => state.setSavePath);
-  const setPasswordRequired = useNewDownloadDraft((state) => state.setPasswordRequired);
-  const setPasswordInvalid = useNewDownloadDraft((state) => state.setPasswordInvalid);
-  const setCollection = useNewDownloadDraft((state) => state.setCollection);
+  const setPreparation = useNewDownloadDraft((state) => state.setPreparation);
   const setSelected = useNewDownloadDraft((state) => state.setSelected);
   const updateSelected = useNewDownloadDraft((state) => state.updateSelected);
-  const setProbedShareId = useNewDownloadDraft((state) => state.setProbedShareId);
-  const clearProbeState = useNewDownloadDraft((state) => state.clearProbeState);
+  const clearPreparation = useNewDownloadDraft((state) => state.clearPreparation);
   const resetDraft = useNewDownloadDraft((state) => state.resetDraft);
   const hydrateSettings = useNewDownloadDraft((state) => state.hydrateSettings);
   const zipPasswords = useNewDownloadDraft((state) => state.zipPasswords);
@@ -105,7 +93,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const setZipLoading = useNewDownloadDraft((state) => state.setZipLoading);
   const renameNode = useNewDownloadDraft((state) => state.renameNode);
 
-  const [loading, setLoading] = React.useState(false);
   const [shareDragOver, setShareDragOver] = React.useState(false);
   const [readingShareFile, setReadingShareFile] = React.useState(false);
   const [extendedLoadProgress, setExtendedLoadProgress] = React.useState<{
@@ -125,12 +112,27 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const [renameError, setRenameError] = React.useState<string | null>(null);
 
   const loadSeqRef = React.useRef(0);
+  const draftIdRef = React.useRef<string | null>(draftId);
   const urlInputRef = React.useRef<HTMLInputElement>(null);
   const passwordInputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
     void hydrateSettings();
   }, [hydrateSettings]);
+
+  React.useEffect(() => {
+    draftIdRef.current = draftId;
+  }, [draftId]);
+
+  React.useEffect(
+    () => () => {
+      void window.api.invoke("download:discardDraft", {
+        draftId: draftIdRef.current ?? undefined,
+      });
+      resetDraft();
+    },
+    [resetDraft],
+  );
 
   React.useEffect(() => {
     requestAnimationFrame(() => urlInputRef.current?.focus());
@@ -185,86 +187,6 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     [loadShareFromResult],
   );
 
-  const tryAutoCollectionPasswords = React.useCallback(
-    async (trimmedUrl: string, shareId: string, seq: number, asciiFilenames: boolean) => {
-      try {
-        const settings = await window.api.invoke("setting:getMany", [
-          "general.autoTryCollectionPasswords",
-          "general.collectionPasswordList",
-        ]);
-
-        if (seq !== loadSeqRef.current) {
-          return true;
-        }
-
-        if (!settings["general.autoTryCollectionPasswords"]) {
-          return false;
-        }
-
-        const candidates = settings["general.collectionPasswordList"].filter(Boolean);
-        if (candidates.length === 0) {
-          return false;
-        }
-
-        const winner = await new Promise<{
-          loaded: Awaited<ReturnType<typeof window.api.invoke<"download:loadCollection">>>;
-          password: string;
-        } | null>((resolve) => {
-          let pending = candidates.length;
-          let settled = false;
-
-          for (const candidate of candidates) {
-            void window.api
-              .invoke("download:loadCollection", {
-                url: trimmedUrl,
-                password: candidate,
-                asciiFilenames,
-              })
-              .then((loaded) => {
-                if (settled) {
-                  return;
-                }
-                settled = true;
-                resolve({ loaded, password: candidate });
-              })
-              .catch(() => {
-                pending -= 1;
-                if (!settled && pending === 0) {
-                  resolve(null);
-                }
-              });
-          }
-        });
-
-        if (seq !== loadSeqRef.current) {
-          return true;
-        }
-
-        if (!winner) {
-          return false;
-        }
-
-        setPassword(winner.password);
-        setCollection(winner.loaded);
-        setSelected(collectAllPaths(winner.loaded.tree));
-        setPasswordRequired(false);
-        setPasswordInvalid(false);
-        setProbedShareId(shareId);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    [
-      setCollection,
-      setPassword,
-      setPasswordInvalid,
-      setPasswordRequired,
-      setProbedShareId,
-      setSelected,
-    ],
-  );
-
   const loadCollection = React.useCallback(
     async (trimmedUrl: string, loadPassword?: string) => {
       const parsed = tryParseDownloadUrl(trimmedUrl);
@@ -274,95 +196,58 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       }
 
       const seq = ++loadSeqRef.current;
-      setLoading(true);
+      setPreparation({ status: "preparing" });
       setExtendedLoadProgress(extended ? { current: 0, total: 0 } : null);
 
-      let effectiveAsciiFilenames = false;
       try {
         await hydrateSettings();
-        effectiveAsciiFilenames = useNewDownloadDraft.getState().asciiFilenames;
-        const loaded = await window.api.invoke("download:loadCollection", {
+        const result = await window.api.invoke("download:prepare", {
           url: trimmedUrl,
           password: loadPassword || undefined,
-          asciiFilenames: effectiveAsciiFilenames,
+          asciiFilenames: useNewDownloadDraft.getState().asciiFilenames,
         });
 
         if (seq !== loadSeqRef.current) {
           return;
         }
 
-        setCollection(loaded);
-        setSelected(collectAllPaths(loaded.tree));
-        setPasswordRequired(false);
-        setPasswordInvalid(false);
-        setProbedShareId(parsed ? downloadUrlIdentity(parsed) : trimmedUrl);
+        if (result.status === "ready") {
+          setPreparation(result);
+          setSelected(collectAllPaths(result.collection.tree));
+          return;
+        }
+        if (result.status === "passwordRequired") {
+          setPreparation(result);
+          setSelected(new Set());
+          requestAnimationFrame(() => passwordInputRef.current?.focus());
+          return;
+        }
+        setPreparation({ status: "error", message: result.message });
+        setSelected(new Set());
+        toast.error("컬렉션을 불러오지 못했습니다", { description: result.message });
       } catch (error) {
         if (seq !== loadSeqRef.current) {
           return;
         }
-
-        if (
-          loadPassword &&
-          (isCollectionInvalidPasswordError(error) || isExtendedShareInvalidPasswordError(error))
-        ) {
-          setPasswordInvalid(true);
-          setCollection(null);
-          setSelected(new Set());
-          return;
-        }
-
-        if (
-          !loadPassword &&
-          (isCollectionPasswordRequiredError(error) || isExtendedSharePasswordRequiredError(error))
-        ) {
-          setProbedShareId(parsed ? downloadUrlIdentity(parsed) : trimmedUrl);
-          setPasswordRequired(true);
-          setCollection(null);
-          setSelected(new Set());
-
-          const autoTried = await tryAutoCollectionPasswords(
-            trimmedUrl,
-            parsed ? downloadUrlIdentity(parsed) : trimmedUrl,
-            seq,
-            effectiveAsciiFilenames,
-          );
-          if (autoTried || seq !== loadSeqRef.current) {
-            return;
-          }
-
-          requestAnimationFrame(() => passwordInputRef.current?.focus());
-          return;
-        }
-
-        setPasswordRequired(null);
-        setProbedShareId(null);
-        setCollection(null);
+        const message = getIpcErrorCause(error);
+        setPreparation({ status: "error", message });
         setSelected(new Set());
         toast.error("컬렉션을 불러오지 못했습니다", {
-          description: getIpcErrorCause(error),
+          description: message,
         });
       } finally {
         if (seq === loadSeqRef.current) {
-          setLoading(false);
           setExtendedLoadProgress(null);
         }
       }
     },
-    [
-      setCollection,
-      setPasswordInvalid,
-      setPasswordRequired,
-      setProbedShareId,
-      setSelected,
-      hydrateSettings,
-      tryAutoCollectionPasswords,
-    ],
+    [hydrateSettings, setPreparation, setSelected],
   );
 
   const verifyPassword = React.useCallback(() => {
     const trimmedUrl = url.trim();
     if (
-      passwordRequired !== true ||
+      !passwordRequired ||
       !password.trim() ||
       (!tryParseDownloadUrl(trimmedUrl) && !trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX))
     ) {
@@ -375,33 +260,20 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   React.useEffect(() => {
     const trimmedUrl = url.trim();
     const parsed = tryParseDownloadUrl(trimmedUrl);
-    const identity = parsed
-      ? downloadUrlIdentity(parsed)
-      : trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX)
-        ? trimmedUrl
-        : null;
+    const valid = parsed || trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX);
 
-    if (!identity) {
+    if (!valid) {
       loadSeqRef.current += 1;
-      clearProbeState();
-      setLoading(false);
+      void window.api.invoke("download:discardDraft", {
+        draftId: draftIdRef.current ?? undefined,
+      });
+      draftIdRef.current = null;
+      clearPreparation();
       return;
     }
-
-    if (
-      identity === probedShareId ||
-      (parsed != null && parsed.provider !== "workupload" && parsed.id === collection?.shareId)
-    ) {
-      return;
-    }
-
-    if (identity === probedShareId && passwordRequired === true) {
-      return;
-    }
-
-    clearProbeState();
+    clearPreparation();
     void loadCollection(trimmedUrl);
-  }, [clearProbeState, collection?.shareId, loadCollection, passwordRequired, probedShareId, url]);
+  }, [clearPreparation, loadCollection, url]);
 
   const displayTree = React.useMemo(
     () => (collection ? applyRenamesToTree(collection.tree, renames) : null),
@@ -415,34 +287,40 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
 
   const expandZip = React.useCallback(
     async (zipPath: string, fileId: string, zipPassword?: string) => {
-      if (!collection) {
+      if (!collection || !draftId) {
         return;
       }
       setZipLoading(zipPath, true);
       try {
         const result = await window.api.invoke("download:listZipEntries", {
-          url: url.trim(),
-          password: password || undefined,
+          draftId,
           fileId,
           zipPassword,
         });
+        if (result.status === "passwordRequired") {
+          setZipPasswordPrompt({ path: zipPath, fileId, invalid: result.invalid });
+          return;
+        }
+        if (result.status === "failed") {
+          if (result.code === "staleDraft") {
+            clearPreparation();
+          }
+          toast.error("ZIP 목록을 불러오지 못했습니다", { description: result.message });
+          return;
+        }
         if (zipPassword) {
           setZipPassword(fileId, zipPassword);
         }
         const nextTree = setZipEntries(collection.tree, fileId, result.entries);
-        setCollection({ ...collection, tree: nextTree });
+        setPreparation({
+          status: "ready",
+          draftId,
+          collection: { ...collection, tree: nextTree },
+        });
         updateSelected((prev) => selectExpandedZipEntries(prev, nextTree, zipPath, fileId));
         setZipPasswordPrompt(null);
         setZipPasswordInput("");
       } catch (error) {
-        if (isZipPasswordRequiredError(error) || isZipInvalidPasswordError(error)) {
-          setZipPasswordPrompt({
-            path: zipPath,
-            fileId,
-            invalid: isZipInvalidPasswordError(error),
-          });
-          return;
-        }
         toast.error("ZIP 목록을 불러오지 못했습니다", {
           description: getIpcErrorCause(error),
         });
@@ -450,7 +328,15 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         setZipLoading(zipPath, false);
       }
     },
-    [collection, password, setCollection, setZipLoading, setZipPassword, updateSelected, url],
+    [
+      clearPreparation,
+      collection,
+      draftId,
+      setPreparation,
+      setZipLoading,
+      setZipPassword,
+      updateSelected,
+    ],
   );
 
   const handleExpandZip = (zipPath: string, fileId: string) => {
@@ -480,18 +366,12 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     setSortDir("desc");
   };
 
-  const parsedCurrentUrl = tryParseDownloadUrl(url.trim());
-  const currentShareId =
-    parsedCurrentUrl?.id ?? (url.trim().startsWith(EXTENDED_SHARE_PREFIX) ? url.trim() : null);
-  const currentIdentity = parsedCurrentUrl ? downloadUrlIdentity(parsedCurrentUrl) : currentShareId;
-  const collectionSynced =
-    collection !== null &&
-    (collection.provider === "extended" || collection.provider === "workupload"
-      ? currentIdentity === probedShareId
-      : currentShareId === collection.shareId) &&
-    !loading;
   const canStart =
-    collectionSynced && summary.count > 0 && savePath.trim().length > 0 && passwordInvalid !== true;
+    collection !== null &&
+    draftId !== null &&
+    summary.count > 0 &&
+    savePath.trim().length > 0 &&
+    !loading;
   const effectiveSavePath =
     displayTree &&
     collection &&
@@ -501,25 +381,16 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       : null;
 
   const handleStart = async () => {
-    if (
-      !collection ||
-      !canStart ||
-      (collection.provider === "extended" || collection.provider === "workupload"
-        ? currentIdentity !== probedShareId
-        : currentShareId !== collection.shareId) ||
-      loading
-    ) {
+    if (!collection || !draftId || !canStart || loading) {
       return;
     }
     setStarting(true);
     try {
       const created = await window.api.invoke("download:create", {
-        url: url.trim(),
-        password: password || undefined,
+        draftId,
         savePath: savePath.trim(),
         selectedPaths: [...selected],
         zipPasswords: Object.keys(zipPasswords).length > 0 ? zipPasswords : undefined,
-        asciiFilenames,
         renames: Object.keys(renames).length > 0 ? renames : undefined,
       });
       if (!created) {
@@ -632,7 +503,9 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                       aria-invalid={passwordInvalid || undefined}
                       onChange={(e) => {
                         setPassword(e.target.value);
-                        setPasswordInvalid(false);
+                        if (passwordInvalid) {
+                          setPreparation({ status: "passwordRequired", invalid: false });
+                        }
                       }}
                       onKeyDown={(e) => {
                         if (e.key !== "Enter") return;
@@ -999,10 +872,4 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
     if (file) files.push(file);
   }
   return files;
-}
-
-function downloadUrlIdentity(parsed: ParsedDownloadUrl) {
-  return parsed.provider === "workupload"
-    ? `${parsed.provider}:${parsed.kind}:${parsed.id}`
-    : `${parsed.provider}:${parsed.id}`;
 }

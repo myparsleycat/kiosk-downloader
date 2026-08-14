@@ -1,11 +1,7 @@
-import type { DownloadItem, DownloadProgressPatch, FileProgress } from "@shared/types";
+import type { DownloadItem, FileProgress, TransferItemChange } from "@shared/types";
 import { describe, expect, it } from "vitest";
 
-import {
-    applyPendingItems,
-    mergeProgressPatch,
-    mergeProgressPatchIntoItems,
-} from "./merge-progress-patch";
+import { applyTransferItemChange, applyTransferItemChanges } from "./merge-progress-patch";
 
 const unchanged: FileProgress = {
     fileId: "file-a",
@@ -23,7 +19,7 @@ const changed: FileProgress = {
     size: 10,
     selected: true,
 };
-const item = {
+const item: DownloadItem = {
     id: "download-a",
     collection: {
         shareId: "share-a",
@@ -41,99 +37,58 @@ const item = {
     elapsedMs: 100,
     createdAt: 1,
     updatedAt: 1,
-} satisfies DownloadItem;
+};
 
-describe("mergeProgressPatch", () => {
-    it("변경된 파일만 교체하고 나머지 파일 참조를 보존한다", () => {
-        const replacement = { ...changed, downloaded: 10, status: "completed" as const };
-        const patch: DownloadProgressPatch = {
-            id: item.id,
-            progress: { "b.txt": replacement },
-            summary: { transferredBytes: 10, totalBytes: 20, completedFiles: 1, totalFiles: 2 },
-            status: "downloading",
-            speedBps: 20,
-            elapsedMs: 200,
-            updatedAt: 2,
-        };
-
-        const result = mergeProgressPatch(item, patch);
-
-        expect(result.progress["a.txt"]).toBe(unchanged);
-        expect(result.progress["b.txt"]).toBe(replacement);
-        expect(result.summary).toBe(patch.summary);
-    });
-
-    it("null 속도를 기존 item에서 제거한다", () => {
-        const result = mergeProgressPatch(item, {
-            id: item.id,
-            progress: {},
-            summary: item.summary,
-            status: "paused",
-            speedBps: null,
-            elapsedMs: 300,
-            updatedAt: 3,
-        });
-
-        expect(result.speedBps).toBeUndefined();
-    });
-
-    it("존재하지 않는 collection patch를 무시한다", () => {
-        const items: DownloadItem[] = [item];
-        const result = mergeProgressPatchIntoItems(items, {
-            id: "missing",
-            progress: {},
-            summary: item.summary,
-            status: "downloading",
-            speedBps: 1,
-            elapsedMs: 1,
-            updatedAt: 2,
-        });
-
-        expect(result).toBe(items);
-        expect(result[0]).toBe(item);
-    });
-
-    it("초기 목록 위에 collection별 마지막 full snapshot을 적용한다", () => {
+describe("transfer item changes", () => {
+    it("full item snapshot으로 기존 collection을 교체하고 새 collection을 추가한다", () => {
         const replacement: DownloadItem = { ...item, status: "paused" };
         const added: DownloadItem = { ...item, id: "download-b" };
 
-        const result = applyPendingItems(
-            [item],
-            new Map([
-                [item.id, replacement],
-                [added.id, added],
-            ]),
-        );
+        const replaced = applyTransferItemChange([item], {
+            revision: 2,
+            id: item.id,
+            item: replacement,
+        });
+        const result = applyTransferItemChange(replaced, {
+            revision: 3,
+            id: added.id,
+            item: added,
+        });
 
         expect(result).toEqual([added, replacement]);
     });
 
-    it("변경된 파일만 교체하고 나머지 파일의 completedElsewhere를 보존한다", () => {
-        const elsewhere: FileProgress = {
-            ...unchanged,
-            status: "completed",
-            downloaded: 10,
-            completedElsewhere: true,
-        };
-        const base = {
-            ...item,
-            progress: { "a.txt": elsewhere, "b.txt": changed },
-        } satisfies DownloadItem;
-        const replacement = { ...changed, downloaded: 10, status: "completed" as const };
-        const patch: DownloadProgressPatch = {
+    it("item이 null이면 collection을 삭제한다", () => {
+        const result = applyTransferItemChange([item], {
+            revision: 2,
             id: item.id,
-            progress: { "b.txt": replacement },
-            summary: { transferredBytes: 20, totalBytes: 20, completedFiles: 2, totalFiles: 2 },
-            status: "downloading",
-            speedBps: 20,
-            elapsedMs: 200,
-            updatedAt: 2,
-        };
+            item: null,
+        });
 
-        const result = mergeProgressPatch(base, patch);
+        expect(result).toEqual([]);
+    });
 
-        expect(result.progress["a.txt"]).toBe(elsewhere);
-        expect(result.progress["a.txt"].completedElsewhere).toBe(true);
-        expect(result.progress["b.txt"]).toBe(replacement);
+    it("list revision보다 새 이벤트만 revision 순서로 적용한다", () => {
+        const revisionThree = { ...item, status: "paused" as const, updatedAt: 3 };
+        const revisionFour = { ...item, status: "downloading" as const, updatedAt: 4 };
+        const changes: TransferItemChange<DownloadItem>[] = [
+            { revision: 4, id: item.id, item: revisionFour },
+            { revision: 1, id: item.id, item: { ...item, updatedAt: 1 } },
+            { revision: 3, id: item.id, item: revisionThree },
+        ];
+
+        const result = applyTransferItemChanges({ revision: 2, items: [item] }, changes);
+
+        expect(result).toEqual({ revision: 4, items: [revisionFour] });
+    });
+
+    it("같거나 오래된 revision과 tombstone 뒤의 뒤늦은 이벤트를 무시한다", () => {
+        const result = applyTransferItemChanges({ revision: 2, items: [item] }, [
+            { revision: 5, id: item.id, item: null },
+            { revision: 4, id: item.id, item: { ...item, updatedAt: 4 } },
+            { revision: 5, id: item.id, item: { ...item, updatedAt: 5 } },
+        ]);
+
+        expect(result).toEqual({ revision: 5, items: [] });
     });
 });

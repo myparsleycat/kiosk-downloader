@@ -1,88 +1,72 @@
 import type {
     DownloadItem,
-    DownloadProgressPatch,
+    TransferItemChange,
+    TransferListSnapshot,
     UploadItem,
-    UploadProgressPatch,
 } from "@shared/types";
 import * as React from "react";
 import { toast } from "sonner";
 
-import {
-    applyPendingItems,
-    mergeProgressPatchIntoItems,
-    upsertItem,
-} from "../lib/merge-progress-patch";
+import { applyTransferItemChange, applyTransferItemChanges } from "../lib/merge-progress-patch";
 
-interface TransferItemsSource<TItem extends { id: string }, TPatch> {
-    load: () => Promise<TItem[]>;
-    subscribeItems: (listener: (items: TItem[]) => void) => () => void;
-    subscribeItem: (listener: (item: TItem) => void) => () => void;
-    subscribeProgress: (listener: (patch: TPatch) => void) => () => void;
-    mergeProgress: (items: TItem[], patch: TPatch) => TItem[];
+interface TransferItemsSource<TItem extends { id: string }> {
+    load: () => Promise<TransferListSnapshot<TItem>>;
+    subscribe: (listener: (change: TransferItemChange<TItem>) => void) => () => void;
     loadErrorMessage: string;
 }
 
-export const downloadItemsSource: TransferItemsSource<DownloadItem, DownloadProgressPatch> = {
+export const downloadItemsSource: TransferItemsSource<DownloadItem> = {
     load: () => window.api.invoke("download:list"),
-    subscribeItems: (listener) => window.api.on("download:update", listener),
-    subscribeItem: (listener) => window.api.on("download:item-update", listener),
-    subscribeProgress: (listener) => window.api.on("download:progress-update", listener),
-    mergeProgress: mergeProgressPatchIntoItems,
+    subscribe: (listener) => window.api.on("download:changed", listener),
     loadErrorMessage: "다운로드 목록을 불러오지 못했습니다",
 };
 
-export const uploadItemsSource: TransferItemsSource<UploadItem, UploadProgressPatch> = {
+export const uploadItemsSource: TransferItemsSource<UploadItem> = {
     load: () => window.api.invoke("upload:list"),
-    subscribeItems: (listener) => window.api.on("upload:update", listener),
-    subscribeItem: (listener) => window.api.on("upload:item-update", listener),
-    subscribeProgress: (listener) => window.api.on("upload:progress-update", listener),
-    mergeProgress: mergeProgressPatchIntoItems,
+    subscribe: (listener) => window.api.on("upload:changed", listener),
     loadErrorMessage: "업로드 목록을 불러오지 못했습니다",
 };
 
-export function useTransferItems<TItem extends { id: string }, TPatch>(
-    source: TransferItemsSource<TItem, TPatch>,
-) {
+export function useTransferItems<TItem extends { id: string }>(source: TransferItemsSource<TItem>) {
     const [items, setItems] = React.useState<TItem[]>([]);
 
     React.useEffect(() => {
         let mounted = true;
         let initialized = false;
-        const pendingItems = new Map<string, TItem>();
+        let revision = 0;
+        const pendingChanges: TransferItemChange<TItem>[] = [];
 
-        const offItems = source.subscribeItems((nextItems) => {
-            if (initialized) {
-                setItems(nextItems);
+        const unsubscribe = source.subscribe((change) => {
+            if (!initialized) {
+                pendingChanges.push(change);
                 return;
             }
-            for (const item of nextItems) pendingItems.set(item.id, item);
-        });
-        const offItem = source.subscribeItem((item) => {
-            if (initialized) {
-                setItems((previous) => upsertItem(previous, item));
-                return;
-            }
-            pendingItems.set(item.id, item);
-        });
-        const offProgress = source.subscribeProgress((patch) => {
-            if (!initialized) return;
+            if (change.revision <= revision) return;
+            revision = change.revision;
             // Progress must stay high-priority; startTransition defers bar updates under load.
-            setItems((previous) => source.mergeProgress(previous, patch));
+            setItems((previous) => applyTransferItemChange(previous, change));
         });
 
         void source
             .load()
-            .then((loadedItems) => {
+            .then((snapshot) => {
                 if (!mounted) return;
                 initialized = true;
-                setItems(applyPendingItems(loadedItems, pendingItems));
-                pendingItems.clear();
+                const current = applyTransferItemChanges(snapshot, pendingChanges);
+                revision = current.revision;
+                setItems(current.items);
+                pendingChanges.length = 0;
             })
             .catch((error) => {
                 if (!mounted) return;
                 initialized = true;
-                setItems(applyPendingItems([], pendingItems));
-                pendingItems.clear();
+                const current = applyTransferItemChanges(
+                    { revision: 0, items: [] },
+                    pendingChanges,
+                );
+                revision = current.revision;
+                setItems(current.items);
+                pendingChanges.length = 0;
                 toast.error(source.loadErrorMessage, {
                     description: error instanceof Error ? error.message : String(error),
                 });
@@ -90,9 +74,7 @@ export function useTransferItems<TItem extends { id: string }, TPatch>(
 
         return () => {
             mounted = false;
-            offItems();
-            offItem();
-            offProgress();
+            unsubscribe();
         };
     }, [source]);
 

@@ -15,7 +15,7 @@ describe("withLoggedError", () => {
                 logger,
                 "DownloadService:loadCollection",
                 {
-                    channel: "download:loadCollection",
+                    channel: "download:prepare",
                     stage: "load",
                     url: "https://user:secret@example.com/share/abc123?token=sensitive#fragment",
                     shareId: "abc123",
@@ -28,7 +28,7 @@ describe("withLoggedError", () => {
 
         expect(logError).toHaveBeenCalledWith(
             {
-                channel: "download:loadCollection",
+                channel: "download:prepare",
                 stage: "load",
                 url: "https://example.com/share/abc123",
                 shareId: "abc123",
