@@ -3,15 +3,10 @@ import {
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
 import { shareIdToUuidBytes, tryParseShareUrl } from "@shared/share-url";
-import type {
-    DirNode,
-    LoadCollectionPayload,
-    ProbeCollectionPayload,
-    ProbeCollectionResult,
-    TreeEntry,
-} from "@shared/types";
+import type { DirNode, LoadCollectionPayload, TreeEntry } from "@shared/types";
 import { isZipFileName } from "@shared/zip-tree";
 import { decode, encode } from "cbor-x";
+import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
 import type {
@@ -84,13 +79,22 @@ function extractShareId(url: string) {
 }
 
 export class KioApiClient {
+    private readonly downloadControlPlane = pLimit(4);
+    private readonly treeControlPlane = pLimit(4);
+
     public constructor(private readonly kd: KioskDownloader) {}
 
-    public async loadCollection(payload: LoadCollectionPayload): Promise<LoadedKioskCollection> {
+    public async loadCollection(
+        payload: LoadCollectionPayload & { signal?: AbortSignal },
+    ): Promise<LoadedKioskCollection> {
         const shareId = extractShareId(payload.url);
         const uuid = shareIdToUuid(shareId);
-        const unlocked = await this.unlockCollection(uuid, payload.password);
-        const tree = await this.buildTree(Buffer.from(unlocked.rootId, "hex"), unlocked.cat);
+        const unlocked = await this.unlockCollection(uuid, payload.password, payload.signal);
+        const tree = await this.buildTree(
+            Buffer.from(unlocked.rootId, "hex"),
+            unlocked.cat,
+            payload.signal,
+        );
 
         return {
             collection: {
@@ -109,28 +113,6 @@ export class KioApiClient {
         };
     }
 
-    public async probeCollection(payload: ProbeCollectionPayload): Promise<ProbeCollectionResult> {
-        const shareId = extractShareId(payload.url);
-        const uuid = shareIdToUuid(shareId);
-        const response = await this.cborPost(`${API_BASE_URL}/v0/collection/get`, { uuid });
-        const body = asRecord(response.body);
-
-        if (response.status === 200 && typeof body?.token === "string") {
-            return { passwordRequired: false };
-        }
-
-        if (response.status !== 418) {
-            throw new Error(`collection/get failed: HTTP ${response.status}`);
-        }
-
-        const meta = asRecord(body?.meta);
-        if (meta?.type === "password") {
-            return { passwordRequired: true };
-        }
-
-        throw new Error("Collection requires an unsupported protector.");
-    }
-
     public async refreshCollectionToken(row: DownloadCollectionRow) {
         const uuid = shareIdToUuid(row.shareId);
         return this.unlockCollection(uuid, row.passwordPlain ?? undefined);
@@ -138,6 +120,7 @@ export class KioApiClient {
 
     public async getSegments(remoteFileId: string, cat: string): Promise<SegmentDescriptor[]> {
         const response = await this.cborPost(
+            this.downloadControlPlane,
             `${API_BASE_URL}/v0/collection/file/gets`,
             { ids: [Buffer.from(remoteFileId, "hex")] },
             {
@@ -171,6 +154,7 @@ export class KioApiClient {
     }
 
     public streamSegment(
+        collectionId: string,
         segment: SegmentDescriptor,
         chunk: DownloadChunkRow,
         signal: AbortSignal,
@@ -181,6 +165,7 @@ export class KioApiClient {
             label: `Segment ${chunk.chunkIndex}`,
             mode: localStart > 0 ? "range" : "full",
             onPhaseChange,
+            collectionId,
         });
     }
 
@@ -190,6 +175,7 @@ export class KioApiClient {
      * unused prefix/suffix within the segment are skipped and the body is cancelled early.
      */
     public streamSegmentRange(
+        collectionId: string,
         segment: SegmentDescriptor,
         range: { localStart: number; localEnd: number },
         signal: AbortSignal,
@@ -200,11 +186,18 @@ export class KioApiClient {
             label: "Segment range",
             mode: useRange ? "range" : "slice",
             onPhaseChange,
+            collectionId,
         });
     }
 
-    private async unlockCollection(uuid: Buffer, password?: string) {
-        const first = await this.cborPost(`${API_BASE_URL}/v0/collection/get`, { uuid });
+    private async unlockCollection(uuid: Buffer, password?: string, signal?: AbortSignal) {
+        const first = await this.cborPost(
+            this.downloadControlPlane,
+            `${API_BASE_URL}/v0/collection/get`,
+            { uuid },
+            {},
+            signal,
+        );
         const firstBody = asRecord(first.body);
 
         if (first.status === 200 && typeof firstBody?.token === "string") {
@@ -226,10 +219,16 @@ export class KioApiClient {
             throw new Error(`Unsupported collection protector: ${String(meta?.type)}`);
         }
 
-        const second = await this.cborPost(`${API_BASE_URL}/v0/collection/get`, {
-            uuid,
-            protector: [{ type: "password", data: new Map([["password", password]]) }],
-        });
+        const second = await this.cborPost(
+            this.downloadControlPlane,
+            `${API_BASE_URL}/v0/collection/get`,
+            {
+                uuid,
+                protector: [{ type: "password", data: new Map([["password", password]]) }],
+            },
+            {},
+            signal,
+        );
         const secondBody = asRecord(second.body);
 
         if (second.status !== 200 || typeof secondBody?.token !== "string") {
@@ -257,12 +256,14 @@ export class KioApiClient {
         };
     }
 
-    private async buildTree(rootId: Buffer, cat: string) {
+    private async buildTree(rootId: Buffer, cat: string, signal?: AbortSignal) {
         const buildDir = async (id: Buffer, name: string): Promise<DirNode> => {
             const response = await this.cborPost(
+                this.treeControlPlane,
                 `${API_BASE_URL}/v0/collection/directory/get`,
                 { id },
                 { "Kiosk-CAT": cat },
+                signal,
             );
             const body = asRecord(response.body);
             if (response.status !== 200 || !body) {
@@ -326,34 +327,40 @@ export class KioApiClient {
     }
 
     private async cborPost(
+        plane: ReturnType<typeof pLimit>,
         url: string,
         bodyObj: unknown,
         headers: Record<string, string> = {},
+        signal?: AbortSignal,
     ): Promise<CborResponse> {
-        const body = Buffer.from(encode(bodyObj));
-        const response = await this.kd.http.request(url, {
-            method: "POST",
-            headers: {
-                "content-type": "application/cbor",
-                accept: "application/cbor",
-                ...headers,
-            },
-            body: body as BodyInit,
+        return await plane(async () => {
+            signal?.throwIfAborted();
+            const body = Buffer.from(encode(bodyObj));
+            const response = await this.kd.http.controlRequest(url, {
+                method: "POST",
+                headers: {
+                    "content-type": "application/cbor",
+                    accept: "application/cbor",
+                    ...headers,
+                },
+                body: body as BodyInit,
+                signal,
+            });
+            const raw = Buffer.from(await response.arrayBuffer());
+
+            let decoded: unknown = null;
+            try {
+                decoded = decode(raw);
+            } catch {
+                decoded = null;
+            }
+
+            return {
+                status: response.status,
+                raw,
+                body: decoded,
+            };
         });
-        const raw = Buffer.from(await response.arrayBuffer());
-
-        let decoded: unknown = null;
-        try {
-            decoded = decode(raw);
-        } catch {
-            decoded = null;
-        }
-
-        return {
-            status: response.status,
-            raw,
-            body: decoded,
-        };
     }
 }
 
@@ -390,6 +397,7 @@ export async function* streamSegmentBytes(
         label: string;
         mode: "full" | "range" | "slice";
         onPhaseChange?: (phase: "network" | "bandwidth-wait") => void;
+        collectionId: string;
     },
 ): AsyncGenerator<Uint8Array> {
     const expected = localEnd - localStart;
@@ -402,93 +410,106 @@ export async function* streamSegmentBytes(
         headers.Range = `bytes=${localStart}-${localEnd - 1}`;
     }
 
-    const response = await kd.http.request(url, {
-        headers,
-        signal,
-        timeout: false,
-    });
+    yield* kd.service.transfer.requestPool.runPayloadStream(
+        {
+            collectionId: options.collectionId,
+            direction: "download",
+            providerId: "kiosk-download",
+            signal,
+        },
+        async function* () {
+            const response = await kd.http.payloadRequest(url, {
+                headers,
+                signal,
+                timeout: false,
+            });
 
-    if (response.status !== 200 && response.status !== 206) {
-        throw new Error(`${options.label} HTTP ${response.status}`);
-    }
+            if (response.status !== 200 && response.status !== 206) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new Error(`${options.label} HTTP ${response.status}`);
+            }
 
-    if (!response.body) {
-        throw new Error(`${options.label} response has no body.`);
-    }
+            if (!response.body) {
+                throw new Error(`${options.label} response has no body.`);
+            }
 
-    const reader = response.body.getReader();
-    // slice: body is a full segment from local 0. range+200: server ignored Range and sent
-    // the full segment/file from 0 — skip to localStart. Always cancel when done so a 200
-    // full-archive body cannot keep downloading after we have the bytes we need.
-    const skip =
-        options.mode === "slice" || (options.mode === "range" && response.status === 200)
-            ? localStart
-            : 0;
-    let skipped = 0;
-    let yielded = 0;
-    const quantumSize = 64 * 1024;
+            const reader = response.body.getReader();
+            // slice: body is a full segment from local 0. range+200: server ignored Range and sent
+            // the full segment/file from 0 — skip to localStart. Always cancel when done so a 200
+            // full-archive body cannot keep downloading after we have the bytes we need.
+            const skip =
+                options.mode === "slice" || (options.mode === "range" && response.status === 200)
+                    ? localStart
+                    : 0;
+            let skipped = 0;
+            let yielded = 0;
+            const quantumSize = 64 * 1024;
 
-    try {
-        while (yielded < expected) {
+            try {
+                while (yielded < expected) {
+                    if (signal.aborted) {
+                        throw new DOMException("The operation was aborted.", "AbortError");
+                    }
+
+                    options.onPhaseChange?.("network");
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        break;
+                    }
+                    if (!value || value.length === 0) {
+                        continue;
+                    }
+
+                    let slice = value;
+                    if (skipped < skip) {
+                        const remainSkip = skip - skipped;
+                        if (slice.length <= remainSkip) {
+                            skipped += slice.length;
+                            options.onPhaseChange?.("bandwidth-wait");
+                            await kd.service.transfer.downloadBandwidth.take(slice.length, signal);
+                            continue;
+                        }
+                        const skippedPiece = slice.subarray(0, remainSkip);
+                        options.onPhaseChange?.("bandwidth-wait");
+                        await kd.service.transfer.downloadBandwidth.take(
+                            skippedPiece.length,
+                            signal,
+                        );
+                        slice = slice.subarray(remainSkip);
+                        skipped = skip;
+                    }
+
+                    const remaining = expected - yielded;
+                    if (slice.length > remaining) {
+                        slice = slice.subarray(0, remaining);
+                    }
+
+                    let offset = 0;
+                    while (offset < slice.length) {
+                        if (signal.aborted) {
+                            throw new DOMException("The operation was aborted.", "AbortError");
+                        }
+                        const end = Math.min(offset + quantumSize, slice.length);
+                        const quantum = slice.subarray(offset, end);
+                        options.onPhaseChange?.("bandwidth-wait");
+                        await kd.service.transfer.downloadBandwidth.take(quantum.length, signal);
+                        options.onPhaseChange?.("network");
+                        yielded += quantum.length;
+                        offset = end;
+                        yield quantum;
+                    }
+                }
+            } finally {
+                await reader.cancel().catch(() => undefined);
+            }
+
             if (signal.aborted) {
                 throw new DOMException("The operation was aborted.", "AbortError");
             }
 
-            options.onPhaseChange?.("network");
-            const { done, value } = await reader.read();
-            if (done) {
-                break;
+            if (yielded < expected) {
+                throw new Error(`${options.label} returned ${yielded}B, expected ${expected}B.`);
             }
-            if (!value || value.length === 0) {
-                continue;
-            }
-
-            let slice = value;
-            if (skipped < skip) {
-                const remainSkip = skip - skipped;
-                if (slice.length <= remainSkip) {
-                    skipped += slice.length;
-                    options.onPhaseChange?.("bandwidth-wait");
-                    await kd.service.transfer.downloadBandwidth.take(slice.length, signal);
-                    continue;
-                }
-                const skippedPiece = slice.subarray(0, remainSkip);
-                options.onPhaseChange?.("bandwidth-wait");
-                await kd.service.transfer.downloadBandwidth.take(skippedPiece.length, signal);
-                slice = slice.subarray(remainSkip);
-                skipped = skip;
-            }
-
-            const remaining = expected - yielded;
-            if (slice.length > remaining) {
-                slice = slice.subarray(0, remaining);
-            }
-
-            let offset = 0;
-            while (offset < slice.length) {
-                if (signal.aborted) {
-                    throw new DOMException("The operation was aborted.", "AbortError");
-                }
-                const end = Math.min(offset + quantumSize, slice.length);
-                const quantum = slice.subarray(offset, end);
-                options.onPhaseChange?.("bandwidth-wait");
-                await kd.service.transfer.downloadBandwidth.take(quantum.length, signal);
-                options.onPhaseChange?.("network");
-                yielded += quantum.length;
-                offset = end;
-                yield quantum;
-            }
-        }
-    } finally {
-        // Stop further network transfer (critical when server returns 200 with a huge body).
-        await reader.cancel().catch(() => undefined);
-    }
-
-    if (signal.aborted) {
-        throw new DOMException("The operation was aborted.", "AbortError");
-    }
-
-    if (yielded < expected) {
-        throw new Error(`${options.label} returned ${yielded}B, expected ${expected}B.`);
-    }
+        },
+    );
 }

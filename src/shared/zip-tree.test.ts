@@ -87,10 +87,12 @@ describe("zip selection helpers", () => {
         expect(file.zipEntry?.path).toBe("dir/a.png");
         expect(file.zipEntry?.uncompressedSize).toBe(20);
     });
+});
 
-    it("merges indexed entries onto ZipNode", () => {
+describe("zip entry expansion", () => {
+    it("attaches indexed entries to the matching zip without mutating the original tree", () => {
         const tree = sampleTree();
-        const children: TreeEntry[] = [
+        const indexed: TreeEntry[] = [
             {
                 kind: "file",
                 node: {
@@ -109,9 +111,40 @@ describe("zip selection helpers", () => {
                 },
             },
         ];
-        const next = setZipEntries(tree, "zip1", children);
-        const zip = listZipNodes(next)[0].zip;
-        expect(zip.entries).toEqual(children);
-        expect((sampleTree().entries[0].node as ZipNode).entries).toBeNull();
+
+        const next = setZipEntries(tree, "zip1", indexed);
+
+        expect((next.entries[0].node as ZipNode).entries).toEqual(indexed);
+        expect((tree.entries[0].node as ZipNode).entries).toBeNull();
+    });
+
+    it("leaves zips whose id does not match unexpanded", () => {
+        const tree = sampleTree();
+
+        const next = setZipEntries(tree, "some-other-id", []);
+
+        expect((next.entries[0].node as ZipNode).entries).toBeNull();
+        expect(next.entries[1].node.id).toBe("f1");
+    });
+
+    it("lists zip nodes with their paths, descending into expanded zips", () => {
+        const tree = sampleTree();
+        const expanded = setZipEntries(tree, "zip1", [
+            {
+                kind: "zip",
+                node: {
+                    type: "zip",
+                    id: "zip2",
+                    name: "inner.zip",
+                    size: 50,
+                    entries: null,
+                },
+            },
+        ]);
+
+        expect(listZipNodes(expanded).map(({ zip, path }) => [zip.id, path])).toEqual([
+            ["zip1", "photos.zip"],
+            ["zip2", "photos.zip/inner.zip"],
+        ]);
     });
 });

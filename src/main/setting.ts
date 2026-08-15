@@ -14,9 +14,9 @@ import {
     UPLOAD_CHUNK_RETRY_MAX,
     UPLOAD_CHUNK_RETRY_MIN,
     SETTING_LOG_LEVELS,
-    SEGMENT_POOL_SIZE_DEFAULT,
-    SEGMENT_POOL_SIZE_MAX,
-    SEGMENT_POOL_SIZE_MIN,
+    REQUEST_POOL_SIZE_DEFAULT,
+    REQUEST_POOL_SIZE_MAX,
+    REQUEST_POOL_SIZE_MIN,
     SETTING_THEMES,
     type SettingDefinition,
     type SettingKey,
@@ -43,7 +43,7 @@ type MainSettingSpec<K extends SettingKey> = {
     definition: SettingDefinition<K>;
     getDefault: () => AppSettings[K] | Promise<AppSettings[K]>;
     fromStored: (value: string | null | undefined) => AppSettings[K];
-    toStored?: (value: AppSettings[K]) => string;
+    toStored: (value: AppSettings[K]) => string;
     normalize?: (value: AppSettings[K]) => AppSettings[K];
     afterSet?: (value: AppSettings[K]) => Promise<void> | void;
 };
@@ -259,24 +259,27 @@ export class Setting {
                 toStored: (value) => JSON.stringify(value),
                 normalize: normalizeCollectionPasswordList,
             },
-            "transfer.segmentPoolSize": {
-                definition: APP_SETTINGS["transfer.segmentPoolSize"],
-                getDefault: () => SEGMENT_POOL_SIZE_DEFAULT,
+            "transfer.requestPoolSize": {
+                definition: APP_SETTINGS["transfer.requestPoolSize"],
+                getDefault: () => REQUEST_POOL_SIZE_DEFAULT,
                 fromStored: (value) =>
                     parseBoundedIntegerSetting(
                         value,
-                        SEGMENT_POOL_SIZE_DEFAULT,
-                        SEGMENT_POOL_SIZE_MIN,
-                        SEGMENT_POOL_SIZE_MAX,
+                        REQUEST_POOL_SIZE_DEFAULT,
+                        REQUEST_POOL_SIZE_MIN,
+                        REQUEST_POOL_SIZE_MAX,
                     ),
                 toStored: (value) => String(value),
                 normalize: (value) =>
                     clampInteger(
                         value,
-                        SEGMENT_POOL_SIZE_MIN,
-                        SEGMENT_POOL_SIZE_MAX,
-                        SEGMENT_POOL_SIZE_DEFAULT,
+                        REQUEST_POOL_SIZE_MIN,
+                        REQUEST_POOL_SIZE_MAX,
+                        REQUEST_POOL_SIZE_DEFAULT,
                     ),
+                afterSet: (value) => {
+                    this.kd.service.transfer.setRequestPoolSize(value);
+                },
             },
             "transfer.maxChunkRetries": {
                 definition: APP_SETTINGS["transfer.maxChunkRetries"],
@@ -419,8 +422,9 @@ export class Setting {
         const spec = this.getSettingSpec(key);
         const current = await this.findStoredSetting(spec.definition.storageKey);
 
-        if ((!current || current.value == null) && key === "transfer.segmentPoolSize") {
+        if ((!current || current.value == null) && key === "transfer.requestPoolSize") {
             for (const legacyStorageKey of [
+                "transfer.segmentPoolSize",
                 "transfer.maxConcurrentSegments",
                 "transfer.maxSegmentsPerFile",
             ]) {
@@ -432,7 +436,7 @@ export class Setting {
                 const resolved = spec.normalize
                     ? spec.normalize(spec.fromStored(legacy.value))
                     : spec.fromStored(legacy.value);
-                const storedValue = spec.toStored ? spec.toStored(resolved) : String(resolved);
+                const storedValue = spec.toStored(resolved);
                 await this.upsertStoredSetting(spec.definition.storageKey, storedValue);
                 return resolved;
             }
@@ -442,7 +446,7 @@ export class Setting {
             const fallback = spec.normalize
                 ? spec.normalize(await spec.getDefault())
                 : await spec.getDefault();
-            const storedValue = spec.toStored ? spec.toStored(fallback) : String(fallback);
+            const storedValue = spec.toStored(fallback);
             await this.upsertStoredSetting(spec.definition.storageKey, storedValue);
             return fallback;
         }
@@ -450,7 +454,7 @@ export class Setting {
         const resolved = spec.normalize
             ? spec.normalize(spec.fromStored(current.value))
             : spec.fromStored(current.value);
-        const storedValue = spec.toStored ? spec.toStored(resolved) : String(resolved);
+        const storedValue = spec.toStored(resolved);
 
         if (storedValue !== current.value) {
             await this.upsertStoredSetting(spec.definition.storageKey, storedValue);
@@ -480,7 +484,7 @@ export class Setting {
 
         const spec = this.getSettingSpec(key);
         const normalized = spec.normalize ? spec.normalize(value) : value;
-        const storedValue = spec.toStored ? spec.toStored(normalized) : String(normalized);
+        const storedValue = spec.toStored(normalized);
 
         await this.upsertStoredSetting(spec.definition.storageKey, storedValue);
         await spec.afterSet?.(normalized);

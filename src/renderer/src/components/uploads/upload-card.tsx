@@ -1,3 +1,4 @@
+import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-pool-usage";
 import { cn } from "@renderer/lib/utils";
 import type { UploadItem, UploadStatus } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
@@ -138,6 +139,7 @@ export function UploadCard({
             minute: "2-digit",
           })}
         </span>
+        <RequestPoolUsageLabel usage={item.requestPoolUsage} active={status === "uploading"} />
         {item.passwordProtected && (
           <span className="flex items-center gap-0.5">
             <LockIcon className="size-2.5" />

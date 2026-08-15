@@ -6,7 +6,7 @@ import {
 } from "@shared/download-errors";
 import { describe, expect, it, vi } from "vitest";
 
-import { HTTP, TimeoutError, type HttpRequestOptions } from "../../lib/http";
+import { HTTP, TimeoutError, type PayloadRequestOptions } from "../../lib/http";
 import {
     WorkuploadApiClient,
     parseWorkuploadArchiveManifest,
@@ -49,7 +49,7 @@ function passwordForm(kind: "file" | "archive", key: string, invalid = false) {
 
 function createClient(request: ReturnType<typeof vi.fn>) {
     return new WorkuploadApiClient({
-        http: { request },
+        http: { controlRequest: request, payloadRequest: request },
         logger: { warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     } as never);
 }
@@ -309,27 +309,6 @@ describe("WorkuploadApiClient", () => {
         await expect(
             createClient(request).createSession("https://workupload.com/archive/Archive9"),
         ).rejects.toThrow("total size does not match");
-    });
-
-    it("probes password-protected resources without submitting a password", async () => {
-        const request = vi.fn(async () => new Response(passwordForm("archive", "Archive9")));
-
-        await expect(
-            createClient(request).probeCollection({
-                url: "https://workupload.com/archive/Archive9",
-            }),
-        ).resolves.toEqual({ passwordRequired: true });
-        expect(request).toHaveBeenCalledTimes(1);
-    });
-
-    it("reports an unprotected resource from probe", async () => {
-        const request = vi.fn(async () => new Response(FILE_HTML));
-
-        await expect(
-            createClient(request).probeCollection({
-                url: "https://workupload.com/file/FileKey",
-            }),
-        ).resolves.toEqual({ passwordRequired: false });
     });
 
     it("requires a password before requesting an archive manifest", async () => {
@@ -844,8 +823,10 @@ describe("WorkuploadApiClient", () => {
         const http = new HTTP({} as never);
         const client = new WorkuploadApiClient({
             http: {
-                request: (url: string, options: HttpRequestOptions = {}) =>
-                    http.request(url, { ...options, fetch: fetchStub as typeof fetch }),
+                controlRequest: (url: string, options: PayloadRequestOptions = {}) =>
+                    http.controlRequest(url, { ...options, fetch: fetchStub as typeof fetch }),
+                payloadRequest: (url: string, options: PayloadRequestOptions = {}) =>
+                    http.payloadRequest(url, { ...options, fetch: fetchStub as typeof fetch }),
             },
         } as never);
 

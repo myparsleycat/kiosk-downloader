@@ -130,6 +130,22 @@ export interface TransferProgressSummary {
     totalFiles: number;
 }
 
+export interface RequestPoolUsage {
+    inFlight: number;
+    pending: number;
+}
+
+export interface TransferListSnapshot<T> {
+    revision: number;
+    items: T[];
+}
+
+export interface TransferItemChange<T> {
+    revision: number;
+    id: string;
+    item: T | null;
+}
+
 export interface TransferProgressPatch<TProgress, TStatus> {
     id: string;
     progress: Record<string, TProgress>;
@@ -153,6 +169,7 @@ export interface DownloadItem {
     updatedAt: number;
     error?: string;
     transferControl?: TransferControl;
+    requestPoolUsage?: RequestPoolUsage;
 }
 
 export type DownloadProgressPatch = TransferProgressPatch<FileProgress, DownloadStatus>;
@@ -224,6 +241,7 @@ export interface UploadItem {
     shareValue?: string | null;
     shareKind?: "url" | "extended" | "compatibility-list";
     requiresReplacement?: boolean;
+    requestPoolUsage?: RequestPoolUsage;
 }
 
 export type UploadProgressPatch = TransferProgressPatch<UploadFileProgress, UploadStatus>;
@@ -235,41 +253,46 @@ export interface CreateUploadPayload {
     turnstileToken?: string;
 }
 
-export interface LoadCollectionPayload {
+export interface PrepareDownloadPayload {
     url: string;
     password?: string;
     asciiFilenames?: boolean;
 }
 
-export interface ProbeCollectionPayload {
-    url: string;
-}
+export type LoadCollectionPayload = PrepareDownloadPayload;
 
-export interface ProbeCollectionResult {
-    passwordRequired: boolean;
-}
+export type PrepareDownloadResult =
+    | { status: "ready"; draftId: string; collection: Collection }
+    | { status: "passwordRequired"; invalid: boolean }
+    | {
+          status: "failed";
+          code: "invalidUrl" | "unsupportedShare" | "remoteFailure";
+          message: string;
+      };
 
 export interface CreateDownloadPayload {
-    url: string;
-    password?: string;
+    draftId: string;
     savePath: string;
     selectedPaths: string[];
-    asciiFilenames?: boolean;
     zipPasswords?: Record<string, string>;
     /** original relative node path → new basename (applied after collection load) */
     renames?: Record<string, string>;
 }
 
 export interface ListZipEntriesPayload {
-    url: string;
-    password?: string;
+    draftId: string;
     fileId: string;
     zipPassword?: string;
 }
 
-export interface ListZipEntriesResult {
-    entries: TreeEntry[];
-}
+export type ListZipEntriesResult =
+    | { status: "ready"; entries: TreeEntry[] }
+    | { status: "passwordRequired"; invalid: boolean }
+    | {
+          status: "failed";
+          code: "staleDraft" | "unsupportedProvider" | "zipNotFound";
+          message: string;
+      };
 
 export interface ResumePayload {
     force?: boolean;
@@ -343,13 +366,9 @@ export type IpcEvents = {
     "window:focus": () => void;
     "fn:toast": (message: string, data?: ToastData) => void;
     "renderer:reload": () => void;
-    "download:update": (items: DownloadItem[]) => void;
-    "download:item-update": (item: DownloadItem) => void;
-    "download:progress-update": (patch: DownloadProgressPatch) => void;
+    "download:changed": (change: TransferItemChange<DownloadItem>) => void;
     "download:extended-load-progress": (progress: { current: number; total: number }) => void;
-    "upload:update": (items: UploadItem[]) => void;
-    "upload:item-update": (item: UploadItem) => void;
-    "upload:progress-update": (patch: UploadProgressPatch) => void;
+    "upload:changed": (change: TransferItemChange<UploadItem>) => void;
     "upload:plan-progress": (progress: UploadPlanProgress) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;
     "updater:status-changed": (status: UpdaterStatus) => void;

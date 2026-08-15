@@ -83,6 +83,17 @@ export class KioskDownloader {
             upload: new UploadService(this),
             updater: new Updater(this),
         };
+        this.service.download.bindRequestPoolUsage();
+        this.service.upload.bindRequestPoolUsage();
+        this.service.transfer.bindActivitySources({
+            listOsProgressTransfers: () => [
+                ...this.service.download.listOsProgressTransfers(),
+                ...this.service.upload.listOsProgressTransfers(),
+            ],
+            hasActiveTransfers: () =>
+                this.service.download.hasActiveTransfers() ||
+                this.service.upload.hasActiveTransfers(),
+        });
     }
 
     private async syncAutoLaunchSetting() {
@@ -115,6 +126,7 @@ export class KioskDownloader {
         // Reconcile before services because some constructors may read persisted app state.
         await this.lib.db.reconcile();
         await this.service.transfer.applyBandwidthLimitsFromSettings();
+        await this.service.transfer.applyRequestPoolSettings();
 
         this.service.download.registerStartupTasks();
         await this.service.startupCleanup.runAll();

@@ -1,3 +1,4 @@
+import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-pool-usage";
 import {
   FILE_TREE_RIGHT_COLS,
   FileTree,
@@ -242,6 +243,10 @@ export function DownloadDetail({
               )}
             </span>
             <span className="flex items-center gap-2 tabular-nums">
+              <RequestPoolUsageLabel
+                usage={item.requestPoolUsage}
+                active={status === "downloading"}
+              />
               {speedLabel && <span className="text-primary">{speedLabel}</span>}
               <span>
                 {formatSize(downloadedBytes)} / {formatSize(totalBytes)}

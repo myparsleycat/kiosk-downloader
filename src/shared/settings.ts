@@ -24,7 +24,7 @@ export interface AppSettings {
     "general.autoUpdateMode": AutoUpdateMode;
     "general.autoTryCollectionPasswords": boolean;
     "general.collectionPasswordList": string[];
-    "transfer.segmentPoolSize": number;
+    "transfer.requestPoolSize": number;
     "transfer.maxChunkRetries": number;
     "transfer.uploadMaxChunkRetries": number;
     "transfer.streamWriteBatchBytes": number;
@@ -44,9 +44,16 @@ export const UPLOAD_CHUNK_RETRY_MIN = 1;
 export const UPLOAD_CHUNK_RETRY_MAX = 3;
 export const UPLOAD_CHUNK_RETRY_DEFAULT = 2;
 
-export const SEGMENT_POOL_SIZE_MIN = 2;
-export const SEGMENT_POOL_SIZE_MAX = 64;
-export const SEGMENT_POOL_SIZE_DEFAULT = 8;
+export const REQUEST_POOL_SIZE_MIN = 2;
+export const REQUEST_POOL_SIZE_MAX = 64;
+export const REQUEST_POOL_SIZE_DEFAULT = 8;
+
+export type TransferDirection = "download" | "upload";
+export type TransferProviderRequestId =
+    | "kiosk-upload"
+    | "kiosk-download"
+    | "workupload-download"
+    | "transfer-it-download";
 
 export const STREAM_WRITE_BATCH_BYTES_OPTIONS = [
     256 * 1024,
@@ -145,10 +152,10 @@ export const APP_SETTINGS = {
         scope: "general",
         storageKey: "collectionPasswordList",
     },
-    "transfer.segmentPoolSize": {
-        publicKey: "transfer.segmentPoolSize",
+    "transfer.requestPoolSize": {
+        publicKey: "transfer.requestPoolSize",
         scope: "transfer",
-        storageKey: "transfer.segmentPoolSize",
+        storageKey: "transfer.requestPoolSize",
     },
     "transfer.maxChunkRetries": {
         publicKey: "transfer.maxChunkRetries",

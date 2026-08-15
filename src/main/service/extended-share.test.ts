@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import { compressZstdSync } from "../lib/zstd";
 import {
     EXTENDED_SHARE_PREFIX,
-    KDS_CHECKSUM_BYTES,
     KDS_HEADER_SIZE,
     KDS_MAGIC,
     MAX_EXTENDED_SHARE_DECOMPRESSED_BYTES,
@@ -84,7 +83,6 @@ describe("extended share codec", () => {
         expect(isExtendedShareFile(file)).toBe(true);
         expect(file.subarray(0, KDS_MAGIC.length)).toEqual(KDS_MAGIC);
         expect(file.length).toBeGreaterThan(KDS_HEADER_SIZE);
-        expect(KDS_CHECKSUM_BYTES).toBe(32);
         expect(decodeExtendedShareFile(file)).toBe(encoded);
         expect(await decodeExtendedShare(decodeExtendedShareFile(file))).toEqual(payload);
     });

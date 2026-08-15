@@ -154,6 +154,29 @@ describe("PartFileWriter.writeChunkFromStream resume", () => {
         await writer.close();
     });
 
+    it("lets the source generator finish after the expected bytes arrive", async () => {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
+        tempDirs.push(dir);
+
+        const payload = Buffer.from("exactly-enough");
+        const partPath = path.join(dir, "complete.part");
+        let finished = false;
+        async function* source() {
+            yield payload;
+            finished = true;
+        }
+
+        const writer = new PartFileWriter(partPath);
+        await writer.open(payload.length, 1);
+        await expect(writer.writeChunkFromStream(0, 0, source(), payload.length, 8)).resolves.toBe(
+            payload.length,
+        );
+        await writer.close();
+
+        expect(finished).toBe(true);
+        expect(await fse.readFile(partPath)).toEqual(payload);
+    });
+
     it("rebuilds the digest without opening the source when the payload is fully written", async () => {
         const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
         tempDirs.push(dir);

@@ -21,17 +21,17 @@ import type { ExpandPathsResult, TitleBarOverlaySyncOptions } from "./types";
 
 export type IpcHandlers = {
     "download:create": DownloadService["create"];
+    "download:discardDraft": DownloadService["discardDraft"];
     "download:exportCollection": DownloadService["exportCollection"];
     "download:importCollection": DownloadService["importCollection"];
     "download:includeFile": DownloadService["includeFile"];
     "download:includeFolder": DownloadService["includeFolder"];
     "download:list": DownloadService["list"];
     "download:listZipEntries": DownloadService["listZipEntries"];
-    "download:loadCollection": DownloadService["loadCollection"];
+    "download:prepare": DownloadService["prepare"];
     "download:openFolder": DownloadService["openFolder"];
     "download:pauseCollection": DownloadService["pauseCollection"];
     "download:pauseFile": DownloadService["pauseFile"];
-    "download:probeCollection": DownloadService["probeCollection"];
     "download:readShareFile": DownloadService["readShareFile"];
     "download:remove": DownloadService["remove"];
     "download:resumeCollection": DownloadService["resumeCollection"];

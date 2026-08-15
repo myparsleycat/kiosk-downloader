@@ -14,7 +14,6 @@ import type {
     ExpandPathsResult,
     UploadFileProgress,
     UploadItem,
-    UploadProgressPatch,
     UploadTreeFile,
 } from "@shared/types";
 import { normalizePath } from "@shared/utils";
@@ -80,8 +79,8 @@ export class UploadService {
     private readonly bundleInitializations = new Map<string, Promise<unknown>>();
     /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
     private readonly draftSources = new Map<string, UploadSourceFile>();
-    private readonly pendingBundleProgress = new Map<string, Set<string>>();
-    private bundleProgressFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    private unsubscribeRequestPoolUsage?: () => void;
+    private revision = 0;
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioUploadClient(kd);
@@ -96,11 +95,22 @@ export class UploadService {
                 if (id) await this.handleCollectionUpdate(id);
                 else await this.emitUpdate();
             },
-            async (id, fileIds) => {
-                await this.emitProgressUpdate(id, fileIds);
+            async (id, fileIds, usageDirty) => {
+                await this.emitProgressUpdate(id, fileIds, usageDirty);
             },
         );
         this.preparationWorker = new PreparationWorkerClient(kd.logger);
+    }
+
+    public bindRequestPoolUsage() {
+        this.unsubscribeRequestPoolUsage = this.kd.service.transfer.onRequestPoolUsageChange(
+            (change) => {
+                if (change.direction !== "upload") {
+                    return;
+                }
+                this.scheduler.markCollectionProgress(change.collectionId);
+            },
+        );
     }
 
     public async solveTurnstile(): Promise<string> {
@@ -243,8 +253,11 @@ export class UploadService {
         );
     }
 
-    public async list(): Promise<UploadItem[]> {
-        return this.repository.listItems().map((item) => this.enrichItem(item));
+    public async list() {
+        return {
+            revision: this.revision,
+            items: this.repository.listItems().map((item) => this.enrichItem(item)),
+        };
     }
 
     public async pauseUpload(collectionId: string) {
@@ -340,13 +353,13 @@ export class UploadService {
             }
             this.repository.deleteBundle(bundle.id);
             await this.cleanupBundlePacks(bundle.id);
-            await this.emitUpdate();
+            await this.emitRemoved(collectionId);
             await this.kd.service.transfer.refreshPowerSaveBlock();
             return;
         }
         await this.scheduler.removeCollection(collectionId);
         this.repository.deleteCollection(collectionId);
-        await this.emitUpdate();
+        await this.emitRemoved(collectionId);
         await this.kd.service.transfer.refreshPowerSaveBlock();
     }
 
@@ -549,13 +562,9 @@ export class UploadService {
     }
 
     public destroy() {
-        if (this.bundleProgressFlushTimer) {
-            clearTimeout(this.bundleProgressFlushTimer);
-            this.bundleProgressFlushTimer = null;
-        }
-        this.pendingBundleProgress.clear();
         this.preparationWorker.destroy();
         this.scheduler.destroy();
+        this.unsubscribeRequestPoolUsage?.();
         this.turnstile.destroy();
         this.clearDraftSources();
     }
@@ -851,6 +860,11 @@ export class UploadService {
         const subCollectionIds = isBundle
             ? this.repository.listBundleCollections(item.id).map((c) => c.id)
             : [];
+        const requestPoolUsage = this.kd.service.transfer.getRequestPoolUsageSum(
+            "upload",
+            "kiosk-upload",
+            isBundle ? subCollectionIds : [item.id],
+        );
         const progress: Record<string, UploadFileProgress> = {};
 
         for (const [pathKey, fileProgress] of Object.entries(item.progress)) {
@@ -911,153 +925,52 @@ export class UploadService {
                     ? collectionSpeedBps
                     : undefined,
             elapsedMs,
+            requestPoolUsage,
         };
     }
 
-    private async emitProgressUpdate(collectionId: string, fileIds: Set<string>) {
-        if (fileIds.size === 0) {
+    private async emitProgressUpdate(
+        collectionId: string,
+        fileIds: Set<string>,
+        usageDirty: boolean,
+    ) {
+        if (fileIds.size === 0 && !usageDirty) {
             return;
         }
         const collection = this.repository.getCollection(collectionId);
         if (!collection) {
             return;
         }
-        if (collection.bundleId) {
-            this.queueBundleProgressUpdate(collection.bundleId, fileIds);
-            return;
-        }
-
-        const progress: Record<string, UploadFileProgress> = {};
-        for (const file of this.repository.listFilesByIds(collectionId, fileIds)) {
-            const snapshot = this.metrics.sampleFile(file.id, file.uploadedBytes);
-            progress[file.path] = {
-                fileId: file.id,
-                path: file.path,
-                status: file.status,
-                uploaded: Math.min(file.size, snapshot.uploaded),
-                size: file.size,
-                speedBps:
-                    file.status === "uploading" && snapshot.speedBps > 0
-                        ? snapshot.speedBps
-                        : undefined,
-                error: file.error ?? undefined,
-            };
-        }
-
-        const collectionSnapshot = this.metrics.getCollectionSnapshot(collectionId);
-        const summary = this.repository.getProgressSummary(collectionId);
-        const patch: UploadProgressPatch = {
-            id: collectionId,
-            progress,
-            summary: {
-                ...summary,
-                transferredBytes: Math.min(
-                    summary.totalBytes,
-                    summary.transferredBytes + collectionSnapshot.activeTransferredBytes,
-                ),
-            },
-            status: collection.status,
-            speedBps:
-                collection.status === "uploading"
-                    ? this.metrics.sampleCollection(collectionId) || null
-                    : null,
-            elapsedMs: this.scheduler.getCollectionElapsedMs(collectionId),
-            updatedAt: Date.parse(collection.updatedAt),
-        };
-        this.kd.ipc.sendToMainWindow("upload:progress-update", patch);
-        this.kd.service.transfer.syncMainWindowProgressBar();
-    }
-
-    private queueBundleProgressUpdate(bundleId: string, fileIds: ReadonlySet<string>) {
-        const pending = this.pendingBundleProgress.get(bundleId) ?? new Set<string>();
-        for (const fileId of fileIds) {
-            pending.add(fileId);
-        }
-        this.pendingBundleProgress.set(bundleId, pending);
-        if (this.bundleProgressFlushTimer) {
-            return;
-        }
-        this.bundleProgressFlushTimer = setTimeout(() => {
-            this.bundleProgressFlushTimer = null;
-            this.flushPendingBundleProgress();
-        }, 0);
-        this.bundleProgressFlushTimer.unref?.();
-    }
-
-    private flushPendingBundleProgress() {
-        const pending = [...this.pendingBundleProgress.entries()];
-        this.pendingBundleProgress.clear();
-        for (const [bundleId, fileIds] of pending) {
-            this.emitBundleProgressUpdate(bundleId, fileIds);
-        }
-    }
-
-    private emitBundleProgressUpdate(bundleId: string, dirtyFileIds: ReadonlySet<string>) {
-        const snapshot = this.repository.getBundleProgressSnapshot(bundleId, dirtyFileIds);
-        if (!snapshot) {
-            return;
-        }
-        const progress: Record<string, UploadFileProgress> = {};
-        for (const [pathKey, fileProgress] of Object.entries(snapshot.progress)) {
-            const physicalFileId = fileProgress.fileId.split("::", 1)[0];
-            const metricsSnapshot =
-                fileProgress.status === "uploading"
-                    ? this.metrics.sampleFile(physicalFileId, fileProgress.uploaded)
-                    : this.metrics.getFileSnapshot(physicalFileId, fileProgress.uploaded);
-            const uploaded = Math.min(
-                fileProgress.size,
-                Math.max(fileProgress.uploaded, metricsSnapshot.uploaded),
-            );
-            progress[pathKey] = {
-                ...fileProgress,
-                uploaded,
-                speedBps:
-                    fileProgress.status === "uploading" && metricsSnapshot.speedBps > 0
-                        ? metricsSnapshot.speedBps
-                        : undefined,
-            };
-        }
-        const bundleSnapshot = this.metrics.getBundleSnapshot(bundleId, snapshot.subCollectionIds);
-        const speedBps =
-            snapshot.status === "uploading"
-                ? this.metrics.sampleBundle(bundleId, snapshot.subCollectionIds)
-                : 0;
-        if (snapshot.status !== "uploading") {
-            this.metrics.clearBundle(bundleId);
-        }
-        const patch: UploadProgressPatch = {
-            id: bundleId,
-            progress,
-            summary: {
-                ...snapshot.summary,
-                transferredBytes: Math.min(
-                    snapshot.summary.totalBytes,
-                    snapshot.summary.transferredBytes + bundleSnapshot.activeTransferredBytes,
-                ),
-            },
-            status: snapshot.status,
-            speedBps: snapshot.status === "uploading" && speedBps > 0 ? speedBps : null,
-            elapsedMs: snapshot.elapsedMs,
-            updatedAt: snapshot.updatedAt,
-        };
-        this.kd.ipc.sendToMainWindow("upload:progress-update", patch);
-        this.kd.service.transfer.syncMainWindowProgressBar();
+        await this.emitUpdate(collection.bundleId ?? collectionId, { sampleSpeeds: true });
     }
 
     private async emitUpdate(collectionId?: string, options: { sampleSpeeds?: boolean } = {}) {
         if (collectionId) {
             const item = this.repository.getItem(collectionId);
             if (item) {
-                this.kd.ipc.sendToMainWindow("upload:item-update", this.enrichItem(item, options));
+                this.emitChanged(collectionId, this.enrichItem(item, options));
             }
             this.kd.service.transfer.syncMainWindowProgressBar();
             return;
         }
 
-        this.kd.ipc.sendToMainWindow(
-            "upload:update",
-            this.repository.listItems().map((item) => this.enrichItem(item, options)),
-        );
+        for (const item of this.repository.listItems()) {
+            this.emitChanged(item.id, this.enrichItem(item, options));
+        }
+        this.kd.service.transfer.syncMainWindowProgressBar();
+    }
+
+    private emitChanged(id: string, item: UploadItem | null) {
+        this.revision += 1;
+        this.kd.ipc.sendToMainWindow("upload:changed", {
+            revision: this.revision,
+            id,
+            item,
+        });
+    }
+
+    private async emitRemoved(id: string) {
+        this.emitChanged(id, null);
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 

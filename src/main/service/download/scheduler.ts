@@ -1,11 +1,10 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
 import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
 import fse from "fs-extra";
+import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
 import type { KioApiClient } from "./kio-api-client";
@@ -20,18 +19,15 @@ import type {
     SegmentDescriptor,
     ZipEntryStoredMeta,
 } from "./types";
+import type { WorkuploadApiClient } from "./workupload-api-client";
 
 import { TransferProgressBatcher } from "../transfer-progress-batcher";
+import { KioskDownloadRunner } from "./kiosk-download-runner";
 import { getBundleTempDirName, getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
-import { sleepWithAbort } from "./slow-chunk-monitor";
-import { parseTransferNodeKey, TransferChunkPool } from "./transfer-chunk-pool";
-import { parseWorkuploadFileSourceMeta } from "./types";
-import {
-    WorkuploadHttpError,
-    type WorkuploadApiClient,
-    type WorkuploadSession,
-} from "./workupload-api-client";
+import { TransferChunkPool } from "./transfer-chunk-pool";
+import { TransferItDownloadRunner } from "./transfer-it-download-runner";
+import { createWorkuploadLogContext, WorkuploadDownloadRunner } from "./workupload-download-runner";
 import { openZipFileEntry } from "./zip-index";
 import { inflateRawFile, zipDeflateProgressScale } from "./zip-inflate";
 import { ZipRangeReader } from "./zip-range-reader";
@@ -41,57 +37,7 @@ import {
     supportsZipEntryPoolDownload,
 } from "./zip-segment-map";
 
-type SessionCacheEntry =
-    | { kind: "kiosk"; cat: string; fetchedAt: number }
-    | { kind: "transfer"; authPw?: string; fetchedAt: number }
-    | { kind: "workupload"; session: WorkuploadSession; fetchedAt: number };
-
-class WorkuploadResponseError extends Error {
-    public constructor(
-        message: string,
-        public readonly status: number,
-    ) {
-        super(message);
-        this.name = "WorkuploadResponseError";
-    }
-}
-
-class WorkuploadChecksumError extends Error {
-    public constructor(expected: string, actual: string) {
-        super(`Workupload SHA-256 mismatch: expected ${expected}, got ${actual}.`);
-        this.name = "WorkuploadChecksumError";
-    }
-}
-
-type WorkuploadStage =
-    | "metadata"
-    | "state"
-    | "session"
-    | "cdn-request"
-    | "cdn-response"
-    | "write"
-    | "checksum"
-    | "finalize";
-
-type WorkuploadCleanupState = "not-attempted" | "reset" | "preserved";
-
-type WorkuploadLogContext = {
-    stage: WorkuploadStage;
-    retryCount: number;
-    rangeSupported: boolean | null;
-    cleanupState: WorkuploadCleanupState;
-};
-
-const WORKUPLOAD_BODY_STALL_TIMEOUT_MS = 15_000;
-const WORKUPLOAD_TRAILING_READ_TIMEOUT_MS = 2_000;
-const WORKUPLOAD_PARTIAL_PERSIST_INTERVAL_MS = 1000;
-
-class WorkuploadBodyStallError extends Error {
-    public constructor() {
-        super("Workupload CDN body stalled.");
-        this.name = "WorkuploadBodyStallError";
-    }
-}
+const CONTROL_PLANE_CONCURRENCY = 4;
 
 function isActiveFileDownloadStatus(status: FileDownloadStatus | undefined) {
     return status === "downloading" || status === "inflating";
@@ -132,78 +78,10 @@ async function* readableStreamToAsyncIterable(
     }
 }
 
-function isAbortError(error: unknown) {
-    return error instanceof DOMException && error.name === "AbortError";
-}
-
 function throwIfAborted(signal?: AbortSignal) {
     if (signal?.aborted) {
         throw new DOMException("The operation was aborted.", "AbortError");
     }
-}
-
-function readWorkuploadBodyChunk(
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    signal: AbortSignal,
-    abortRequest?: () => void,
-    timeoutMs = WORKUPLOAD_BODY_STALL_TIMEOUT_MS,
-) {
-    return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
-        let settled = false;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const cleanup = () => {
-            if (timer !== undefined) {
-                clearTimeout(timer);
-            }
-            signal.removeEventListener("abort", onAbort);
-        };
-        const settle = (finish: () => void) => {
-            if (settled) {
-                return;
-            }
-            settled = true;
-            cleanup();
-            finish();
-        };
-        const onAbort = () => {
-            settle(() => reject(new DOMException("The operation was aborted.", "AbortError")));
-        };
-
-        timer = setTimeout(() => {
-            settle(() => reject(new WorkuploadBodyStallError()));
-            abortRequest?.();
-        }, timeoutMs);
-        signal.addEventListener("abort", onAbort, { once: true });
-        if (signal.aborted) {
-            onAbort();
-            return;
-        }
-
-        try {
-            void reader.read().then(
-                (result) => settle(() => resolve(result)),
-                (error) => settle(() => reject(error)),
-            );
-        } catch (error) {
-            settle(() => reject(error));
-        }
-    });
-}
-
-async function sha256File(filePath: string, signal: AbortSignal) {
-    const hash = createHash("sha256");
-    const stream = createReadStream(filePath);
-    try {
-        for await (const chunk of stream) {
-            if (signal.aborted) {
-                throw new DOMException("The operation was aborted.", "AbortError");
-            }
-            hash.update(chunk);
-        }
-    } finally {
-        stream.destroy();
-    }
-    return hash.digest("hex");
 }
 
 export class DownloadScheduler {
@@ -212,29 +90,31 @@ export class DownloadScheduler {
     private readonly fileControllers = new Map<string, AbortController>();
     private readonly manualCollections = new Set<string>();
     private readonly manualFiles = new Set<string>();
-    private readonly sessionCache = new Map<string, SessionCacheEntry>();
     private readonly progressBatcher: TransferProgressBatcher;
     private readonly segmentPool: GlobalSegmentPool;
     private readonly transferPool: TransferChunkPool;
+    private readonly kioskRunner: KioskDownloadRunner;
+    private readonly transferRunner: TransferItDownloadRunner;
+    private readonly workuploadRunner: WorkuploadDownloadRunner;
     private readonly fileStartedAt = new Map<string, number>();
     private readonly collectionStartedAt = new Map<string, number>();
     private readonly collectionTimerStartedAt = new Map<string, number>();
-    private readonly nonPooledZipEntries = new Set<string>();
-    private readonly serializedWorkuploadFiles = new Set<string>();
+    private lastPreparationCollectionId: string | null = null;
     private isPumping = false;
     private pumpAgain = false;
 
     public constructor(
         private readonly kd: KioskDownloader,
-        private readonly api: KioApiClient,
-        private readonly transferApi: TransferItApiClient,
-        private readonly workuploadApi: WorkuploadApiClient,
+        api: KioApiClient,
+        transferApi: TransferItApiClient,
+        workuploadApi: WorkuploadApiClient,
         private readonly repository: DownloadRepository,
         private readonly metrics: DownloadTransferMetrics,
         private readonly emitUpdate: (collectionId?: string) => Promise<void>,
         private readonly emitProgressUpdate: (
             collectionId: string,
             fileIds: Set<string>,
+            usageDirty: boolean,
         ) => Promise<void>,
         private readonly onFileFinalized?: (
             collection: DownloadCollectionRow,
@@ -242,8 +122,8 @@ export class DownloadScheduler {
         ) => void,
     ) {
         this.progressBatcher = new TransferProgressBatcher(
-            async (collectionId, fileIds) => {
-                await this.emitProgressUpdate(collectionId, fileIds);
+            async (collectionId, fileIds, usageDirty) => {
+                await this.emitProgressUpdate(collectionId, fileIds, usageDirty);
                 const activeFileIds = this.activeFilesByCollection.get(collectionId);
                 if (!activeFileIds || activeFileIds.size === 0) {
                     this.progressBatcher.deactivate(collectionId);
@@ -253,7 +133,7 @@ export class DownloadScheduler {
         );
         this.segmentPool = new GlobalSegmentPool({
             kd: this.kd,
-            api: this.api,
+            api,
             repository: this.repository,
             metrics: this.metrics,
             onChunkSettled: () => {
@@ -265,7 +145,7 @@ export class DownloadScheduler {
         });
         this.transferPool = new TransferChunkPool({
             kd: this.kd,
-            api: this.transferApi,
+            api: transferApi,
             repository: this.repository,
             metrics: this.metrics,
             onChunkSettled: () => {
@@ -275,10 +155,62 @@ export class DownloadScheduler {
                 this.progressBatcher.mark(collectionId, fileId);
             },
         });
+        const runControl = pLimit(CONTROL_PLANE_CONCURRENCY);
+        const finalizeFile = (
+            collection: DownloadCollectionRow,
+            file: DownloadFileRow,
+            signal?: AbortSignal,
+        ) => this.finalizeFile(collection, file, signal);
+        const validateCompletedChunks = (
+            collection: DownloadCollectionRow,
+            file: DownloadFileRow,
+            chunks: DownloadChunkRow[],
+        ) => this.validateCompletedChunks(collection, file, chunks);
+        const getPartPath = (collection: DownloadCollectionRow, file: DownloadFileRow) =>
+            this.getPartPath(collection, file);
+        const markProgress = (collectionId: string, fileId: string) =>
+            this.progressBatcher.mark(collectionId, fileId);
+        this.kioskRunner = new KioskDownloadRunner({
+            api,
+            repository: this.repository,
+            segmentPool: this.segmentPool,
+            runControl,
+            getPartPath,
+            validateCompletedChunks,
+            finalizeFile,
+            markProgress,
+        });
+        this.transferRunner = new TransferItDownloadRunner({
+            api: transferApi,
+            repository: this.repository,
+            transferPool: this.transferPool,
+            getPartPath,
+            validateCompletedChunks,
+            finalizeFile,
+            markProgress,
+        });
+        this.workuploadRunner = new WorkuploadDownloadRunner({
+            api: workuploadApi,
+            repository: this.repository,
+            metrics: this.metrics,
+            runControl,
+            runPayload: (context, task) =>
+                this.kd.service.transfer.requestPool.runPayload(context, task),
+            takeBandwidth: (bytes, signal) =>
+                this.kd.service.transfer.downloadBandwidth.take(bytes, signal),
+            emitUpdate: (collectionId) => this.emitUpdate(collectionId),
+            markProgress,
+            getPartPath,
+            finalizeFile,
+        });
     }
 
     public hasActiveTransfers() {
         return this.fileControllers.size > 0;
+    }
+
+    public markCollectionProgress(collectionId: string) {
+        this.progressBatcher.markCollection(collectionId);
     }
 
     public getCollectionElapsedMs(collectionId: string) {
@@ -317,7 +249,7 @@ export class DownloadScheduler {
             this.metrics.clearFile(fileId);
         }
         this.deactivateCollectionTransfer(collectionId);
-        this.sessionCache.delete(collectionId);
+        this.clearProviderState(collectionId);
         this.clearCollectionStartTracking(collectionId);
         this.stopCollectionTimer(collectionId);
         this.progressBatcher.deactivate(collectionId);
@@ -330,7 +262,6 @@ export class DownloadScheduler {
 
     public pauseFile(fileId: string) {
         this.manualFiles.delete(fileId);
-        this.nonPooledZipEntries.delete(fileId);
         this.segmentPool.cancelSession(fileId);
         this.transferPool.cancelSession(fileId);
         this.fileControllers.get(fileId)?.abort();
@@ -352,7 +283,7 @@ export class DownloadScheduler {
         }
         this.deactivateCollectionTransfer(collectionId);
         this.manualCollections.delete(collectionId);
-        this.sessionCache.delete(collectionId);
+        this.clearProviderState(collectionId);
         this.clearCollectionStartTracking(collectionId);
         this.stopCollectionTimer(collectionId);
         this.progressBatcher.deactivate(collectionId);
@@ -360,6 +291,14 @@ export class DownloadScheduler {
 
     public destroy() {
         this.progressBatcher.destroy();
+        this.kioskRunner.destroy();
+        this.transferRunner.destroy();
+        this.workuploadRunner.destroy();
+        for (const [fileId, controller] of this.fileControllers) {
+            this.segmentPool.cancelSession(fileId);
+            this.transferPool.cancelSession(fileId);
+            controller.abort();
+        }
         for (const collectionId of [...this.collectionTimerStartedAt.keys()]) {
             this.stopCollectionTimer(collectionId);
         }
@@ -383,56 +322,69 @@ export class DownloadScheduler {
 
     private async pumpOnce() {
         const settings = await this.getSettings();
-        const segmentPoolSize = settings.segmentPoolSize;
-        this.segmentPool.resize(Math.max(1, segmentPoolSize - this.serializedWorkuploadFiles.size));
-        this.transferPool.start();
         const collections = this.repository.listRunnableCollections();
+        const maxActiveFileSessions = Math.max(settings.requestPoolSize, collections.length);
+        this.segmentPool.resize(settings.requestPoolSize);
+        this.transferPool.start(settings.requestPoolSize);
 
-        for (const collection of collections) {
-            const hasPending = this.repository.hasPendingFile(
-                collection.id,
-                this.fileControllers.keys(),
-            );
-            const isNewCollection = hasPending && !this.activeCollections.has(collection.id);
-
-            if (isNewCollection && this.activeCollections.size >= segmentPoolSize) {
-                continue;
-            }
-
+        while (this.fileControllers.size < maxActiveFileSessions) {
             let startedAny = false;
-            while (true) {
-                if (this.fileControllers.size >= segmentPoolSize) {
+            for (const collection of this.orderCollectionsForPreparation(collections)) {
+                if (this.fileControllers.size >= maxActiveFileSessions) {
                     break;
                 }
-
-                const nextFile = this.pickNextFile(collection.id);
-                if (!nextFile) {
-                    break;
+                if (!this.tryStartFile(collection, settings)) {
+                    continue;
                 }
-
-                if (!this.canStartFile(collection, segmentPoolSize)) {
-                    break;
-                }
-
-                this.startFile(collection, nextFile, settings);
+                this.lastPreparationCollectionId = collection.id;
+                this.ensureCollectionDownloading(collection);
                 startedAny = true;
             }
-
-            if (startedAny && collection.status !== "downloading") {
-                this.repository.markCollectionStatus(collection.id, "downloading");
+            if (!startedAny) {
+                break;
             }
         }
 
         await this.kd.service.transfer.refreshPowerSaveBlock();
     }
 
+    private orderCollectionsForPreparation(collections: DownloadCollectionRow[]) {
+        const previousIndex = collections.findIndex(
+            (collection) => collection.id === this.lastPreparationCollectionId,
+        );
+        if (previousIndex < 0) {
+            return collections;
+        }
+        return [
+            ...collections.slice(previousIndex + 1),
+            ...collections.slice(0, previousIndex + 1),
+        ];
+    }
+
     private async getSettings(): Promise<SchedulerSettings> {
         return {
-            segmentPoolSize: await this.kd.setting.get("transfer.segmentPoolSize"),
+            requestPoolSize: await this.kd.setting.get("transfer.requestPoolSize"),
             maxChunkRetries: await this.kd.setting.get("transfer.maxChunkRetries"),
             streamWriteBatchBytes: await this.kd.setting.get("transfer.streamWriteBatchBytes"),
             inflateBufferBytes: await this.kd.setting.get("transfer.inflateBufferBytes"),
         };
+    }
+
+    private ensureCollectionDownloading(collection: DownloadCollectionRow) {
+        if (collection.status === "downloading") {
+            return;
+        }
+        this.repository.markCollectionStatus(collection.id, "downloading");
+    }
+
+    private tryStartFile(collection: DownloadCollectionRow, settings: SchedulerSettings) {
+        const nextFile = this.pickNextFile(collection.id);
+        if (!nextFile) {
+            return false;
+        }
+
+        this.startFile(collection, nextFile, settings);
+        return true;
     }
 
     private pickNextFile(collectionId: string) {
@@ -451,63 +403,6 @@ export class DownloadScheduler {
             return 1;
         }
         return 2;
-    }
-
-    private getTotalInFlight() {
-        return (
-            this.segmentPool.getTotalInFlight() +
-            this.transferPool.getTotalInFlight() +
-            this.serializedWorkuploadFiles.size
-        );
-    }
-
-    private getOutstandingChunks(fileId: string) {
-        const segmentOutstanding = this.segmentPool.getOutstandingChunks(fileId);
-        if (segmentOutstanding !== null) {
-            return segmentOutstanding;
-        }
-        return this.transferPool.getOutstandingChunks(fileId);
-    }
-
-    private canStartFile(collection: DownloadCollectionRow, segmentPoolSize: number) {
-        const collectionId = collection.id;
-        const activeFileIds = [...(this.activeFilesByCollection.get(collectionId) ?? [])].filter(
-            (fileId) => this.fileControllers.has(fileId),
-        );
-
-        if (this.getTotalInFlight() >= segmentPoolSize) {
-            return false;
-        }
-
-        if (activeFileIds.length === 0) {
-            return true;
-        }
-
-        let outstandingChunks = 0;
-        let nonPooledCount = 0;
-        for (const fileId of activeFileIds) {
-            const outstanding = this.getOutstandingChunks(fileId);
-            if (outstanding === null) {
-                if (
-                    this.nonPooledZipEntries.has(fileId) ||
-                    this.serializedWorkuploadFiles.has(fileId)
-                ) {
-                    nonPooledCount += 1;
-                    continue;
-                }
-                // Still in pre-register setup; do not start more files in this collection.
-                return false;
-            }
-            outstandingChunks += outstanding;
-        }
-
-        if (nonPooledCount >= 1) {
-            return false;
-        }
-
-        // If active files have fewer outstanding chunks than the pool size, they cannot
-        // occupy every worker; let the next file fill the idle segment slots.
-        return outstandingChunks < segmentPoolSize;
     }
 
     private clearFileStartTracking(fileId: string) {
@@ -551,13 +446,8 @@ export class DownloadScheduler {
 
         const controller = new AbortController();
         this.fileControllers.set(file.id, controller);
-        if (collection.provider === "workupload") {
-            this.serializedWorkuploadFiles.add(file.id);
-            this.segmentPool.resize(
-                Math.max(1, settings.segmentPoolSize - this.serializedWorkuploadFiles.size),
-            );
-        }
         this.activeCollections.add(collection.id);
+        this.ensureCollectionDownloading(collection);
         this.progressBatcher.activate(collection.id);
 
         const activeFiles = this.activeFilesByCollection.get(collection.id) ?? new Set<string>();
@@ -566,16 +456,21 @@ export class DownloadScheduler {
 
         void this.runFile(collection.id, file.id, settings, controller).finally(() => {
             this.fileControllers.delete(file.id);
-            this.serializedWorkuploadFiles.delete(file.id);
             this.clearFileStartTracking(file.id);
             const files = this.activeFilesByCollection.get(collection.id);
             files?.delete(file.id);
             if (!files || files.size === 0) {
                 this.activeFilesByCollection.delete(collection.id);
-                this.activeCollections.delete(collection.id);
-                this.metrics.clearCollection(collection.id);
-                this.clearCollectionStartTracking(collection.id);
-                this.stopCollectionTimer(collection.id);
+                const keepActive = this.repository.hasPendingFile(
+                    collection.id,
+                    this.fileControllers.keys(),
+                );
+                if (!keepActive) {
+                    this.activeCollections.delete(collection.id);
+                    this.metrics.clearCollection(collection.id);
+                    this.clearCollectionStartTracking(collection.id);
+                    this.stopCollectionTimer(collection.id);
+                }
             }
             void this.afterFileSettled(collection.id, file.id);
         });
@@ -601,7 +496,7 @@ export class DownloadScheduler {
             collection.status === "expired"
         ) {
             this.manualCollections.delete(collectionId);
-            this.sessionCache.delete(collectionId);
+            this.clearProviderState(collectionId);
         }
 
         this.repository.recomputeCollectionStatus(collectionId);
@@ -628,6 +523,12 @@ export class DownloadScheduler {
             }
         } else {
             this.progressBatcher.mark(collectionId, fileId);
+            if (
+                updatedCollection?.status === "queued" &&
+                this.activeCollections.has(collectionId)
+            ) {
+                this.repository.markCollectionStatus(collectionId, "downloading");
+            }
         }
         await this.kd.service.transfer.refreshPowerSaveBlock();
         void this.schedule();
@@ -653,13 +554,7 @@ export class DownloadScheduler {
             return;
         }
 
-        let partWriter: PartFileWriter | null = null;
-        const workuploadContext: WorkuploadLogContext = {
-            stage: "metadata",
-            retryCount: 0,
-            rangeSupported: null,
-            cleanupState: "not-attempted",
-        };
+        const workuploadContext = createWorkuploadLogContext();
 
         try {
             this.repository.resetRunningChunksForFile(fileId);
@@ -679,77 +574,40 @@ export class DownloadScheduler {
             }
 
             if ((collection.provider ?? "kiosk") === "transfer") {
-                await this.runTransferFile(collection, file, settings, controller);
+                await this.transferRunner.runFile({
+                    collection,
+                    file,
+                    controller,
+                    maxChunkRetries: settings.maxChunkRetries,
+                    priority: this.getFilePriority(collectionId, fileId),
+                    startedAt: this.fileStartedAt.get(fileId) ?? Date.now(),
+                    collectionStartedAt: this.collectionStartedAt.get(collectionId) ?? Date.now(),
+                });
                 return;
             }
 
             if (collection.provider === "workupload") {
-                await this.runWorkuploadFile(
+                await this.workuploadRunner.runFile({
                     collection,
                     file,
-                    settings,
                     controller,
-                    workuploadContext,
-                );
+                    maxChunkRetries: settings.maxChunkRetries,
+                    streamWriteBatchBytes: settings.streamWriteBatchBytes,
+                    logContext: workuploadContext,
+                });
                 return;
             }
 
-            const chunks = this.repository.listChunks(file.id);
-            await this.validateCompletedChunks(collection, file, chunks);
-            this.repository.syncFileDownloadedBytes(fileId);
-
-            file = this.repository.getFile(fileId);
-            collection = this.repository.getCollection(collectionId);
-            if (!collection || !file) {
-                return;
-            }
-
-            const refreshedChunks = this.repository.listChunks(file.id);
-            if (file.size === 0 || this.areChunksComplete(refreshedChunks)) {
-                await this.finalizeFile(collection, file);
-                return;
-            }
-
-            const cat = await this.getCollectionToken(collection);
-            const segments = await this.api.getSegments(file.remoteId, cat);
-            const pendingChunks = refreshedChunks.filter(
-                (chunk) => chunk.status === "pending" || chunk.status === "error",
-            );
-            partWriter = new PartFileWriter(this.getPartPath(collection, file));
-            await partWriter.open(file.size, refreshedChunks.length);
-
-            const outcome = await this.segmentPool.register({
+            await this.kioskRunner.runFile({
                 collection,
                 file,
-                segments,
-                partWriter,
                 controller,
                 maxChunkRetries: settings.maxChunkRetries,
                 streamWriteBatchBytes: settings.streamWriteBatchBytes,
                 priority: this.getFilePriority(collectionId, fileId),
-                chunks: pendingChunks,
                 startedAt: this.fileStartedAt.get(fileId) ?? Date.now(),
                 collectionStartedAt: this.collectionStartedAt.get(collectionId) ?? Date.now(),
             });
-
-            if (outcome === "paused") {
-                if (!this.repository.hasErroredChunk(fileId)) {
-                    const currentFile = this.repository.getFile(fileId);
-                    if (isActiveFileDownloadStatus(currentFile?.status)) {
-                        this.repository.markFileStatus(fileId, "pending");
-                        this.progressBatcher.mark(collectionId, fileId);
-                    }
-                }
-                return;
-            }
-
-            if (outcome === "failed") {
-                return;
-            }
-
-            if (this.areChunksComplete(this.repository.listChunks(file.id))) {
-                await this.finalizeFile(collection, file);
-            }
         } catch (error) {
             this.repository.resetRunningChunksForFile(fileId);
             const currentFile = this.repository.getFile(fileId);
@@ -793,7 +651,6 @@ export class DownloadScheduler {
             );
             this.kd.logger.error(error, "DownloadService:runFile");
         } finally {
-            await partWriter?.close();
             this.metrics.clearFile(fileId);
         }
     }
@@ -815,12 +672,8 @@ export class DownloadScheduler {
         }
 
         if (!supportsZipEntryPoolDownload(meta)) {
-            this.nonPooledZipEntries.add(file.id);
-            try {
-                await this.runZipEntryWithZipJs(collection, file, meta, settings, controller);
-            } finally {
-                this.nonPooledZipEntries.delete(file.id);
-            }
+            void this.schedule();
+            await this.runZipEntryWithZipJs(collection, file, meta, settings, controller);
             return;
         }
 
@@ -828,8 +681,7 @@ export class DownloadScheduler {
         let removeStaging = false;
 
         try {
-            const cat = await this.getCollectionToken(collection);
-            const segments = await this.api.getSegments(file.remoteId, cat);
+            const segments = await this.kioskRunner.getFileSegments(collection, file, signal);
 
             meta = await this.ensureZipEntryDataOffset(collection, file, meta, segments, signal);
             file = this.repository.getFile(file.id) ?? file;
@@ -1020,10 +872,10 @@ export class DownloadScheduler {
         await partWriter.open(file.size, 1);
 
         try {
-            const cat = await this.getCollectionToken(collection);
-            const segments = await this.api.getSegments(file.remoteId, cat);
+            const segments = await this.kioskRunner.getFileSegments(collection, file, signal);
             const opened = await openZipFileEntry({
                 kd: this.kd,
+                collectionId: collection.id,
                 segments,
                 segmentSize: collection.segmentSize,
                 fileSize: meta.archiveSize,
@@ -1105,6 +957,7 @@ export class DownloadScheduler {
 
         const rangeReader = new ZipRangeReader({
             kd: this.kd,
+            collectionId: collection.id,
             segments,
             segmentSize: collection.segmentSize,
             fileSize: meta.archiveSize,
@@ -1189,573 +1042,10 @@ export class DownloadScheduler {
         this.metrics.clearCollection(collectionId);
     }
 
-    private async runTransferFile(
-        collection: DownloadCollectionRow,
-        file: DownloadFileRow,
-        settings: SchedulerSettings,
-        controller: AbortController,
-    ) {
-        let partWriter: PartFileWriter | null = null;
-
-        if (this.repository.reconcileTransferChunkLayout(file.id)) {
-            const partPath = this.getPartPath(collection, file);
-            await fse.remove(partPath).catch(() => undefined);
-            await PartFileWriter.removeSidecar(partPath);
-        }
-
-        const chunks = this.repository.listChunks(file.id);
-        await this.validateCompletedChunks(collection, file, chunks);
-        this.repository.syncFileDownloadedBytes(file.id);
-
-        const refreshedFile = this.repository.getFile(file.id);
-        const refreshedCollection = this.repository.getCollection(collection.id);
-        if (!refreshedFile || !refreshedCollection) {
-            return;
-        }
-
-        const refreshedChunks = this.repository.listChunks(refreshedFile.id);
-        if (refreshedFile.size === 0 || this.areChunksComplete(refreshedChunks)) {
-            await this.finalizeFile(refreshedCollection, refreshedFile);
-            return;
-        }
-
-        const authPw = this.getTransferAuth(refreshedCollection);
-        const nodeKey = parseTransferNodeKey(refreshedFile.sourceMetaJson);
-        const pendingChunks = refreshedChunks.filter(
-            (chunk) => chunk.status === "pending" || chunk.status === "error",
-        );
-        partWriter = new PartFileWriter(this.getPartPath(refreshedCollection, refreshedFile));
-        await partWriter.open(refreshedFile.size, refreshedChunks.length);
-
-        try {
-            const outcome = await this.transferPool.register({
-                collection: refreshedCollection,
-                file: refreshedFile,
-                nodeKey,
-                authPw,
-                partWriter,
-                controller,
-                maxChunkRetries: settings.maxChunkRetries,
-                priority: this.getFilePriority(refreshedCollection.id, refreshedFile.id),
-                chunks: pendingChunks,
-                startedAt: this.fileStartedAt.get(refreshedFile.id) ?? Date.now(),
-                collectionStartedAt:
-                    this.collectionStartedAt.get(refreshedCollection.id) ?? Date.now(),
-            });
-
-            if (outcome === "paused") {
-                if (!this.repository.hasErroredChunk(refreshedFile.id)) {
-                    const currentFile = this.repository.getFile(refreshedFile.id);
-                    if (isActiveFileDownloadStatus(currentFile?.status)) {
-                        this.repository.markFileStatus(refreshedFile.id, "pending");
-                        this.progressBatcher.mark(refreshedCollection.id, refreshedFile.id);
-                    }
-                }
-                return;
-            }
-
-            if (outcome === "failed") {
-                return;
-            }
-
-            if (this.areChunksComplete(this.repository.listChunks(refreshedFile.id))) {
-                await this.finalizeFile(refreshedCollection, refreshedFile);
-            }
-        } finally {
-            await partWriter?.close();
-        }
-    }
-
-    private async runWorkuploadFile(
-        collection: DownloadCollectionRow,
-        file: DownloadFileRow,
-        settings: SchedulerSettings,
-        controller: AbortController,
-        logContext: WorkuploadLogContext,
-    ) {
-        logContext.stage = "metadata";
-        const sourceMeta = parseWorkuploadFileSourceMeta(file.sourceMetaJson);
-        logContext.rangeSupported = sourceMeta.rangeSupported ?? null;
-        const partPath = this.getPartPath(collection, file);
-
-        if (file.size === 0) {
-            logContext.stage = "checksum";
-            const actual = createHash("sha256").update("").digest("hex");
-            if (actual !== sourceMeta.sha256) {
-                throw new WorkuploadChecksumError(sourceMeta.sha256, actual);
-            }
-            logContext.stage = "finalize";
-            await this.finalizeFile(collection, file, controller.signal);
-            return;
-        }
-
-        let rangeSupported = sourceMeta.rangeSupported;
-        let failures = 0;
-
-        while (true) {
-            logContext.stage = "state";
-            logContext.cleanupState = "not-attempted";
-            if (controller.signal.aborted) {
-                await this.settleStoppedWorkupload(
-                    collection,
-                    file,
-                    rangeSupported,
-                    controller,
-                    logContext,
-                );
-                return;
-            }
-
-            let chunk = this.repository.listChunks(file.id)[0];
-            if (!chunk) {
-                throw new Error("Missing Workupload chunk descriptor.");
-            }
-            let resumeOffset = Math.min(file.size, Math.max(0, chunk.downloadedBytes));
-            if (rangeSupported === false && resumeOffset > 0) {
-                await this.resetWorkuploadPartial(collection, file, logContext);
-                chunk = this.repository.listChunks(file.id)[0];
-                if (!chunk) {
-                    throw new Error("Missing Workupload chunk descriptor after reset.");
-                }
-                resumeOffset = 0;
-            }
-            if (resumeOffset > 0) {
-                const partSize = await fse
-                    .stat(partPath)
-                    .then((stat) => stat.size)
-                    .catch(() => -1);
-                if (partSize < resumeOffset || partSize > file.size) {
-                    await this.resetWorkuploadPartial(collection, file, logContext);
-                    continue;
-                }
-            }
-            if (resumeOffset === file.size) {
-                logContext.stage = "checksum";
-                const actualSha256 = await sha256File(partPath, controller.signal);
-                if (actualSha256 !== sourceMeta.sha256) {
-                    await this.resetWorkuploadPartial(collection, file, logContext);
-                    continue;
-                }
-                if (
-                    await this.settleStoppedWorkupload(
-                        collection,
-                        file,
-                        rangeSupported,
-                        controller,
-                        logContext,
-                    )
-                ) {
-                    return;
-                }
-                this.repository.markChunkCompleted(chunk, file.size);
-                this.repository.syncFileDownloadedBytes(file.id);
-                logContext.stage = "finalize";
-                await this.finalizeFile(collection, file, controller.signal);
-                return;
-            }
-
-            const partWriter = new PartFileWriter(partPath);
-            this.repository.markChunkDownloading(chunk);
-            this.metrics.registerFile(collection.id, file.id, resumeOffset);
-            let writtenBytes = resumeOffset;
-            let lastPartialPersistAt = 0;
-
-            try {
-                logContext.stage = "session";
-                const session = await this.getWorkuploadSession(
-                    collection,
-                    file.remoteId,
-                    controller.signal,
-                );
-                logContext.stage = "cdn-request";
-                const download = await session.requestDownload(file.remoteId, {
-                    start: resumeOffset,
-                    end: file.size - 1,
-                    signal: controller.signal,
-                });
-                const { response } = download;
-                logContext.stage = "cdn-response";
-                const detectedRange = await this.requireWorkuploadDownloadResponse(
-                    response,
-                    resumeOffset,
-                    file.size,
-                );
-                rangeSupported = detectedRange;
-                logContext.rangeSupported = detectedRange;
-                this.repository.updateWorkuploadRangeSupported(file.id, detectedRange);
-                await this.emitUpdate(collection.id);
-
-                if (!detectedRange && resumeOffset > 0) {
-                    await response.body?.cancel().catch(() => undefined);
-                    await partWriter.close();
-                    await this.resetWorkuploadPartial(collection, file, logContext);
-                    continue;
-                }
-                if (!response.body) {
-                    throw new Error("Workupload CDN response has no body.");
-                }
-
-                logContext.stage = "write";
-                await partWriter.open(file.size, 1);
-                const bytes = await partWriter.writeChunkFromStream(
-                    0,
-                    0,
-                    this.streamWorkuploadBody(
-                        response.body,
-                        controller.signal,
-                        file.size - resumeOffset,
-                        download.abort,
-                    ),
-                    file.size,
-                    settings.streamWriteBatchBytes,
-                    {
-                        onTransferProgress: (transferredBytes) => {
-                            this.metrics.setChunkTransferProgress(file.id, 0, transferredBytes);
-                            this.progressBatcher.mark(collection.id, file.id);
-                        },
-                        onWriteProgress: (nextWrittenBytes) => {
-                            writtenBytes = nextWrittenBytes;
-                            const now = Date.now();
-                            if (
-                                now - lastPartialPersistAt >=
-                                WORKUPLOAD_PARTIAL_PERSIST_INTERVAL_MS
-                            ) {
-                                this.repository.markChunkPartial(file.id, 0, writtenBytes);
-                                lastPartialPersistAt = now;
-                            }
-                            this.metrics.setChunkWriteProgress(
-                                file.id,
-                                0,
-                                writtenBytes - resumeOffset,
-                            );
-                            this.progressBatcher.mark(collection.id, file.id);
-                        },
-                    },
-                    { alreadyWritten: resumeOffset },
-                );
-                await partWriter.close();
-                if (
-                    await this.settleStoppedWorkupload(
-                        collection,
-                        file,
-                        rangeSupported,
-                        controller,
-                        logContext,
-                        writtenBytes,
-                    )
-                ) {
-                    return;
-                }
-                this.repository.markChunkCompleted(chunk, bytes);
-                this.repository.syncFileDownloadedBytes(file.id);
-                this.metrics.clearChunk(file.id, 0, file.size);
-
-                logContext.stage = "checksum";
-                const actualSha256 = await sha256File(partPath, controller.signal);
-                if (actualSha256 !== sourceMeta.sha256) {
-                    await this.resetWorkuploadPartial(collection, file, logContext);
-                    throw new WorkuploadChecksumError(sourceMeta.sha256, actualSha256);
-                }
-                if (
-                    await this.settleStoppedWorkupload(
-                        collection,
-                        file,
-                        rangeSupported,
-                        controller,
-                        logContext,
-                        writtenBytes,
-                    )
-                ) {
-                    return;
-                }
-
-                logContext.stage = "finalize";
-                await this.finalizeFile(collection, file, controller.signal);
-                return;
-            } catch (error) {
-                await partWriter.close();
-
-                if (isAbortError(error) || controller.signal.aborted) {
-                    await this.settleStoppedWorkupload(
-                        collection,
-                        file,
-                        rangeSupported,
-                        controller,
-                        logContext,
-                        writtenBytes,
-                    );
-                    return;
-                }
-
-                if (
-                    !this.isRetryableWorkuploadError(error) ||
-                    failures >= settings.maxChunkRetries
-                ) {
-                    if (rangeSupported === false) {
-                        await this.resetWorkuploadPartial(collection, file, logContext);
-                    } else if (logContext.cleanupState === "not-attempted") {
-                        logContext.cleanupState = "preserved";
-                    }
-                    throw error;
-                }
-
-                failures += 1;
-                logContext.retryCount = failures;
-                this.sessionCache.delete(collection.id);
-                if (rangeSupported !== true) {
-                    await this.resetWorkuploadPartial(collection, file, logContext);
-                } else {
-                    this.persistWorkuploadPartial(file.id, writtenBytes, logContext);
-                }
-                await sleepWithAbort(Math.min(4000, 250 * 2 ** (failures - 1)), controller.signal);
-            }
-        }
-    }
-
-    private async getWorkuploadSession(
-        collection: DownloadCollectionRow,
-        fileKey: string,
-        signal: AbortSignal,
-    ) {
-        const cached = this.sessionCache.get(collection.id);
-        if (cached?.kind === "workupload") {
-            return cached.session;
-        }
-
-        const session = await this.workuploadApi.createSession(collection.sourceUrl, {
-            requestedFileKey: fileKey,
-            password: collection.passwordPlain ?? undefined,
-            signal,
-        });
-        this.sessionCache.set(collection.id, {
-            kind: "workupload",
-            session,
-            fetchedAt: Date.now(),
-        });
-        return session;
-    }
-
-    private async requireWorkuploadDownloadResponse(
-        response: Response,
-        start: number,
-        fileSize: number,
-    ) {
-        if (response.status !== 200 && response.status !== 206) {
-            await response.body?.cancel().catch(() => undefined);
-            throw new WorkuploadResponseError(
-                `Workupload CDN HTTP ${response.status}.`,
-                response.status,
-            );
-        }
-
-        const expectedLength = response.status === 206 ? fileSize - start : fileSize;
-        const contentLength = response.headers.get("content-length");
-        if (contentLength !== null && Number(contentLength) !== expectedLength) {
-            await response.body?.cancel().catch(() => undefined);
-            throw new Error(
-                `Workupload CDN returned invalid Content-Length for ${expectedLength} bytes.`,
-            );
-        }
-        if (response.status === 200) {
-            return false;
-        }
-
-        const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(
-            response.headers.get("content-range") ?? "",
-        );
-        if (
-            !match ||
-            Number(match[1]) !== start ||
-            Number(match[2]) !== fileSize - 1 ||
-            Number(match[3]) !== fileSize
-        ) {
-            await response.body?.cancel().catch(() => undefined);
-            throw new Error("Workupload CDN returned an invalid Content-Range.");
-        }
-        return true;
-    }
-
-    private async *streamWorkuploadBody(
-        body: ReadableStream<Uint8Array>,
-        signal: AbortSignal,
-        expectedBytes: number,
-        abortRequest?: () => void,
-    ): AsyncGenerator<Uint8Array> {
-        const reader = body.getReader();
-        let receivedBytes = 0;
-        try {
-            while (true) {
-                if (signal.aborted) {
-                    throw new DOMException("The operation was aborted.", "AbortError");
-                }
-                const { done, value } = await readWorkuploadBodyChunk(reader, signal, abortRequest);
-                if (done) {
-                    if (receivedBytes !== expectedBytes) {
-                        throw new Error(
-                            `Workupload CDN returned ${receivedBytes}B, expected ${expectedBytes}B.`,
-                        );
-                    }
-                    return;
-                }
-                if (!value || value.length === 0) {
-                    continue;
-                }
-                receivedBytes += value.length;
-                if (receivedBytes > expectedBytes) {
-                    throw new Error(
-                        `Workupload CDN returned more than the expected ${expectedBytes}B.`,
-                    );
-                }
-                await this.kd.service.transfer.downloadBandwidth.take(value.length, signal);
-                yield value;
-                if (receivedBytes !== expectedBytes) {
-                    continue;
-                }
-                let trailing: ReadableStreamReadResult<Uint8Array>;
-                try {
-                    trailing = await readWorkuploadBodyChunk(
-                        reader,
-                        signal,
-                        abortRequest,
-                        WORKUPLOAD_TRAILING_READ_TIMEOUT_MS,
-                    );
-                } catch (error) {
-                    if (error instanceof WorkuploadBodyStallError) {
-                        return;
-                    }
-                    throw error;
-                }
-                while (!trailing.done && (!trailing.value || trailing.value.length === 0)) {
-                    try {
-                        trailing = await readWorkuploadBodyChunk(
-                            reader,
-                            signal,
-                            abortRequest,
-                            WORKUPLOAD_TRAILING_READ_TIMEOUT_MS,
-                        );
-                    } catch (error) {
-                        if (error instanceof WorkuploadBodyStallError) {
-                            return;
-                        }
-                        throw error;
-                    }
-                }
-                if (!trailing.done) {
-                    throw new Error(
-                        `Workupload CDN returned more than the expected ${expectedBytes}B.`,
-                    );
-                }
-            }
-        } finally {
-            await reader.cancel().catch(() => undefined);
-            reader.releaseLock();
-        }
-    }
-
-    private isRetryableWorkuploadError(error: unknown) {
-        if (error instanceof WorkuploadChecksumError) {
-            return false;
-        }
-        if (error instanceof WorkuploadResponseError || error instanceof WorkuploadHttpError) {
-            return (
-                error.status === 302 ||
-                error.status === 401 ||
-                error.status === 403 ||
-                error.status === 408 ||
-                error.status === 429 ||
-                error.status >= 500
-            );
-        }
-        return true;
-    }
-
-    private async resetWorkuploadPartial(
-        collection: DownloadCollectionRow,
-        file: DownloadFileRow,
-        logContext: WorkuploadLogContext,
-    ) {
-        const partPath = this.getPartPath(collection, file);
-        await fse.remove(partPath).catch(() => undefined);
-        await PartFileWriter.removeSidecar(partPath);
-        logContext.cleanupState = "reset";
-        this.repository.resetFileProgress(file.id);
-        this.metrics.clearFile(file.id);
-        this.progressBatcher.mark(collection.id, file.id);
-        await this.emitUpdate(collection.id);
-    }
-
-    private async settleStoppedWorkupload(
-        collection: DownloadCollectionRow,
-        file: DownloadFileRow,
-        rangeSupported: boolean | undefined,
-        controller: AbortController,
-        logContext: WorkuploadLogContext,
-        writtenBytes?: number,
-    ) {
-        const current = this.repository.getFile(file.id);
-        if (!controller.signal.aborted && current?.status !== "paused") {
-            return false;
-        }
-        if (rangeSupported === true) {
-            this.persistWorkuploadPartial(
-                file.id,
-                writtenBytes ?? current?.downloadedBytes ?? file.downloadedBytes,
-                logContext,
-            );
-            await this.emitUpdate(collection.id);
-        } else {
-            await this.resetWorkuploadPartial(collection, file, logContext);
-        }
-        if (isActiveFileDownloadStatus(current?.status)) {
-            this.repository.markFileStatus(file.id, "pending");
-        }
-        return true;
-    }
-
-    private persistWorkuploadPartial(
-        fileId: string,
-        writtenBytes: number,
-        logContext?: WorkuploadLogContext,
-    ) {
-        if (logContext) {
-            logContext.cleanupState = "preserved";
-        }
-        this.repository.markChunkPartial(fileId, 0, writtenBytes);
-        this.repository.markChunkPending(fileId, 0);
-        this.repository.syncWorkuploadDownloadedBytes(fileId);
-    }
-
-    private async getCollectionToken(collection: DownloadCollectionRow) {
-        const cached = this.sessionCache.get(collection.id);
-        if (cached?.kind === "kiosk") {
-            return cached.cat;
-        }
-
-        const refreshed = await this.api.refreshCollectionToken(collection);
-        this.repository.updateCollectionFreshMeta(collection.id, {
-            expires: refreshed.expires,
-        });
-        this.sessionCache.set(collection.id, {
-            kind: "kiosk",
-            cat: refreshed.cat,
-            fetchedAt: Date.now(),
-        });
-        return refreshed.cat;
-    }
-
-    private getTransferAuth(collection: DownloadCollectionRow) {
-        const cached = this.sessionCache.get(collection.id);
-        if (cached?.kind === "transfer") {
-            return cached.authPw;
-        }
-
-        const authPw = this.transferApi.deriveAuthPw(collection);
-        this.sessionCache.set(collection.id, {
-            kind: "transfer",
-            authPw,
-            fetchedAt: Date.now(),
-        });
-        return authPw;
+    private clearProviderState(collectionId: string) {
+        this.kioskRunner.clearCollection(collectionId);
+        this.transferRunner.clearCollection(collectionId);
+        this.workuploadRunner.clearCollection(collectionId);
     }
 
     private async validateCompletedChunks(

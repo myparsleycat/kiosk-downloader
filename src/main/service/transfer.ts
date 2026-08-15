@@ -1,7 +1,11 @@
+import { REQUEST_POOL_SIZE_DEFAULT } from "@shared/settings";
+import type { TransferDirection, TransferProviderRequestId } from "@shared/settings";
+
 import type { KioskDownloader } from "..";
 
 import { BandwidthLimiter } from "./bandwidth-limiter";
-import { syncMainWindowProgressBar } from "./os-progress-bar";
+import { syncMainWindowProgressBar, type OsProgressTransfer } from "./os-progress-bar";
+import { TransferScheduler, type RequestPoolUsageChange } from "./transfer-request-pool";
 import { shutdownSystem } from "./util";
 
 const MIB = 1024 * 1024;
@@ -9,11 +13,30 @@ const MIB = 1024 * 1024;
 export class TransferService {
     private shutdownRequested = false;
     private shutdownScheduling = false;
+    private readonly requestPoolUsageListeners = new Set<
+        (change: RequestPoolUsageChange) => void
+    >();
+    private activitySources: {
+        listOsProgressTransfers: () => OsProgressTransfer[];
+        hasActiveTransfers: () => boolean;
+    } = {
+        listOsProgressTransfers: () => [],
+        hasActiveTransfers: () => false,
+    };
 
     public readonly downloadBandwidth = new BandwidthLimiter();
     public readonly uploadBandwidth = new BandwidthLimiter();
+    public readonly requestPool = new TransferScheduler(REQUEST_POOL_SIZE_DEFAULT, (change) => {
+        for (const listener of this.requestPoolUsageListeners) {
+            listener(change);
+        }
+    });
 
     public constructor(private readonly kd: KioskDownloader) {}
+
+    public bindActivitySources(sources: typeof this.activitySources) {
+        this.activitySources = sources;
+    }
 
     public setDownloadBandwidthLimitMibps(mibps: number) {
         this.downloadBandwidth.setRateBps(mibps > 0 ? mibps * MIB : 0);
@@ -21,6 +44,41 @@ export class TransferService {
 
     public setUploadBandwidthLimitMibps(mibps: number) {
         this.uploadBandwidth.setRateBps(mibps > 0 ? mibps * MIB : 0);
+    }
+
+    public setRequestPoolSize(size: number) {
+        this.requestPool.resize(size);
+    }
+
+    public onRequestPoolUsageChange(listener: (change: RequestPoolUsageChange) => void) {
+        this.requestPoolUsageListeners.add(listener);
+        return () => {
+            this.requestPoolUsageListeners.delete(listener);
+        };
+    }
+
+    public getRequestPoolUsageSum(
+        direction: TransferDirection,
+        providerId: TransferProviderRequestId,
+        collectionIds: string[],
+    ) {
+        let inFlight = 0;
+        let pending = 0;
+        let found = false;
+        for (const collectionId of collectionIds) {
+            const usage = this.requestPool.getCollectionUsage({
+                direction,
+                providerId,
+                collectionId,
+            });
+            if (!usage) {
+                continue;
+            }
+            found = true;
+            inFlight += usage.inFlight;
+            pending += usage.pending;
+        }
+        return found ? { inFlight, pending } : undefined;
     }
 
     public async applyBandwidthLimitsFromSettings() {
@@ -32,18 +90,18 @@ export class TransferService {
         );
     }
 
+    public async applyRequestPoolSettings() {
+        this.setRequestPoolSize(await this.kd.setting.get("transfer.requestPoolSize"));
+    }
+
     public syncMainWindowProgressBar() {
-        const transfers = [
-            ...this.kd.service.download.listOsProgressTransfers(),
-            ...this.kd.service.upload.listOsProgressTransfers(),
-        ];
+        const transfers = this.activitySources.listOsProgressTransfers();
         syncMainWindowProgressBar(this.kd.window.main.window, transfers);
     }
 
     public async refreshPowerSaveBlock() {
         const shouldBlock =
-            (this.kd.service.download.hasActiveTransfers() ||
-                this.kd.service.upload.hasActiveTransfers()) &&
+            this.activitySources.hasActiveTransfers() &&
             (await this.kd.setting.get("general.powerSaveBlockInTransfer"));
 
         this.syncMainWindowProgressBar();
@@ -66,10 +124,7 @@ export class TransferService {
         if (this.shutdownRequested || this.shutdownScheduling) {
             return;
         }
-        if (
-            this.kd.service.download.listOsProgressTransfers().length > 0 ||
-            this.kd.service.upload.listOsProgressTransfers().length > 0
-        ) {
+        if (this.activitySources.listOsProgressTransfers().length > 0) {
             return;
         }
 

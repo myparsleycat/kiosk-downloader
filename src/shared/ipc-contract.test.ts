@@ -116,7 +116,7 @@ describe("IpcHandlers", () => {
         >();
         expectTypeOf<
             Awaited<ReturnType<IpcHandlers["download:create"]>>
-        >().toEqualTypeOf<DownloadItem | null>();
+        >().toEqualTypeOf<DownloadItem>();
         expectTypeOf<Parameters<IpcHandlers["window:syncTitleBarOverlay"]>>().toEqualTypeOf<
             [TitleBarOverlaySyncOptions]
         >();

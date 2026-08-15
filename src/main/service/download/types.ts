@@ -203,7 +203,7 @@ export type ZipEntrySegmentRange = {
 export type SegmentDownloadMode = "full-segment" | "byte-range";
 
 export type SchedulerSettings = {
-    segmentPoolSize: number;
+    requestPoolSize: number;
     maxChunkRetries: number;
     streamWriteBatchBytes: number;
     inflateBufferBytes: number;

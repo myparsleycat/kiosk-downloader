@@ -296,7 +296,7 @@ export class Updater {
         this.broadcastStatus();
 
         try {
-            const response = await this.kd.http.request(GITHUB_RELEASES_API_URL, {
+            const response = await this.kd.http.controlRequest(GITHUB_RELEASES_API_URL, {
                 headers: {
                     Accept: "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2022-11-28",
@@ -553,7 +553,7 @@ export class Updater {
         originalText: string,
         language: ReleaseNoteTranslationLanguage,
     ): Promise<string | null> {
-        const response = await this.kd.http.request(RELEASE_NOTES_TRANSLATION_URL, {
+        const response = await this.kd.http.controlRequest(RELEASE_NOTES_TRANSLATION_URL, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",

@@ -131,13 +131,8 @@ describe("extended share password classifiers", () => {
 });
 
 describe("isCollectionExpiresNever", () => {
-    it("returns true at and above the never-expires threshold", () => {
+    it("returns true at the never-expires threshold and false just below it", () => {
         expect(isCollectionExpiresNever(COLLECTION_EXPIRES_NEVER)).toBe(true);
-        expect(isCollectionExpiresNever(COLLECTION_EXPIRES_NEVER + 10_000)).toBe(true);
-    });
-
-    it("returns false below the threshold", () => {
         expect(isCollectionExpiresNever(COLLECTION_EXPIRES_NEVER - 1)).toBe(false);
-        expect(isCollectionExpiresNever(0)).toBe(false);
     });
 });

@@ -3,19 +3,14 @@ import {
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
 import { tryParseTransferUrl } from "@shared/share-url";
-import type {
-    DirNode,
-    FileNode,
-    LoadCollectionPayload,
-    ProbeCollectionPayload,
-    ProbeCollectionResult,
-    TreeEntry,
-} from "@shared/types";
+import type { DirNode, FileNode, LoadCollectionPayload, TreeEntry } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
+import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
 import type { DownloadCollectionRow, LoadedTransferCollection } from "./types";
 
+import { TransferRateLimitError } from "../transfer-request-pool";
 import {
     COLLECTION_EXPIRES_NEVER,
     TRANSFER_SEGMENT_SIZE,
@@ -46,13 +41,6 @@ type XiResponse = {
 
 export const TRANSFER_RATE_LIMIT_ERROR =
     "Transfer 서버가 다운로드 요청을 제한했습니다. 잠시 후 다시 시도해 주세요.";
-
-export class TransferRateLimitError extends Error {
-    public constructor(public readonly retryAfterMs?: number) {
-        super(TRANSFER_RATE_LIMIT_ERROR);
-        this.name = "TransferRateLimitError";
-    }
-}
 
 export function parseTransferRetryAfterMs(value: string | null) {
     if (!value) {
@@ -124,17 +112,15 @@ function sanitizeName(name: string) {
 }
 
 export class TransferItApiClient {
+    private readonly controlPlane = pLimit(4);
+
     public constructor(private readonly kd: KioskDownloader) {}
 
-    public async probeCollection(payload: ProbeCollectionPayload): Promise<ProbeCollectionResult> {
+    public async loadCollection(
+        payload: LoadCollectionPayload & { signal?: AbortSignal },
+    ): Promise<LoadedTransferCollection> {
         const xh = extractTransferId(payload.url);
-        const xi = await this.xi(xh);
-        return { passwordRequired: xi.pw === 1 };
-    }
-
-    public async loadCollection(payload: LoadCollectionPayload): Promise<LoadedTransferCollection> {
-        const xh = extractTransferId(payload.url);
-        const xi = await this.xi(xh);
+        const xi = await this.xi(xh, payload.signal);
         const passwordProtected = xi.pw === 1;
         let authPw: string | undefined;
 
@@ -143,7 +129,7 @@ export class TransferItApiClient {
                 throw new Error(COLLECTION_PASSWORD_REQUIRED_ERROR);
             }
             authPw = deriveTransferPassword(xh, payload.password);
-            const xv = await this.megaApi({ a: "xv", xh, pw: authPw });
+            const xv = await this.megaApi({ a: "xv", xh, pw: authPw }, {}, payload.signal);
             if (xv !== 1) {
                 throw new Error(COLLECTION_INVALID_PASSWORD_ERROR);
             }
@@ -153,7 +139,10 @@ export class TransferItApiClient {
         if (authPw) {
             query.pw = authPw;
         }
-        const fResp = assertMegaResult(await this.megaApi({ a: "f", c: 1, r: 1 }, query), "f") as {
+        const fResp = assertMegaResult(
+            await this.megaApi({ a: "f", c: 1, r: 1 }, query, payload.signal),
+            "f",
+        ) as {
             f?: MegaNode[];
         };
         if (!Array.isArray(fResp.f)) {
@@ -207,53 +196,62 @@ export class TransferItApiClient {
         return { url: g.g, size: typeof g.s === "number" ? g.s : undefined };
     }
 
-    private async xi(xh: string) {
-        const xi = assertMegaResult(await this.megaApi({ a: "xi", xh }), "xi");
+    private async xi(xh: string, signal?: AbortSignal) {
+        const xi = assertMegaResult(await this.megaApi({ a: "xi", xh }, {}, signal), "xi");
         if (!xi || typeof xi !== "object") {
             throw new Error("Transfer info failed.");
         }
         return xi as XiResponse;
     }
 
-    private async megaApi(payload: Record<string, unknown>, query: Record<string, string> = {}) {
-        const qs = new URLSearchParams(query).toString();
-        const url = `${API_BASE}?${qs}`;
-        const body = JSON.stringify([payload]);
+    private async megaApi(
+        payload: Record<string, unknown>,
+        query: Record<string, string> = {},
+        signal?: AbortSignal,
+    ) {
+        return await this.controlPlane(async () => {
+            const qs = new URLSearchParams(query).toString();
+            const url = `${API_BASE}?${qs}`;
+            const body = JSON.stringify([payload]);
 
-        const response = await this.kd.http.request(url, {
-            method: "POST",
-            headers: {
-                "Content-Type": "text/plain;charset=UTF-8",
-                Origin: "https://transfer.it",
-                Referer: "https://transfer.it/",
-            },
-            body,
+            const response = await this.kd.http.controlRequest(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "text/plain;charset=UTF-8",
+                    Origin: "https://transfer.it",
+                    Referer: "https://transfer.it/",
+                },
+                body,
+                signal,
+            });
+
+            if (response.status === 402) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
+            }
+            if (response.status === 509) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new TransferRateLimitError(
+                    parseTransferRetryAfterMs(response.headers.get("retry-after")),
+                );
+            }
+            if (!response.ok) {
+                await response.body?.cancel().catch(() => undefined);
+                throw new Error(`Transfer API HTTP ${response.status}.`);
+            }
+
+            let parsed: unknown;
+            try {
+                parsed = await response.json();
+            } catch (error) {
+                throw new Error(`Transfer API bad JSON: ${toErrorMessage(error)}`);
+            }
+
+            if (!Array.isArray(parsed)) {
+                throw new Error(`Unexpected Transfer API response: ${JSON.stringify(parsed)}`);
+            }
+            return parsed[0];
         });
-
-        if (response.status === 402) {
-            throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
-        }
-        if (response.status === 509) {
-            await response.body?.cancel().catch(() => undefined);
-            throw new TransferRateLimitError(
-                parseTransferRetryAfterMs(response.headers.get("retry-after")),
-            );
-        }
-        if (!response.ok) {
-            throw new Error(`Transfer API HTTP ${response.status}.`);
-        }
-
-        let parsed: unknown;
-        try {
-            parsed = await response.json();
-        } catch (error) {
-            throw new Error(`Transfer API bad JSON: ${toErrorMessage(error)}`);
-        }
-
-        if (!Array.isArray(parsed)) {
-            throw new Error(`Unexpected Transfer API response: ${JSON.stringify(parsed)}`);
-        }
-        return parsed[0];
     }
 
     private buildTree(nodes: MegaNode[], zipHandle: string | undefined) {

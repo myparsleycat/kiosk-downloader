@@ -1,10 +1,12 @@
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { REQUEST_POOL_SIZE_MAX } from "@shared/settings";
 import fse from "fs-extra";
 import { describe, expect, it, vi } from "vitest";
 
 import type { KioskDownloader } from "../..";
+import type { FileDownloadRegistration } from "./segment-pool";
 import type {
     DownloadChunkRow,
     DownloadCollectionRow,
@@ -21,23 +23,30 @@ type SchedulerInternals = {
         settings: SchedulerSettings,
         controller: AbortController,
     ) => Promise<void>;
-    getWorkuploadSession: (collection: DownloadCollectionRow, fileKey: string) => Promise<unknown>;
+    segmentPool: {
+        register: (registration: FileDownloadRegistration) => Promise<unknown>;
+        getTargetWorkers: () => number;
+        getRunningWorkers: () => number;
+    };
     finalizeFile: (
         collection: DownloadCollectionRow,
         file: DownloadFileRow,
         signal?: AbortSignal,
     ) => Promise<void>;
-    streamWorkuploadBody: (
-        body: ReadableStream<Uint8Array>,
-        signal: AbortSignal,
-        expectedBytes: number,
-        abortRequest?: () => void,
-    ) => AsyncGenerator<Uint8Array>;
-    persistWorkuploadPartial: (fileId: string, writtenBytes: number) => void;
+    workuploadRunner: {
+        getSession: (collection: DownloadCollectionRow, fileKey: string) => Promise<unknown>;
+        streamBody: (
+            body: ReadableStream<Uint8Array>,
+            signal: AbortSignal,
+            expectedBytes: number,
+            abortRequest?: () => void,
+        ) => AsyncGenerator<Uint8Array>;
+        persistPartial: (fileId: string, writtenBytes: number) => void;
+    };
 };
 
 describe("DownloadScheduler", () => {
-    it("keeps excess collections queued until an active file settles", async () => {
+    it("starts every collection when demand exceeds the configured segment pool", async () => {
         const collections = Array.from({ length: 10 }, (_, index) =>
             createCollection(`collection-${index}`, index),
         );
@@ -68,14 +77,9 @@ describe("DownloadScheduler", () => {
         await scheduler.schedule();
 
         expect(runFile.mock.calls.map(([, fileId]) => fileId)).toEqual(
-            files.slice(0, 8).map((file) => file.id),
+            files.map((file) => file.id),
         );
-        expect(
-            collections.slice(0, 8).every((collection) => collection.status === "downloading"),
-        ).toBe(true);
-        expect(collections.slice(8).every((collection) => collection.status === "queued")).toBe(
-            true,
-        );
+        expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
         expect([...controllers.values()].every((controller) => !controller.signal.aborted)).toBe(
             true,
         );
@@ -83,34 +87,416 @@ describe("DownloadScheduler", () => {
 
         await scheduler.schedule();
 
-        expect(runFile).toHaveBeenCalledTimes(8);
+        expect(runFile).toHaveBeenCalledTimes(10);
         expect([...controllers.values()].every((controller) => !controller.signal.aborted)).toBe(
             true,
         );
 
-        files[0].status = "completed";
-        releases.get(files[0].id)?.();
+        scheduler.destroy();
+        for (const release of releases.values()) {
+            release();
+        }
+    });
 
-        await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(9));
-        expect(runFile.mock.calls[8]?.[1]).toBe(files[8].id);
-        expect(collections[8].status).toBe("downloading");
-        expect(collections[9].status).toBe("queued");
-        expect(repository.resetRunningChunksForFile).not.toHaveBeenCalled();
+    it("starts every collection when demand exceeds a smaller configured pool", async () => {
+        const collections = Array.from({ length: 6 }, (_, index) =>
+            createCollection(`collection-${index}`, index),
+        );
+        const files = collections.map((collection, index) =>
+            createFile(`file-${index}`, collection.id),
+        );
+        const repository = createRepository(collections, files);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(
+                { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+                {
+                    requestPoolSize: 2,
+                },
+            ),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(
+                async (_collectionId, fileId) =>
+                    new Promise<void>((resolve) => releases.set(fileId, resolve)),
+            );
 
+        await scheduler.schedule();
+
+        expect(runFile.mock.calls.map(([, fileId]) => fileId)).toEqual(
+            files.map((file) => file.id),
+        );
+        expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
+
+        scheduler.destroy();
+        for (const release of releases.values()) {
+            release();
+        }
+    });
+
+    it("admits one file from every collection beyond the payload cap", async () => {
+        const providers = ["kiosk", "transfer", "workupload"] as const;
+        const collections = Array.from({ length: REQUEST_POOL_SIZE_MAX + 1 }, (_, index) => {
+            const collection = createCollection(`collection-${index}`, index);
+            collection.provider =
+                index === REQUEST_POOL_SIZE_MAX ? "kiosk" : providers[index % providers.length];
+            return collection;
+        });
+        const files = collections.map((collection, index) =>
+            createFile(`file-${index}`, collection.id),
+        );
+        const repository = createRepository(collections, files);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(
+                { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+                { requestPoolSize: REQUEST_POOL_SIZE_MAX },
+            ),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        let active = 0;
+        let maxActive = 0;
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(async (_collectionId, fileId) => {
+                active += 1;
+                maxActive = Math.max(maxActive, active);
+                await new Promise<void>((resolve) => releases.set(fileId, resolve));
+                active -= 1;
+            });
+
+        await scheduler.schedule();
+        await scheduler.schedule();
+
+        expect(runFile).toHaveBeenCalledTimes(REQUEST_POOL_SIZE_MAX + 1);
+        expect(maxActive).toBe(REQUEST_POOL_SIZE_MAX + 1);
+
+        for (const file of files) file.status = "completed";
+        for (const release of releases.values()) {
+            release();
+        }
         scheduler.destroy();
     });
 
-    it("serializes files within each Workupload archive", async () => {
+    it("caps segment workers at 64 when kiosk demand exceeds the admission limit", async () => {
+        const collections = Array.from({ length: REQUEST_POOL_SIZE_MAX + 6 }, (_, index) =>
+            createCollection(`collection-${index}`, index),
+        );
+        const files = collections.map((collection, index) =>
+            createFile(`file-${index}`, collection.id),
+        );
+        const repository = createRepository(collections, files);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(
+                { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+                { requestPoolSize: REQUEST_POOL_SIZE_MAX },
+            ),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(
+                async (_collectionId, fileId) =>
+                    new Promise<void>((resolve) => releases.set(fileId, resolve)),
+            );
+
+        await scheduler.schedule();
+
+        expect(runFile).toHaveBeenCalledTimes(REQUEST_POOL_SIZE_MAX + 6);
+
+        scheduler.destroy();
+        for (const file of files) {
+            file.status = "completed";
+        }
+        for (const release of releases.values()) {
+            release();
+        }
+    });
+
+    it("does not grow the segment pool for transfer.it collections", async () => {
+        const collections = [
+            ...Array.from({ length: 2 }, (_, index) => createCollection(`kiosk-${index}`, index)),
+            ...Array.from({ length: 8 }, (_, index) => {
+                const collection = createCollection(`transfer-${index}`, index + 2);
+                collection.provider = "transfer";
+                return collection;
+            }),
+        ];
+        const files = collections.map((collection, index) =>
+            createFile(`file-${index}`, collection.id),
+        );
+        const repository = createRepository(collections, files);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(
+                async (_collectionId, fileId) =>
+                    new Promise<void>((resolve) => releases.set(fileId, resolve)),
+            );
+
+        await scheduler.schedule();
+
+        expect(runFile).toHaveBeenCalledTimes(10);
+
+        scheduler.destroy();
+        for (const release of releases.values()) {
+            release();
+        }
+    });
+
+    it("keeps a collection downloading while the next file starts", async () => {
+        const collection = createCollection("collection-0", 0);
+        const files = [createFile("file-a", collection.id), createFile("file-b", collection.id)];
+        const repository = createRepository([collection], files);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(
+                async (_collectionId, fileId) =>
+                    new Promise<void>((resolve) => releases.set(fileId, resolve)),
+            );
+
+        await scheduler.schedule();
+
+        expect(runFile).toHaveBeenCalledTimes(2);
+        expect(collection.status).toBe("downloading");
+
+        expect(runFile.mock.calls.map(([, fileId]) => fileId)).toEqual(["file-a", "file-b"]);
+
+        files[0].status = "completed";
+        files[1].status = "completed";
+        releases.get("file-a")?.();
+        releases.get("file-b")?.();
+        scheduler.destroy();
+    });
+
+    it("fills leftover file slots when collection demand is below the pool size", async () => {
+        const collections = Array.from({ length: 3 }, (_, index) =>
+            createCollection(`collection-${index}`, index),
+        );
+        const files = collections.flatMap((collection, collectionIndex) =>
+            Array.from({ length: 3 }, (_, fileIndex) =>
+                createFile(`file-${collectionIndex}-${fileIndex}`, collection.id),
+            ),
+        );
+        const repository = createRepository(collections, files);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {
+                streamSegment: vi.fn(() => (async function* () {})()),
+            } as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(async (collectionId, fileId, _settings, controller) => {
+                const collection = collections.find((item) => item.id === collectionId);
+                const file = files.find((item) => item.id === fileId);
+                if (!collection || !file) {
+                    return;
+                }
+                file.status = "downloading";
+                const outcome = (scheduler as unknown as SchedulerInternals).segmentPool.register({
+                    collection,
+                    file,
+                    segments: [{ type: "cdn", data: new Map() }],
+                    partWriter: {
+                        writeChunkFromStream: async () => {
+                            await new Promise<void>((resolve) => releases.set(fileId, resolve));
+                            return 1024;
+                        },
+                    },
+                    controller,
+                    maxChunkRetries: 0,
+                    streamWriteBatchBytes: 1024,
+                    priority: 2,
+                    chunks: [
+                        {
+                            collectionId,
+                            fileId,
+                            chunkIndex: 0,
+                            offset: 0,
+                            size: 1024,
+                            status: "pending",
+                            downloadedBytes: 0,
+                            attempts: 0,
+                            updatedAt: "",
+                            error: null,
+                        },
+                    ],
+                    startedAt: Date.now(),
+                    collectionStartedAt: Date.now(),
+                } as unknown as FileDownloadRegistration);
+                await outcome;
+            });
+
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(9));
+
+        expect(new Set(runFile.mock.calls.map(([collectionId]) => collectionId)).size).toBe(3);
+        expect((scheduler as unknown as SchedulerInternals).segmentPool.getRunningWorkers()).toBe(
+            9,
+        );
+        expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
+
+        scheduler.destroy();
+        for (const release of releases.values()) {
+            release();
+        }
+    });
+
+    it("starts newly queued collections without waiting for leftover extra files", async () => {
+        const collections = Array.from({ length: 3 }, (_, index) =>
+            createCollection(`collection-${index}`, index),
+        );
+        const files = collections.flatMap((collection, collectionIndex) =>
+            Array.from({ length: 3 }, (_, fileIndex) =>
+                createFile(`file-${collectionIndex}-${fileIndex}`, collection.id),
+            ),
+        );
+        const repository = createRepository(collections, files);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {
+                streamSegment: vi.fn(() => (async function* () {})()),
+            } as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(async (collectionId, fileId, _settings, controller) => {
+                const collection = collections.find((item) => item.id === collectionId);
+                const file = files.find((item) => item.id === fileId);
+                if (!collection || !file) {
+                    return;
+                }
+                file.status = "downloading";
+                const outcome = (scheduler as unknown as SchedulerInternals).segmentPool.register({
+                    collection,
+                    file,
+                    segments: [{ type: "cdn", data: new Map() }],
+                    partWriter: {
+                        writeChunkFromStream: async () => {
+                            await new Promise<void>((resolve) => releases.set(fileId, resolve));
+                            return 1024;
+                        },
+                    },
+                    controller,
+                    maxChunkRetries: 0,
+                    streamWriteBatchBytes: 1024,
+                    priority: 2,
+                    chunks: [
+                        {
+                            collectionId,
+                            fileId,
+                            chunkIndex: 0,
+                            offset: 0,
+                            size: 1024,
+                            status: "pending",
+                            downloadedBytes: 0,
+                            attempts: 0,
+                            updatedAt: "",
+                            error: null,
+                        },
+                    ],
+                    startedAt: Date.now(),
+                    collectionStartedAt: Date.now(),
+                } as unknown as FileDownloadRegistration);
+                await outcome;
+            });
+
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(9));
+
+        for (let index = 3; index < 12; index += 1) {
+            const collection = createCollection(`collection-${index}`, index);
+            collections.push(collection);
+            files.push(createFile(`file-${index}-0`, collection.id));
+        }
+
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(18));
+
+        expect(new Set(runFile.mock.calls.map(([collectionId]) => collectionId)).size).toBe(12);
+        expect((scheduler as unknown as SchedulerInternals).segmentPool.getRunningWorkers()).toBe(
+            18,
+        );
+        expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
+
+        scheduler.destroy();
+        for (const release of releases.values()) {
+            release();
+        }
+    });
+
+    it("starts multiple files within each Workupload archive up to its provider limit", async () => {
         const collections = [createCollection("archive-a", 0), createCollection("archive-b", 1)];
         for (const collection of collections) collection.provider = "workupload";
         const files = [
             createFile("a-1", collections[0].id),
             createFile("a-2", collections[0].id),
+            createFile("a-3", collections[0].id),
             createFile("b-1", collections[1].id),
         ];
         const repository = createRepository(collections, files);
         const scheduler = new DownloadScheduler(
-            createKioskDownloader(),
+            createKioskDownloader(
+                { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+                { requestPoolSize: 2 },
+            ),
             {} as never,
             {} as never,
             {} as never,
@@ -136,7 +522,11 @@ describe("DownloadScheduler", () => {
         await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(3));
         expect(runFile.mock.calls[2]?.[1]).toBe("a-2");
 
+        for (const file of files) {
+            file.status = "completed";
+        }
         releases.get("a-2")?.();
+        releases.get("a-3")?.();
         releases.get("b-1")?.();
         scheduler.destroy();
     });
@@ -353,14 +743,22 @@ describe("DownloadScheduler", () => {
             };
             const repository = createRepository([collection], [file], [chunk]);
             const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
-            const requestDownload = vi.fn(async () => {
+            const kd = createKioskDownloader(logger);
+            const requestResolvedDownload = vi.fn(async () => {
                 throw new Error("CDN unavailable");
             });
             const scheduler = new DownloadScheduler(
-                createKioskDownloader(logger),
+                kd,
                 {} as never,
                 {} as never,
-                { createSession: vi.fn(async () => ({ requestDownload })) } as never,
+                {
+                    createSession: vi.fn(async () => ({
+                        resolveDownloadUrl: vi.fn(
+                            async () => "https://f1.workupload.com/download/x",
+                        ),
+                        requestResolvedDownload,
+                    })),
+                } as never,
                 repository.value,
                 createMetrics(),
                 vi.fn(async () => undefined),
@@ -381,6 +779,20 @@ describe("DownloadScheduler", () => {
                     rangeSupported,
                     cleanupState,
                 });
+                const runPayload = (
+                    kd.service.transfer.requestPool as unknown as {
+                        runPayload: ReturnType<typeof vi.fn>;
+                    }
+                ).runPayload;
+                expect(runPayload).toHaveBeenCalledWith(
+                    {
+                        collectionId: collection.id,
+                        direction: "download",
+                        providerId: "workupload-download",
+                        signal: expect.any(AbortSignal),
+                    },
+                    expect.any(Function),
+                );
             } finally {
                 scheduler.destroy();
             }
@@ -393,7 +805,7 @@ describe("DownloadScheduler", () => {
 
         await expect(
             collectBytes(
-                (scheduler as unknown as SchedulerInternals).streamWorkuploadBody(
+                (scheduler as unknown as SchedulerInternals).workuploadRunner.streamBody(
                     body,
                     new AbortController().signal,
                     3,
@@ -410,7 +822,7 @@ describe("DownloadScheduler", () => {
 
         await expect(
             collectBytes(
-                (scheduler as unknown as SchedulerInternals).streamWorkuploadBody(
+                (scheduler as unknown as SchedulerInternals).workuploadRunner.streamBody(
                     body,
                     new AbortController().signal,
                     3,
@@ -434,7 +846,7 @@ describe("DownloadScheduler", () => {
 
         try {
             const result = collectBytes(
-                (scheduler as unknown as SchedulerInternals).streamWorkuploadBody(
+                (scheduler as unknown as SchedulerInternals).workuploadRunner.streamBody(
                     body,
                     new AbortController().signal,
                     3,
@@ -474,7 +886,7 @@ describe("DownloadScheduler", () => {
 
         try {
             const result = collectBytes(
-                (scheduler as unknown as SchedulerInternals).streamWorkuploadBody(
+                (scheduler as unknown as SchedulerInternals).workuploadRunner.streamBody(
                     body,
                     new AbortController().signal,
                     3,
@@ -507,7 +919,7 @@ describe("DownloadScheduler", () => {
             vi.fn(async () => undefined),
         );
 
-        (scheduler as unknown as SchedulerInternals).persistWorkuploadPartial("file", 123);
+        (scheduler as unknown as SchedulerInternals).workuploadRunner.persistPartial("file", 123);
 
         expect(repository.markChunkPartial).toHaveBeenCalledWith("file", 0, 123);
         expect(repository.markChunkPending).toHaveBeenCalledWith("file", 0);
@@ -538,7 +950,7 @@ describe("DownloadScheduler", () => {
             vi.fn(async () => undefined),
         );
 
-        await (scheduler as unknown as SchedulerInternals).getWorkuploadSession(
+        await (scheduler as unknown as SchedulerInternals).workuploadRunner.getSession(
             collection,
             "ChildOne",
         );
@@ -641,15 +1053,39 @@ function createRepository(
         resetFileProgress,
         recomputeCollectionStatus: vi.fn((collectionId: string) => {
             const collection = getCollection(collectionId);
-            const collectionFiles = files.filter((file) => file.collectionId === collectionId);
-            if (collection && collectionFiles.every((file) => file.status === "completed")) {
-                collection.status = "completed";
+            if (!collection || collection.status === "paused" || collection.status === "expired") {
+                return;
             }
+            const collectionFiles = files.filter((file) => file.collectionId === collectionId);
+            const has = (status: DownloadFileRow["status"]) =>
+                collectionFiles.some((file) => file.status === status);
+            if (
+                collectionFiles.length === 0 ||
+                collectionFiles.every((file) => file.status === "completed")
+            ) {
+                collection.status = "completed";
+                return;
+            }
+            if (has("downloading")) {
+                collection.status = "downloading";
+                return;
+            }
+            if (has("inflating")) {
+                collection.status = "inflating";
+                return;
+            }
+            if (has("error") && !has("pending") && !has("paused")) {
+                collection.status = "error";
+                return;
+            }
+            collection.status = "queued";
         }),
         resetRunningChunksForFile,
         completeFile,
         markChunkPartial,
         markChunkPending,
+        markChunkCompleted: vi.fn(),
+        addFileDownloadedBytes: vi.fn(),
         syncWorkuploadDownloadedBytes,
     };
     return {
@@ -662,11 +1098,16 @@ function createRepository(
     };
 }
 
-function createKioskDownloader(logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() }) {
+function createKioskDownloader(
+    logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+    options?: { requestPoolSize?: number },
+) {
     return {
         setting: {
             get: vi.fn(async (key: string) => {
-                if (key === "transfer.segmentPoolSize") return 8;
+                if (key === "transfer.requestPoolSize") {
+                    return options?.requestPoolSize ?? REQUEST_POOL_SIZE_MAX;
+                }
                 if (key === "transfer.maxChunkRetries") return 5;
                 if (key === "transfer.streamWriteBatchBytes") return 1024 * 1024;
                 if (key === "transfer.inflateBufferBytes") return 1024 * 1024;
@@ -676,6 +1117,16 @@ function createKioskDownloader(logger = { error: vi.fn(), warn: vi.fn(), info: v
         service: {
             transfer: {
                 downloadBandwidth: { take: vi.fn(async () => undefined) },
+                requestPool: {
+                    acquire: vi.fn(async () => () => undefined),
+                    runPayload: vi.fn(async (_context, task: () => Promise<unknown>) => task()),
+                    runPayloadStream: vi.fn(async function* (
+                        _context,
+                        task: () => AsyncGenerator<Uint8Array>,
+                    ) {
+                        yield* task();
+                    }),
+                },
                 refreshPowerSaveBlock: vi.fn(async () => undefined),
                 maybeShutdownAfterTransfer: vi.fn(async () => undefined),
             },
@@ -693,13 +1144,16 @@ function createMetrics() {
     return {
         clearFile: vi.fn(),
         clearCollection: vi.fn(),
+        clearChunk: vi.fn(),
         registerFile: vi.fn(),
+        setChunkTransferProgress: vi.fn(),
+        setChunkWriteProgress: vi.fn(),
     } as never;
 }
 
 function createSchedulerSettings(maxChunkRetries: number): SchedulerSettings {
     return {
-        segmentPoolSize: 1,
+        requestPoolSize: REQUEST_POOL_SIZE_MAX,
         maxChunkRetries,
         streamWriteBatchBytes: 1024,
         inflateBufferBytes: 1024,

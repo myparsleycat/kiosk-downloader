@@ -87,13 +87,9 @@ export async function plainUndiciFetch(
 }
 
 const DEFAULT_TIMEOUT_MS = 100_000;
-const RETRY_METHODS = ["get", "put", "head", "delete", "options", "trace"];
-const RETRY_DELAY_BASE_MS = 300;
 
-// Mirrors the network-error detection of the previous ky layer (is-network-error):
-// only these raw fetch failures are retried. HTTP statuses are never retried
-// because ky always ran with `throwHttpErrors: false`, and timeouts are not
-// retried because ky's default `retryOnTimeout` is false.
+// Mirrors the network-error detection of the previous ky layer (is-network-error)
+// so provider operations can decide whether their own operation is safe to retry.
 const NETWORK_ERROR_MESSAGES = new Set([
     "network error",
     "NetworkError when attempting to fetch resource.",
@@ -111,31 +107,20 @@ export type UploadProgress = {
     totalBytes: number;
 };
 
-// `statusCodes`, `afterStatusCodes`, `maxRetryAfter`, and `retryOnTimeout` are
-// accepted for ky compatibility but intentionally unused: the previous ky layer
-// always ran with `throwHttpErrors: false`, so HTTP statuses and timeouts were
-// never retried. Only network errors are retried.
-export type HttpRetryOptions = {
-    limit?: number;
-    methods?: string[];
-    statusCodes?: number[];
-    afterStatusCodes?: number[];
-    maxRetryAfter?: number;
-    backoffLimit?: number;
-    delay?: (attemptCount: number) => number;
-    retryOnTimeout?: boolean;
-};
-
-export type HttpRequestOptions = {
+type BaseRequestOptions = {
     method?: string;
     headers?: HeadersInit;
     body?: BodyInit | null;
     signal?: AbortSignal;
     redirect?: RequestRedirect;
     timeout?: number | false;
-    retry?: number | false | HttpRetryOptions;
-    onUploadProgress?: (progress: UploadProgress) => void;
     fetch?: typeof fetch;
+};
+
+export type ControlRequestOptions = BaseRequestOptions;
+
+export type PayloadRequestOptions = BaseRequestOptions & {
+    onUploadProgress?: (progress: UploadProgress) => void;
 };
 
 export class TimeoutError extends Error {
@@ -143,37 +128,6 @@ export class TimeoutError extends Error {
         super(`Request timed out: ${request.method} ${request.url}`);
         this.name = "TimeoutError";
     }
-}
-
-type NormalizedRetryOptions = {
-    limit: number;
-    methods: string[];
-    statusCodes: number[];
-    afterStatusCodes: number[];
-    maxRetryAfter: number;
-    backoffLimit: number;
-    delay: (attemptCount: number) => number;
-    retryOnTimeout: boolean;
-};
-
-function normalizeRetryOptions(retry: HttpRequestOptions["retry"]): NormalizedRetryOptions {
-    const defaults: NormalizedRetryOptions = {
-        limit: 2,
-        methods: RETRY_METHODS,
-        statusCodes: [408, 413, 429, 500, 502, 503, 504],
-        afterStatusCodes: [413, 429, 503],
-        maxRetryAfter: Number.POSITIVE_INFINITY,
-        backoffLimit: Number.POSITIVE_INFINITY,
-        delay: (attemptCount) => RETRY_DELAY_BASE_MS * 2 ** (attemptCount - 1),
-        retryOnTimeout: false,
-    };
-    if (retry === false) {
-        return { ...defaults, limit: 0 };
-    }
-    if (typeof retry === "number") {
-        return { ...defaults, limit: retry };
-    }
-    return { ...defaults, ...retry };
 }
 
 export function isNetworkError(error: unknown): error is Error {
@@ -190,10 +144,6 @@ export function isNetworkError(error: unknown): error is Error {
         (error.message.startsWith("Failed to fetch (") && error.message.endsWith(")")) ||
         error.message.startsWith("error sending request for url")
     );
-}
-
-function retryDelayMs(retry: NormalizedRetryOptions, attempt: number) {
-    return Math.min(retry.backoffLimit, retry.delay(attempt));
 }
 
 export function delay(ms: number, signal?: AbortSignal) {
@@ -361,34 +311,36 @@ function wrapRequestWithUploadProgress(
 export class HTTP {
     private forceIpv4 = true;
 
-    public constructor(private readonly kd: KioskDownloader) {}
+    public constructor(_kd: KioskDownloader) {}
 
     public setForceIpv4(value: boolean) {
         this.forceIpv4 = value;
     }
 
-    public async pickFetch(url: string, options: HttpRequestOptions): Promise<typeof fetch> {
-        if (options.fetch) return options.fetch;
-
+    private async controlFetch(url: string): Promise<typeof fetch> {
         const { net, session } = await import("electron");
+        try {
+            if (!isDirectProxyResult(await session.defaultSession.resolveProxy(url))) {
+                return (input, init) =>
+                    net.fetch(input instanceof URL ? input.href : input, init) as Promise<Response>;
+            }
+        } catch {
+            return (input, init) =>
+                net.fetch(input instanceof URL ? input.href : input, init) as Promise<Response>;
+        }
+        return this.forceIpv4 ? ipv4Fetch : plainUndiciFetch;
+    }
+
+    private async payloadFetch(url: string): Promise<typeof fetch> {
+        const { session } = await import("electron");
         let proxyResult: string;
         try {
             proxyResult = await session.defaultSession.resolveProxy(url);
         } catch (error) {
-            if (options.onUploadProgress) throw new ProxyResolutionError(url, undefined, error);
-            return (input, init) =>
-                net.fetch(input instanceof URL ? input.href : input, init) as Promise<Response>;
+            throw new ProxyResolutionError(url, undefined, error);
         }
 
         const directives = parseProxyDirectives(proxyResult);
-        if (!options.onUploadProgress) {
-            if (!isDirectProxyResult(proxyResult)) {
-                return (input, init) =>
-                    net.fetch(input instanceof URL ? input.href : input, init) as Promise<Response>;
-            }
-            return this.forceIpv4 ? ipv4Fetch : plainUndiciFetch;
-        }
-
         const directive = directives[0];
         if (!directive) throw new ProxyResolutionError(url, proxyResult);
         if (directive.type === "direct") {
@@ -410,17 +362,26 @@ export class HTTP {
         };
     }
 
-    public async request(url: string, options: HttpRequestOptions = {}) {
-        const retry = normalizeRetryOptions(options.retry);
+    public async controlRequest(url: string, options: ControlRequestOptions = {}) {
+        return this.executeRequest(url, options, options.fetch ?? (await this.controlFetch(url)));
+    }
+
+    public async payloadRequest(url: string, options: PayloadRequestOptions = {}) {
+        return this.executeRequest(url, options, options.fetch ?? (await this.payloadFetch(url)));
+    }
+
+    private async executeRequest(
+        url: string,
+        options: PayloadRequestOptions,
+        fetchImpl: typeof fetch,
+    ) {
         const headers = new Headers(options.headers);
         for (const [key, value] of Object.entries(await this.getHeaders(url))) {
             headers.set(key, value);
         }
-        const fetchImpl = await this.pickFetch(url, options);
         const timeoutMs =
             options.timeout === false ? undefined : (options.timeout ?? DEFAULT_TIMEOUT_MS);
         const method = (options.method ?? "GET").toUpperCase();
-        const retriable = retry.limit > 0 && retry.methods.includes(method.toLowerCase());
 
         // A URLSearchParams body passed through `new Request` becomes a stream,
         // losing its length so undici sends it chunked. Workupload rejects POST
@@ -433,7 +394,7 @@ export class HTTP {
             headers.set("Content-Length", String(bodySize));
         }
 
-        let request = new Request(url, {
+        const request = new Request(url, {
             method,
             headers,
             body,
@@ -442,23 +403,13 @@ export class HTTP {
             // @ts-expect-error - `duplex` is not in the DOM RequestInit type but is required for stream bodies.
             duplex: body ? "half" : undefined,
         });
-        for (let attempt = 1; ; attempt += 1) {
-            // Cloning a streaming body calls ReadableStream#tee(), which buffers the
-            // whole stream in memory, so only clone when a retry is actually possible.
-            const retryRequest = retriable ? request.clone() : undefined;
-            const progressRequest = options.onUploadProgress
+        return this.fetchWithTimeout(
+            options.onUploadProgress
                 ? wrapRequestWithUploadProgress(request, options.body, options.onUploadProgress)
-                : request;
-            try {
-                return await this.fetchWithTimeout(progressRequest, fetchImpl, timeoutMs);
-            } catch (error) {
-                if (!retriable || attempt > retry.limit || !isNetworkError(error)) {
-                    throw error;
-                }
-                await delay(retryDelayMs(retry, attempt), options.signal);
-                request = retryRequest ?? request;
-            }
-        }
+                : request,
+            fetchImpl,
+            timeoutMs,
+        );
     }
 
     private fetchWithTimeout(
