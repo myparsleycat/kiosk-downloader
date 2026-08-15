@@ -1,3 +1,15 @@
+# [1.10.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.4...v1.10.0) (2026-08-15)
+
+
+### Bug Fixes
+
+* harden scheduler concurrency and stale zip entry handling ([d2b6a82](https://github.com/myparsleycat/kiosk-downloader/commit/d2b6a8205693335055887058aedf5e25aef42d69))
+
+
+### Features
+
+* **transfer:** show per-collection request pool usage ([4c1ea5d](https://github.com/myparsleycat/kiosk-downloader/commit/4c1ea5d47d3b05847a650f04361cef61efa9ced9))
+
 ## [1.9.4](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.3...v1.9.4) (2026-08-12)
 
 
