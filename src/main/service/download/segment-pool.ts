@@ -109,6 +109,10 @@ export class GlobalSegmentPool {
         return this.targetWorkers;
     }
 
+    public getRunningWorkers() {
+        return this.runningWorkers;
+    }
+
     public resize(maxWorkers: number) {
         this.targetWorkers = Math.max(1, Math.floor(maxWorkers));
         this.ensureWorkers();

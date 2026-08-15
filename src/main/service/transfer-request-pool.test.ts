@@ -123,6 +123,33 @@ describe("TransferScheduler", () => {
         await Promise.all(tasks);
     });
 
+    it("raises transfer.it collection concurrency after completed payload streams", async () => {
+        const scheduler = new TransferScheduler(4);
+        const gates = Array.from({ length: 4 }, deferred);
+        const started: number[] = [];
+        const tasks = gates.map((gate, index) =>
+            consume(
+                scheduler.runPayloadStream(
+                    context("transfer-it-download", "transfer"),
+                    async function* () {
+                        started.push(index);
+                        await gate.promise;
+                        yield new Uint8Array([index]);
+                    },
+                ),
+            ),
+        );
+
+        await vi.waitFor(() => expect(started).toEqual([0]));
+        gates[0].resolve();
+        await vi.waitFor(() => expect(started).toEqual([0, 1]));
+        gates[1].resolve();
+        await vi.waitFor(() => expect(started).toEqual([0, 1, 2, 3]));
+
+        gates.slice(2).forEach((gate) => gate.resolve());
+        await Promise.all(tasks);
+    });
+
     it("registers transfer.it cooldown before releasing the failed request slot", async () => {
         vi.useFakeTimers();
         const scheduler = new TransferScheduler(4);

@@ -99,7 +99,6 @@ export class DownloadScheduler {
     private readonly fileStartedAt = new Map<string, number>();
     private readonly collectionStartedAt = new Map<string, number>();
     private readonly collectionTimerStartedAt = new Map<string, number>();
-    private readonly nonPooledZipEntries = new Set<string>();
     private lastPreparationCollectionId: string | null = null;
     private isPumping = false;
     private pumpAgain = false;
@@ -263,7 +262,6 @@ export class DownloadScheduler {
 
     public pauseFile(fileId: string) {
         this.manualFiles.delete(fileId);
-        this.nonPooledZipEntries.delete(fileId);
         this.segmentPool.cancelSession(fileId);
         this.transferPool.cancelSession(fileId);
         this.fileControllers.get(fileId)?.abort();
@@ -449,9 +447,6 @@ export class DownloadScheduler {
         const controller = new AbortController();
         this.fileControllers.set(file.id, controller);
         this.activeCollections.add(collection.id);
-        if (collection.provider === "workupload") {
-            this.nonPooledZipEntries.add(file.id);
-        }
         this.ensureCollectionDownloading(collection);
         this.progressBatcher.activate(collection.id);
 
@@ -461,7 +456,6 @@ export class DownloadScheduler {
 
         void this.runFile(collection.id, file.id, settings, controller).finally(() => {
             this.fileControllers.delete(file.id);
-            this.nonPooledZipEntries.delete(file.id);
             this.clearFileStartTracking(file.id);
             const files = this.activeFilesByCollection.get(collection.id);
             files?.delete(file.id);
@@ -678,13 +672,8 @@ export class DownloadScheduler {
         }
 
         if (!supportsZipEntryPoolDownload(meta)) {
-            this.nonPooledZipEntries.add(file.id);
             void this.schedule();
-            try {
-                await this.runZipEntryWithZipJs(collection, file, meta, settings, controller);
-            } finally {
-                this.nonPooledZipEntries.delete(file.id);
-            }
+            await this.runZipEntryWithZipJs(collection, file, meta, settings, controller);
             return;
         }
 

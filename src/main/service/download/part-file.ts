@@ -89,7 +89,7 @@ export class PartFileWriter {
         for await (const piece of source) {
             const remaining = expectedSize - written - pendingBytes;
             if (remaining <= 0) {
-                break;
+                continue;
             }
 
             const slice = piece.length > remaining ? piece.subarray(0, remaining) : piece;
@@ -111,10 +111,6 @@ export class PartFileWriter {
                 crc = crc32(batch, crc);
                 written += batch.length;
                 callbacks?.onWriteProgress?.(written);
-            }
-
-            if (written + pendingBytes >= expectedSize) {
-                break;
             }
         }
 

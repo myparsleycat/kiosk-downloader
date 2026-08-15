@@ -433,8 +433,20 @@ export class UploadScheduler {
     }
 
     private resize(maxWorkers: number) {
-        this.targetWorkers = maxWorkers + Math.max(0, this.collections.size - 1);
-        while (this.runningWorkers < this.targetWorkers) {
+        this.targetWorkers = Math.max(0, Math.floor(maxWorkers));
+        this.ensureWorkers();
+    }
+
+    private desiredWorkers() {
+        if (this.targetWorkers === 0) {
+            return 0;
+        }
+        return this.targetWorkers + Math.max(0, this.activeCollections.size - 1);
+    }
+
+    private ensureWorkers() {
+        const targetWorkers = this.desiredWorkers();
+        while (this.runningWorkers < targetWorkers) {
             this.runningWorkers += 1;
             void this.workerLoop(this.runningWorkers);
         }
@@ -442,7 +454,7 @@ export class UploadScheduler {
 
     private async workerLoop(workerId: number) {
         try {
-            while (workerId <= this.targetWorkers) {
+            while (workerId <= this.desiredWorkers()) {
                 const chunk = this.takeNextChunk();
                 if (!chunk) {
                     await this.waitForWork();
@@ -452,9 +464,7 @@ export class UploadScheduler {
             }
         } finally {
             this.runningWorkers -= 1;
-            if (this.runningWorkers < this.targetWorkers) {
-                this.resize(this.targetWorkers);
-            }
+            this.ensureWorkers();
         }
     }
 

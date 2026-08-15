@@ -415,40 +415,41 @@ export class DownloadService {
                 message: `ZIP file not found: ${payload.fileId}`,
             };
         }
-        return withLoggedError(
-            this.kd.logger,
-            "DownloadService:listZipEntries",
-            {
-                channel: "download:listZipEntries",
-                stage: "index",
-                draftId: payload.draftId,
-                fileId: payload.fileId,
-            },
-            async () => {
-                const indexed = await this.indexZipNode(
-                    loaded,
-                    found.zip.id,
-                    found.zip.size,
-                    payload.zipPassword,
-                );
-                if (this.preparedDraft !== draft) {
-                    return staleDraft;
-                }
-                loaded.collection = {
-                    ...loaded.collection,
-                    tree: setZipEntries(loaded.collection.tree, payload.fileId, indexed.entries),
-                };
-                return { status: "ready" as const, entries: indexed.entries };
-            },
-        ).catch((error) => {
+        try {
+            const indexed = await this.indexZipNode(
+                loaded,
+                found.zip.id,
+                found.zip.size,
+                payload.zipPassword,
+            );
+            if (this.preparedDraft !== draft) {
+                return staleDraft;
+            }
+            loaded.collection = {
+                ...loaded.collection,
+                tree: setZipEntries(loaded.collection.tree, payload.fileId, indexed.entries),
+            };
+            return { status: "ready", entries: indexed.entries };
+        } catch (error) {
             if (isZipPasswordRequiredError(error) || isZipInvalidPasswordError(error)) {
                 return {
                     status: "passwordRequired",
                     invalid: isZipInvalidPasswordError(error),
-                } as const;
+                };
             }
+            logCaughtError(
+                this.kd.logger,
+                "DownloadService:listZipEntries",
+                {
+                    channel: "download:listZipEntries",
+                    stage: "index",
+                    draftId: payload.draftId,
+                    fileId: payload.fileId,
+                },
+                error,
+            );
             throw error;
-        });
+        }
     }
 
     public async create(payload: CreateDownloadPayload) {
@@ -537,7 +538,7 @@ export class DownloadService {
         if (!item) {
             throw new Error("Created download item is missing.");
         }
-        this.preparedDraft = null;
+        this.clearPreparedDraft(draft.id);
         return item;
     }
 
@@ -546,6 +547,12 @@ export class DownloadService {
             throw new Error("Prepared download draft is no longer available.");
         }
         return this.preparedDraft;
+    }
+
+    private clearPreparedDraft(draftId: string) {
+        if (this.preparedDraft?.id === draftId) {
+            this.preparedDraft = null;
+        }
     }
 
     private async loadCollectionUnlocked(
@@ -782,7 +789,7 @@ export class DownloadService {
         if (!item) {
             throw new Error("Created extended download item is missing.");
         }
-        this.preparedDraft = null;
+        this.clearPreparedDraft(draft.id);
         return item;
     }
 

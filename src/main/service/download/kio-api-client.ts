@@ -79,7 +79,8 @@ function extractShareId(url: string) {
 }
 
 export class KioApiClient {
-    private readonly controlPlane = pLimit(4);
+    private readonly downloadControlPlane = pLimit(4);
+    private readonly treeControlPlane = pLimit(4);
 
     public constructor(private readonly kd: KioskDownloader) {}
 
@@ -119,6 +120,7 @@ export class KioApiClient {
 
     public async getSegments(remoteFileId: string, cat: string): Promise<SegmentDescriptor[]> {
         const response = await this.cborPost(
+            this.downloadControlPlane,
             `${API_BASE_URL}/v0/collection/file/gets`,
             { ids: [Buffer.from(remoteFileId, "hex")] },
             {
@@ -190,6 +192,7 @@ export class KioApiClient {
 
     private async unlockCollection(uuid: Buffer, password?: string, signal?: AbortSignal) {
         const first = await this.cborPost(
+            this.downloadControlPlane,
             `${API_BASE_URL}/v0/collection/get`,
             { uuid },
             {},
@@ -217,6 +220,7 @@ export class KioApiClient {
         }
 
         const second = await this.cborPost(
+            this.downloadControlPlane,
             `${API_BASE_URL}/v0/collection/get`,
             {
                 uuid,
@@ -255,6 +259,7 @@ export class KioApiClient {
     private async buildTree(rootId: Buffer, cat: string, signal?: AbortSignal) {
         const buildDir = async (id: Buffer, name: string): Promise<DirNode> => {
             const response = await this.cborPost(
+                this.treeControlPlane,
                 `${API_BASE_URL}/v0/collection/directory/get`,
                 { id },
                 { "Kiosk-CAT": cat },
@@ -322,12 +327,14 @@ export class KioApiClient {
     }
 
     private async cborPost(
+        plane: ReturnType<typeof pLimit>,
         url: string,
         bodyObj: unknown,
         headers: Record<string, string> = {},
         signal?: AbortSignal,
     ): Promise<CborResponse> {
-        return await this.controlPlane(async () => {
+        return await plane(async () => {
+            signal?.throwIfAborted();
             const body = Buffer.from(encode(bodyObj));
             const response = await this.kd.http.controlRequest(url, {
                 method: "POST",

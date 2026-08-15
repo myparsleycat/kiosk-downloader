@@ -10,10 +10,19 @@ function createPool() {
 }
 
 function registration(collectionId: string, fileId: string, chunkCount: number) {
+    const controller = new AbortController();
+    controller.abort();
     return {
         collection: { id: collectionId },
         file: { id: fileId, downloadedBytes: 0 },
-        chunks: Array.from({ length: chunkCount }, (_, chunkIndex) => ({ chunkIndex })),
+        chunks: Array.from({ length: chunkCount }, (_, chunkIndex) => ({
+            chunkIndex,
+            downloadedBytes: 0,
+            size: 1,
+        })),
+        controller,
+        maxChunkRetries: 0,
+        segments: [],
         priority: 0,
     } as never;
 }
@@ -39,6 +48,24 @@ describe("GlobalSegmentPool", () => {
             "collection-b",
             "collection-c",
         ]);
+    });
+
+    it("caps started workers at the configured base plus one extra per extra collection", () => {
+        const pool = createPool();
+        pool.resize(2);
+        for (const collectionId of ["a", "b", "c", "d"]) {
+            void pool.register(registration(collectionId, `file-${collectionId}`, 4));
+        }
+
+        expect(pool.getRunningWorkers()).toBe(5);
+        expect(pool.getTargetWorkers()).toBe(2);
+    });
+
+    it("does not grow workers for queued work that never registers sessions", () => {
+        const pool = createPool();
+        pool.resize(8);
+        expect(pool.getRunningWorkers()).toBe(0);
+        expect(pool.getTargetWorkers()).toBe(8);
     });
 
     it("removes every queued chunk when a session is cancelled before workers start", async () => {

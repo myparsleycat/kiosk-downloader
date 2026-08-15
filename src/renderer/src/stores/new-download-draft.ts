@@ -8,6 +8,8 @@ import {
     rewritePathSet,
     validateNodeName,
 } from "@shared/tree-rename";
+import type { DirNode, ListZipEntriesResult } from "@shared/types";
+import { setZipEntries } from "@shared/zip-tree";
 import { create } from "zustand";
 
 export type DownloadPreparationState =
@@ -16,6 +18,47 @@ export type DownloadPreparationState =
     | { status: "passwordRequired"; invalid: boolean }
     | { status: "ready"; draftId: string; collection: Collection }
     | { status: "error"; message: string };
+
+export type ZipEntriesApplyResult =
+    | { action: "ignore" }
+    | { action: "clear" }
+    | { action: "passwordRequired"; invalid: boolean }
+    | { action: "failed" }
+    | { action: "ready"; nextTree: DirNode };
+
+export function applyZipEntriesResult(
+    requestedDraftId: string,
+    current: DownloadPreparationState,
+    result: ListZipEntriesResult,
+    fileId: string,
+): ZipEntriesApplyResult {
+    if (result.status === "passwordRequired") {
+        if (current.status !== "ready" || current.draftId !== requestedDraftId) {
+            return { action: "ignore" };
+        }
+        return { action: "passwordRequired", invalid: result.invalid };
+    }
+    if (result.status === "failed") {
+        if (
+            result.code === "staleDraft" &&
+            current.status === "ready" &&
+            current.draftId === requestedDraftId
+        ) {
+            return { action: "clear" };
+        }
+        if (current.status === "ready" && current.draftId === requestedDraftId) {
+            return { action: "failed" };
+        }
+        return { action: "ignore" };
+    }
+    if (current.status !== "ready" || current.draftId !== requestedDraftId) {
+        return { action: "ignore" };
+    }
+    return {
+        action: "ready",
+        nextTree: setZipEntries(current.collection.tree, fileId, result.entries),
+    };
+}
 
 type NewDownloadDraftState = {
     url: string;

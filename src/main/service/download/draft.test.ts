@@ -1,6 +1,7 @@
 import {
     COLLECTION_INVALID_PASSWORD_ERROR,
     COLLECTION_PASSWORD_REQUIRED_ERROR,
+    ZIP_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
 import type { TreeEntry, ZipNode } from "@shared/types";
 import { describe, expect, it, vi } from "vitest";
@@ -221,6 +222,40 @@ describe("DownloadService prepared draft", () => {
         expect(state.repository.insertDownload).toHaveBeenCalledWith(
             expect.objectContaining({ loaded: expect.objectContaining({ provider: "kiosk" }) }),
         );
+        expect(state.preparedDraft).toBeNull();
+    });
+
+    it("does not clear a replacement draft after create finishes", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedCollection(),
+        );
+        const prepared = await service.prepare({ url: URL });
+        if (prepared.status !== "ready") throw new Error("Expected a prepared draft");
+        const state = internals(service);
+        let releaseCreate: () => void = () => undefined;
+        state.repository.insertDownload = vi.fn(() => "created");
+        state.scheduler.schedule = vi.fn(async () => undefined);
+        state.emitUpdate = vi.fn(
+            () =>
+                new Promise<void>((resolve) => {
+                    releaseCreate = () => resolve();
+                }),
+        );
+        state.getEnrichedItem = vi.fn(() => ({ id: "created" }));
+
+        const creating = service.create({
+            draftId: prepared.draftId,
+            savePath: "E:\\Downloads",
+            selectedPaths: ["a.txt"],
+        });
+        await vi.waitFor(() => expect(state.emitUpdate).toHaveBeenCalledTimes(1));
+        const replacement = await service.prepare({ url: URL });
+        if (replacement.status !== "ready") throw new Error("Expected a replacement draft");
+        releaseCreate();
+        await expect(creating).resolves.toMatchObject({ id: "created" });
+
+        expect(state.preparedDraft?.id).toBe(replacement.draftId);
     });
 
     it("rejects paths outside the canonical tree and keeps the draft retryable", async () => {
@@ -294,6 +329,23 @@ describe("DownloadService prepared draft", () => {
         );
         expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret");
         expect(JSON.stringify(logger.error.mock.calls)).not.toContain("token=sensitive");
+    });
+
+    it("does not log expected ZIP password challenges", async () => {
+        const { service, logger } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedZipCollection(),
+        );
+        vi.spyOn(internals(service), "indexZipNode").mockRejectedValue(
+            new Error(ZIP_PASSWORD_REQUIRED_ERROR),
+        );
+        const prepared = await service.prepare({ url: URL });
+        if (prepared.status !== "ready") throw new Error("Expected a prepared draft");
+
+        await expect(
+            service.listZipEntries({ draftId: prepared.draftId, fileId: "zip-remote" }),
+        ).resolves.toEqual({ status: "passwordRequired", invalid: false });
+        expect(logger.error).not.toHaveBeenCalled();
     });
 
     it("stores ZIP entries on the prepared draft after indexing", async () => {

@@ -1,6 +1,7 @@
+import { encode } from "cbor-x";
 import { describe, expect, it, vi } from "vitest";
 
-import { streamSegmentBytes } from "./kio-api-client";
+import { KioApiClient, streamSegmentBytes } from "./kio-api-client";
 
 describe("streamSegmentBytes request pool", () => {
     it("holds a Kiosk download permit until the payload body is consumed", async () => {
@@ -41,7 +42,72 @@ describe("streamSegmentBytes request pool", () => {
         expect(release).toHaveBeenCalledOnce();
         expect(request).toHaveBeenCalledWith("https://cdn.test/file", expect.any(Object));
     });
+
+    it("does not queue download control calls behind tree walks", async () => {
+        const shareId = "abcdefghijklmnopqrstuv";
+        const rootId = Buffer.alloc(16, 1);
+        let releaseDirectory: () => void = () => undefined;
+        const directoryGate = new Promise<void>((resolve) => {
+            releaseDirectory = () => resolve();
+        });
+        const controlRequest = vi.fn(async (url: string) => {
+            if (url.endsWith("/collection/get")) {
+                return cborResponse(200, {
+                    token: "cat",
+                    name: "Prepared",
+                    root: rootId,
+                    segment_size: 16,
+                    expires: 4_102_444_800,
+                });
+            }
+            if (url.endsWith("/collection/directory/get")) {
+                await directoryGate;
+                return cborResponse(200, { files: [], children: [] });
+            }
+            if (url.endsWith("/collection/file/gets")) {
+                return cborResponse(200, {
+                    files: [
+                        {
+                            segments: [
+                                {
+                                    type: "cdn",
+                                    data: new Map([["url", "https://cdn.test/file"]]),
+                                },
+                            ],
+                        },
+                    ],
+                });
+            }
+            throw new Error(`Unexpected URL: ${url}`);
+        });
+        const client = new KioApiClient({
+            http: { controlRequest },
+        } as never);
+
+        const loading = client.loadCollection({
+            url: `https://kio.ac/c/${shareId}`,
+        });
+        await vi.waitFor(() =>
+            expect(
+                controlRequest.mock.calls.some(([url]) => String(url).endsWith("/directory/get")),
+            ).toBe(true),
+        );
+
+        await expect(client.getSegments("aa".repeat(16), "cat")).resolves.toEqual([
+            { type: "cdn", data: new Map([["url", "https://cdn.test/file"]]) },
+        ]);
+        releaseDirectory();
+        await loading;
+    });
 });
+
+function cborResponse(status: number, body: unknown) {
+    const raw = Buffer.from(encode(body));
+    return {
+        status,
+        arrayBuffer: async () => raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength),
+    };
+}
 
 function createKioskDownloader(acquire: (context: never) => Promise<() => void>, body: Buffer) {
     const request = vi.fn(async () => new Response(body.toString()));

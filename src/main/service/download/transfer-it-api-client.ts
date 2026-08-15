@@ -226,6 +226,7 @@ export class TransferItApiClient {
             });
 
             if (response.status === 402) {
+                await response.body?.cancel().catch(() => undefined);
                 throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
             }
             if (response.status === 509) {
@@ -235,6 +236,7 @@ export class TransferItApiClient {
                 );
             }
             if (!response.ok) {
+                await response.body?.cancel().catch(() => undefined);
                 throw new Error(`Transfer API HTTP ${response.status}.`);
             }
 

@@ -26,6 +26,7 @@ type SchedulerInternals = {
     segmentPool: {
         register: (registration: FileDownloadRegistration) => Promise<unknown>;
         getTargetWorkers: () => number;
+        getRunningWorkers: () => number;
     };
     finalizeFile: (
         collection: DownloadCollectionRow,
@@ -77,9 +78,6 @@ describe("DownloadScheduler", () => {
 
         expect(runFile.mock.calls.map(([, fileId]) => fileId)).toEqual(
             files.map((file) => file.id),
-        );
-        expect((scheduler as unknown as SchedulerInternals).segmentPool.getTargetWorkers()).toBe(
-            REQUEST_POOL_SIZE_MAX,
         );
         expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
         expect([...controllers.values()].every((controller) => !controller.signal.aborted)).toBe(
@@ -136,7 +134,6 @@ describe("DownloadScheduler", () => {
         expect(runFile.mock.calls.map(([, fileId]) => fileId)).toEqual(
             files.map((file) => file.id),
         );
-        expect((scheduler as unknown as SchedulerInternals).segmentPool.getTargetWorkers()).toBe(2);
         expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
 
         scheduler.destroy();
@@ -187,9 +184,6 @@ describe("DownloadScheduler", () => {
 
         expect(runFile).toHaveBeenCalledTimes(REQUEST_POOL_SIZE_MAX + 1);
         expect(maxActive).toBe(REQUEST_POOL_SIZE_MAX + 1);
-        expect((scheduler as unknown as SchedulerInternals).segmentPool.getTargetWorkers()).toBe(
-            REQUEST_POOL_SIZE_MAX,
-        );
 
         for (const file of files) file.status = "completed";
         for (const release of releases.values()) {
@@ -230,9 +224,6 @@ describe("DownloadScheduler", () => {
         await scheduler.schedule();
 
         expect(runFile).toHaveBeenCalledTimes(REQUEST_POOL_SIZE_MAX + 6);
-        expect((scheduler as unknown as SchedulerInternals).segmentPool.getTargetWorkers()).toBe(
-            REQUEST_POOL_SIZE_MAX,
-        );
 
         scheduler.destroy();
         for (const file of files) {
@@ -277,9 +268,6 @@ describe("DownloadScheduler", () => {
         await scheduler.schedule();
 
         expect(runFile).toHaveBeenCalledTimes(10);
-        expect((scheduler as unknown as SchedulerInternals).segmentPool.getTargetWorkers()).toBe(
-            REQUEST_POOL_SIZE_MAX,
-        );
 
         scheduler.destroy();
         for (const release of releases.values()) {
@@ -393,8 +381,8 @@ describe("DownloadScheduler", () => {
         await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(9));
 
         expect(new Set(runFile.mock.calls.map(([collectionId]) => collectionId)).size).toBe(3);
-        expect((scheduler as unknown as SchedulerInternals).segmentPool.getTargetWorkers()).toBe(
-            REQUEST_POOL_SIZE_MAX,
+        expect((scheduler as unknown as SchedulerInternals).segmentPool.getRunningWorkers()).toBe(
+            9,
         );
         expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
 
@@ -483,8 +471,8 @@ describe("DownloadScheduler", () => {
         await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(18));
 
         expect(new Set(runFile.mock.calls.map(([collectionId]) => collectionId)).size).toBe(12);
-        expect((scheduler as unknown as SchedulerInternals).segmentPool.getTargetWorkers()).toBe(
-            REQUEST_POOL_SIZE_MAX,
+        expect((scheduler as unknown as SchedulerInternals).segmentPool.getRunningWorkers()).toBe(
+            18,
         );
         expect(collections.every((collection) => collection.status === "downloading")).toBe(true);
 

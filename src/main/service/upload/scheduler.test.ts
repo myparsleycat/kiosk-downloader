@@ -319,6 +319,121 @@ describe("UploadScheduler", () => {
 
         scheduler.destroy();
     });
+
+    it("sizes workers from active collections instead of retained history", async () => {
+        const firstFiles = Array.from({ length: 12 }, (_, index) =>
+            createFile(`first-${index}`, remoteId(index + 1), "collection-1"),
+        );
+        const secondFiles = Array.from({ length: 12 }, (_, index) =>
+            createFile(`second-${index}`, remoteId(index + 100), "collection-2"),
+        );
+        const repository = createRepository(firstFiles);
+        const started: string[] = [];
+        const gates = new Map<string, ReturnType<typeof deferred>>();
+        const uploadSegment = vi.fn(async (chunk: ServerFileMapping) => {
+            started.push(chunk.relativePath);
+            const gate = deferred();
+            gates.set(chunk.relativePath, gate);
+            await gate.promise;
+            return { length: chunk.length, outcome: "uploaded" as const };
+        });
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(),
+            createApi(uploadSegment).value,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        scheduler.registerWorkItems(
+            "collection-1",
+            firstFiles.map((file) => ({ id: file.id, remoteId: file.remoteId })),
+            firstFiles.map((file, index) => createChunk(file, index)),
+        );
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(started).toHaveLength(8));
+
+        await vi.waitFor(() => {
+            for (const file of firstFiles) {
+                gates.get(file.path)?.resolve();
+            }
+            expect(repository.completeUpload).toHaveBeenCalledWith(
+                "collection-1",
+                expect.any(String),
+            );
+        });
+
+        repository.addFiles(secondFiles);
+        scheduler.registerWorkItems(
+            "collection-2",
+            secondFiles.map((file) => ({ id: file.id, remoteId: file.remoteId })),
+            secondFiles.map((file, index) => createChunk(file, index)),
+        );
+        await scheduler.schedule();
+        await vi.waitFor(() =>
+            expect(started.filter((path) => path.startsWith("second-"))).toHaveLength(8),
+        );
+        expect(started.filter((path) => path.startsWith("second-"))).toHaveLength(8);
+        expect(internals(scheduler).targetWorkers).toBe(8);
+        expect(internals(scheduler).runningWorkers).toBe(8);
+
+        for (const file of secondFiles) {
+            gates.get(file.path)?.resolve();
+        }
+        scheduler.destroy();
+    });
+
+    it("does not inflate the worker target when replacing a worker", async () => {
+        const collections = ["collection-1", "collection-2", "collection-3"].map(
+            (collectionId, collectionIndex) => ({
+                collectionId,
+                files: Array.from({ length: 8 }, (_, index) =>
+                    createFile(
+                        `${collectionId}-${index}`,
+                        remoteId(collectionIndex * 100 + index + 1),
+                        collectionId,
+                    ),
+                ),
+            }),
+        );
+        const repository = createRepository(collections.flatMap((collection) => collection.files));
+        const gates: Array<ReturnType<typeof deferred>> = [];
+        const uploadSegment = vi.fn(async (chunk: ServerFileMapping) => {
+            const gate = deferred();
+            gates.push(gate);
+            await gate.promise;
+            return { length: chunk.length, outcome: "uploaded" as const };
+        });
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(),
+            createApi(uploadSegment).value,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        for (const collection of collections) {
+            scheduler.registerWorkItems(
+                collection.collectionId,
+                collection.files.map((file) => ({ id: file.id, remoteId: file.remoteId })),
+                collection.files.map((file, index) => createChunk(file, index)),
+            );
+        }
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(gates).toHaveLength(10));
+        expect(internals(scheduler).targetWorkers).toBe(8);
+        expect(internals(scheduler).runningWorkers).toBe(10);
+
+        await scheduler.schedule();
+        expect(gates).toHaveLength(10);
+        expect(internals(scheduler).targetWorkers).toBe(8);
+        expect(internals(scheduler).runningWorkers).toBe(10);
+
+        gates.forEach((gate) => gate.resolve());
+        scheduler.destroy();
+    });
 });
 
 function createRepository(files: UploadFileRow[]) {
@@ -332,10 +447,17 @@ function createRepository(files: UploadFileRow[]) {
             file.uploadedBytes = file.size;
         }
     });
-    const completeUpload = vi.fn();
+    const completeUpload = vi.fn((collectionId: string) => {
+        const collection = collections.find((candidate) => candidate.id === collectionId);
+        if (collection) {
+            collection.status = "completed";
+        }
+    });
     const repository = {
         getCollectionElapsedMs: vi.fn(() => 0),
-        listRunnableCollections: vi.fn(() => collections),
+        listRunnableCollections: vi.fn(() =>
+            collections.filter((collection) => collection.status !== "completed"),
+        ),
         listCompletedChunkIndexes: vi.fn(() => []),
         getCollection: vi.fn(
             (collectionId: string) =>
@@ -357,6 +479,14 @@ function createRepository(files: UploadFileRow[]) {
         value: repository as unknown as UploadRepository,
         completeFile,
         completeUpload,
+        addFiles(nextFiles: UploadFileRow[]) {
+            files.push(...nextFiles);
+            for (const collectionId of new Set(nextFiles.map((file) => file.collectionId))) {
+                if (!collections.some((collection) => collection.id === collectionId)) {
+                    collections.push(createCollection(collectionId));
+                }
+            }
+        },
     };
 }
 
@@ -493,6 +623,21 @@ function createChunk(file: UploadFileRow, index: number): ServerFileMapping {
 
 function remoteId(index: number) {
     return index.toString(16).padStart(32, "0");
+}
+
+function internals(scheduler: UploadScheduler) {
+    return scheduler as unknown as {
+        targetWorkers: number;
+        runningWorkers: number;
+    };
+}
+
+function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((promiseResolve) => {
+        resolve = promiseResolve;
+    });
+    return { promise, resolve };
 }
 
 async function waitForMicrotasks(predicate: () => boolean) {

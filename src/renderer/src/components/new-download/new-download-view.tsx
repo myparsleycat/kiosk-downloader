@@ -24,7 +24,7 @@ import {
   toggleTreeSelection,
 } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
-import { useNewDownloadDraft } from "@renderer/stores/new-download-draft";
+import { applyZipEntriesResult, useNewDownloadDraft } from "@renderer/stores/new-download-draft";
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import { getIpcErrorCause, isCollectionExpiresNever } from "@shared/download-errors";
 import {
@@ -34,7 +34,6 @@ import {
 } from "@shared/share-url";
 import { applyRenamesToTree, basename } from "@shared/tree-rename";
 import { formatSize } from "@shared/utils";
-import { setZipEntries } from "@shared/zip-tree";
 import {
   ArrowDownIcon,
   ArrowUpDownIcon,
@@ -290,34 +289,53 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       if (!collection || !draftId) {
         return;
       }
+      const requestedDraftId = draftId;
       setZipLoading(zipPath, true);
       try {
         const result = await window.api.invoke("download:listZipEntries", {
-          draftId,
+          draftId: requestedDraftId,
           fileId,
           zipPassword,
         });
-        if (result.status === "passwordRequired") {
-          setZipPasswordPrompt({ path: zipPath, fileId, invalid: result.invalid });
+        const applied = applyZipEntriesResult(
+          requestedDraftId,
+          useNewDownloadDraft.getState().preparation,
+          result,
+          fileId,
+        );
+        if (applied.action === "ignore") {
           return;
         }
-        if (result.status === "failed") {
-          if (result.code === "staleDraft") {
-            clearPreparation();
-          }
-          toast.error("ZIP 목록을 불러오지 못했습니다", { description: result.message });
+        if (applied.action === "passwordRequired") {
+          setZipPasswordPrompt({ path: zipPath, fileId, invalid: applied.invalid });
+          return;
+        }
+        if (applied.action === "clear") {
+          clearPreparation();
+          toast.error("ZIP 목록을 불러오지 못했습니다", {
+            description: result.status === "failed" ? result.message : undefined,
+          });
+          return;
+        }
+        if (applied.action === "failed") {
+          toast.error("ZIP 목록을 불러오지 못했습니다", {
+            description: result.status === "failed" ? result.message : undefined,
+          });
+          return;
+        }
+        const current = useNewDownloadDraft.getState().preparation;
+        if (current.status !== "ready" || current.draftId !== requestedDraftId) {
           return;
         }
         if (zipPassword) {
           setZipPassword(fileId, zipPassword);
         }
-        const nextTree = setZipEntries(collection.tree, fileId, result.entries);
         setPreparation({
           status: "ready",
-          draftId,
-          collection: { ...collection, tree: nextTree },
+          draftId: requestedDraftId,
+          collection: { ...current.collection, tree: applied.nextTree },
         });
-        updateSelected((prev) => selectExpandedZipEntries(prev, nextTree, zipPath, fileId));
+        updateSelected((prev) => selectExpandedZipEntries(prev, applied.nextTree, zipPath, fileId));
         setZipPasswordPrompt(null);
         setZipPasswordInput("");
       } catch (error) {
