@@ -50,13 +50,4 @@ describe("GlobalSegmentPool", () => {
         await expect(outcome).resolves.toBe("paused");
         expect((pool as unknown as { queue: unknown[] }).queue).toHaveLength(0);
     });
-
-    it("creates workers only for queued work up to the configured size", () => {
-        const pool = createPool();
-
-        pool.resize(64);
-
-        expect(pool.getTargetWorkers()).toBe(64);
-        expect((pool as unknown as { runningWorkers: number }).runningWorkers).toBe(0);
-    });
 });

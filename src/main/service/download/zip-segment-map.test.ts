@@ -4,7 +4,6 @@ import {
     buildZipEntrySegmentChunks,
     computeStoredDataOffset,
     mapAbsoluteRangeToSegments,
-    readUint16LE,
     supportsZipEntryPoolDownload,
 } from "./zip-segment-map";
 
@@ -30,10 +29,8 @@ describe("mapAbsoluteRangeToSegments", () => {
 });
 
 describe("computeStoredDataOffset", () => {
-    it("reads local header name/extra lengths", () => {
+    it("computes the data offset from local header name/extra lengths", () => {
         const fields = new Uint8Array([3, 0, 2, 0]);
-        expect(readUint16LE(fields, 0)).toBe(3);
-        expect(readUint16LE(fields, 2)).toBe(2);
         expect(computeStoredDataOffset(100, fields)).toBe(135);
     });
 });

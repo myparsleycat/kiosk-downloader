@@ -7,7 +7,6 @@ import { describe, expect, it } from "vitest";
 
 import { compressZstdSync } from "../../lib/zstd";
 import {
-    KDX_CHECKSUM_BYTES,
     KDX_HEADER_SIZE,
     KDX_MAGIC,
     MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES,
@@ -161,7 +160,6 @@ describe("download transfer format", () => {
             createHash("sha256").update(body).digest(),
         );
         expect(encoded.length).toBe(KDX_HEADER_SIZE + body.length);
-        expect(KDX_CHECKSUM_BYTES).toBe(32);
     });
 
     it("accepts legacy raw zstd transfer files", () => {

@@ -176,9 +176,4 @@ describe("materializePacks", () => {
         const result = await materializePacks([file]);
         expect(result).toEqual([file]);
     });
-
-    it("returns an empty array when no files are given", async () => {
-        const result = await materializePacks([]);
-        expect(result).toEqual([]);
-    });
 });

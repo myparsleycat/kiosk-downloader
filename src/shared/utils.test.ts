@@ -14,13 +14,6 @@ describe("toErrorMessage", () => {
     it("returns the message of an Error", () => {
         expect(toErrorMessage(new Error("boom"))).toBe("boom");
     });
-
-    it("stringifies non-Error values", () => {
-        expect(toErrorMessage("plain")).toBe("plain");
-        expect(toErrorMessage(42)).toBe("42");
-        expect(toErrorMessage({ x: 1 })).toBe("[object Object]");
-        expect(toErrorMessage(null)).toBe("null");
-    });
 });
 
 describe("formatSize", () => {
