@@ -1,73 +1,58 @@
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
 } from "@renderer/components/ui/alert-dialog";
 import { Button } from "@renderer/components/ui/button";
 import { Input } from "@renderer/components/ui/input";
 import { Label } from "@renderer/components/ui/label";
-import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+    Select,
+    SelectContent,
+    SelectGroup,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
 } from "@renderer/components/ui/select";
-import { Separator } from "@renderer/components/ui/separator";
 import { Switch } from "@renderer/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@renderer/components/ui/tabs";
 import { useUpdaterStore } from "@renderer/stores/updater";
 import {
-  type AppSettings,
-  AUTO_UPDATE_MODES,
-  type AutoUpdateMode,
-  BANDWIDTH_LIMIT_MIBPS_DEFAULT,
-  BANDWIDTH_LIMIT_MIBPS_MAX,
-  BANDWIDTH_LIMIT_MIBPS_MIN,
-  CHUNK_RETRY_DEFAULT,
-  CHUNK_RETRY_MAX,
-  CHUNK_RETRY_MIN,
-  COLLECTION_PASSWORD_LIST_MAX,
-  INFLATE_BUFFER_BYTES_DEFAULT,
-  INFLATE_BUFFER_BYTES_OPTIONS,
-  REQUEST_POOL_SIZE_DEFAULT,
-  REQUEST_POOL_SIZE_MAX,
-  REQUEST_POOL_SIZE_MIN,
-  SETTING_LOG_LEVELS,
-  SETTING_THEMES,
-  type SettingKey,
-  type SettingTheme,
-  STARTUP_RESUME_MODES,
-  type StartupResumeMode,
-  STREAM_WRITE_BATCH_BYTES_DEFAULT,
-  STREAM_WRITE_BATCH_BYTES_OPTIONS,
-  UPLOAD_CHUNK_RETRY_DEFAULT,
-  UPLOAD_CHUNK_RETRY_MAX,
-  UPLOAD_CHUNK_RETRY_MIN,
+    type AppSettings,
+    AUTO_UPDATE_MODES,
+    type AutoUpdateMode,
+    BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+    BANDWIDTH_LIMIT_MIBPS_MAX,
+    BANDWIDTH_LIMIT_MIBPS_MIN,
+    CHUNK_RETRY_DEFAULT,
+    CHUNK_RETRY_MAX,
+    CHUNK_RETRY_MIN,
+    COLLECTION_PASSWORD_LIST_MAX,
+    INFLATE_BUFFER_BYTES_DEFAULT,
+    INFLATE_BUFFER_BYTES_OPTIONS,
+    REQUEST_POOL_SIZE_DEFAULT,
+    REQUEST_POOL_SIZE_MAX,
+    REQUEST_POOL_SIZE_MIN,
+    SETTING_LOG_LEVELS,
+    SETTING_THEMES,
+    type SettingKey,
+    type SettingTheme,
+    STARTUP_RESUME_MODES,
+    type StartupResumeMode,
+    STREAM_WRITE_BATCH_BYTES_DEFAULT,
+    STREAM_WRITE_BATCH_BYTES_OPTIONS,
+    UPLOAD_CHUNK_RETRY_DEFAULT,
+    UPLOAD_CHUNK_RETRY_MAX,
+    UPLOAD_CHUNK_RETRY_MIN,
 } from "@shared/settings";
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
-import {
-  ArrowLeftRightIcon,
-  ArrowUpCircleIcon,
-  CpuIcon,
-  DownloadIcon,
-  FolderOpenIcon,
-  LockIcon,
-  MoonIcon,
-  PlusIcon,
-  PowerIcon,
-  SettingsIcon,
-  UploadIcon,
-  XIcon,
-  ZapIcon,
-} from "lucide-react";
+import { CpuIcon, FolderOpenIcon, PlusIcon, PowerIcon, XIcon, ZapIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -171,6 +156,13 @@ const autoUpdateModeOptions = AUTO_UPDATE_MODES.map((value) => ({
   label: autoUpdateModeLabels[value],
 }));
 
+const SECTIONS = [
+  { id: "general", icon: PowerIcon, title: "일반" },
+  { id: "collection", icon: FolderOpenIcon, title: "컬렉션 및 저장" },
+  { id: "transfer", icon: ZapIcon, title: "전송" },
+  { id: "advanced", icon: CpuIcon, title: "고급" },
+] as const;
+
 function getUpdaterStatusText(options: {
   strategy: string;
   mode: AutoUpdateMode;
@@ -258,7 +250,7 @@ export function SettingsView() {
   };
 
   return (
-    <ScrollArea className="h-full">
+    <>
       <AlertDialog open={shutdownConfirmOpen} onOpenChange={setShutdownConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -282,386 +274,485 @@ export function SettingsView() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
-        <div className="flex items-center gap-2">
-          <SettingsIcon className="size-4 text-muted-foreground" />
-          <h2 className="cn-font-heading text-base font-medium">설정</h2>
+      <Tabs defaultValue="general" orientation="vertical" className="h-full gap-0">
+        <div className="flex h-full w-52 shrink-0 flex-col border-r bg-sidebar">
+          <div className="flex items-center gap-2 px-4 py-3.5">
+            <h2 className="cn-font-heading text-base font-medium text-sidebar-foreground">설정</h2>
+          </div>
+          <TabsList
+            variant="line"
+            className="h-fit w-full flex-col gap-0.5 rounded-none border-none bg-transparent p-2"
+          >
+            {SECTIONS.map((section) => {
+              const Icon = section.icon;
+              return (
+                <TabsTrigger
+                  key={section.id}
+                  value={section.id}
+                  className="justify-start gap-2 rounded-md px-2.5 py-1.5 text-sm text-sidebar-foreground/60 hover:text-sidebar-foreground data-active:text-sidebar-foreground"
+                >
+                  <Icon className="size-4" />
+                  {section.title}
+                </TabsTrigger>
+              );
+            })}
+          </TabsList>
         </div>
 
-        <Section icon={<PowerIcon className="size-3.5" />} title="일반">
-          {appStatus && !appStatus.isPortable && (
-            <SettingRow
-              title="시작 시 실행"
-              description="시스템 시작 시 Kiosk Downloader를 자동으로 실행합니다."
-              control={
-                <Switch
-                  checked={settings["general.runOnStartup"]}
-                  onCheckedChange={(value) => void setSetting("general.runOnStartup", value)}
-                />
-              }
-            />
-          )}
-          <SettingRow
-            title="백그라운드 실행"
-            description="창을 닫아도 트레이에서 앱을 유지합니다."
-            control={
-              <Switch
-                checked={settings["general.runInBackground"]}
-                onCheckedChange={(value) => void setSetting("general.runInBackground", value)}
-              />
-            }
-          />
-        </Section>
-
-        <Section icon={<ArrowUpCircleIcon className="size-3.5" />} title="업데이트">
-          <SettingRow
-            title="현재 버전"
-            description={
-              appStatus
-                ? `v${appStatus.version}${appStatus.isPortable ? " (portable)" : ""}${appStatus.isDev ? " · dev" : ""}`
-                : "버전 정보를 불러오는 중…"
-            }
-            control={
-              updaterStrategy !== "unsupported" ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  isLoading={isCheckingUpdate || isChecking}
-                  onClick={() => {
-                    setIsCheckingUpdate(true);
-                    void window.api
-                      .invoke("updater:checkForUpdates")
-                      .then(async () => {
-                        const status = await window.api.invoke("updater:getStatus");
-                        if (!status.updateAvailable && !status.updateDownloaded) {
-                          toast.success("최신 버전입니다");
+        <div className="flex-1 overflow-auto">
+          <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
+            <TabsContent value="general" keepMounted>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="시작 및 실행" />
+                  <Section>
+                    {appStatus && !appStatus.isPortable && (
+                      <SettingRow
+                        title="시작 시 실행"
+                        description="시스템 시작 시 Kiosk Downloader를 자동으로 실행합니다."
+                        control={
+                          <Switch
+                            checked={settings["general.runOnStartup"]}
+                            onCheckedChange={(value) =>
+                              void setSetting("general.runOnStartup", value)
+                            }
+                          />
                         }
-                      })
-                      .catch((error) => {
-                        toast.error("업데이트를 확인하지 못했습니다", {
-                          description: error instanceof Error ? error.message : String(error),
-                        });
-                      })
-                      .finally(() => setIsCheckingUpdate(false));
-                  }}
-                >
-                  지금 확인
-                </Button>
-              ) : (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void window.api.invoke("updater:openDownloadPage")}
-                >
-                  릴리스 열기
-                </Button>
-              )
-            }
-          />
-          {updaterStrategy !== "unsupported" && (
-            <SettingRow
-              title="자동 업데이트"
-              description={autoUpdateModeDescriptions[settings["general.autoUpdateMode"]]}
-              control={
-                <SettingSelect
-                  options={autoUpdateModeOptions}
-                  value={settings["general.autoUpdateMode"]}
-                  onChange={(value) => void setSetting("general.autoUpdateMode", value)}
-                />
-              }
-            />
-          )}
-          <SettingRow
-            title="상태"
-            description={getUpdaterStatusText({
-              strategy: updaterStrategy,
-              mode: settings["general.autoUpdateMode"],
-              isChecking,
-              isDownloading,
-              updateDownloaded,
-              updateAvailable,
-              releaseVersion,
-            })}
-            control={
-              updaterStrategy === "nsis" &&
-              updateAvailable &&
-              !updateDownloaded &&
-              (updaterMode === "notify" || settings["general.autoUpdateMode"] === "notify") ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  isLoading={isUpdateActionPending || isDownloading}
-                  onClick={() => {
-                    setIsUpdateActionPending(true);
-                    void window.api
-                      .invoke("updater:downloadUpdate")
-                      .catch((error) => {
-                        toast.error("업데이트를 다운로드하지 못했습니다", {
-                          description: error instanceof Error ? error.message : String(error),
-                        });
-                      })
-                      .finally(() => setIsUpdateActionPending(false));
-                  }}
-                >
-                  다운로드
-                </Button>
-              ) : updaterStrategy === "nsis" && updateDownloaded ? (
-                <Button type="button" size="sm" onClick={() => setShouldPromptForUpdate(true)}>
-                  설치
-                </Button>
-              ) : updaterStrategy === "manual" && updateAvailable ? (
-                <Button type="button" size="sm" onClick={() => setShouldPromptForUpdate(true)}>
-                  확인
-                </Button>
-              ) : null
-            }
-          />
-        </Section>
+                      />
+                    )}
+                    <SettingRow
+                      title="백그라운드 실행"
+                      description="창을 닫아도 트레이에서 앱을 유지합니다."
+                      control={
+                        <Switch
+                          checked={settings["general.runInBackground"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("general.runInBackground", value)
+                          }
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
 
-        <Section icon={<ZapIcon className="size-3.5" />} title="전송">
-          <SettingRow
-            title="전송 중 절전 방지"
-            description="다운로드 진행 중 시스템이 절전 모드로 전환되지 않도록 합니다."
-            control={
-              <Switch
-                checked={settings["general.powerSaveBlockInTransfer"]}
-                onCheckedChange={(value) =>
-                  void setSetting("general.powerSaveBlockInTransfer", value)
-                }
-              />
-            }
-          />
-          <SettingRow
-            title="전송 완료 후 시스템 종료"
-            description="업로드·다운로드가 모두 끝나면 기기를 종료합니다."
-            control={
-              <Switch
-                checked={settings["general.shutdownAfterTransfer"]}
-                onCheckedChange={(value) => {
-                  if (value) {
-                    setShutdownConfirmOpen(true);
-                    return;
-                  }
-                  void setSetting("general.shutdownAfterTransfer", false);
-                }}
-              />
-            }
-          />
-        </Section>
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="업데이트" />
+                  <Section>
+                    <SettingRow
+                      title="현재 버전"
+                      description={
+                        appStatus
+                          ? `v${appStatus.version}${appStatus.isPortable ? " (portable)" : ""}${appStatus.isDev ? " · dev" : ""}`
+                          : "버전 정보를 불러오는 중…"
+                      }
+                      control={
+                        updaterStrategy !== "unsupported" ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            isLoading={isCheckingUpdate || isChecking}
+                            onClick={() => {
+                              setIsCheckingUpdate(true);
+                              void window.api
+                                .invoke("updater:checkForUpdates")
+                                .then(async () => {
+                                  const status = await window.api.invoke("updater:getStatus");
+                                  if (!status.updateAvailable && !status.updateDownloaded) {
+                                    toast.success("최신 버전입니다");
+                                  }
+                                })
+                                .catch((error) => {
+                                  toast.error("업데이트를 확인하지 못했습니다", {
+                                    description:
+                                      error instanceof Error ? error.message : String(error),
+                                  });
+                                })
+                                .finally(() => setIsCheckingUpdate(false));
+                            }}
+                          >
+                            지금 확인
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void window.api.invoke("updater:openDownloadPage")}
+                          >
+                            릴리스 열기
+                          </Button>
+                        )
+                      }
+                    />
+                    {updaterStrategy !== "unsupported" && (
+                      <SettingRow
+                        title="자동 업데이트"
+                        description={autoUpdateModeDescriptions[settings["general.autoUpdateMode"]]}
+                        control={
+                          <SettingSelect
+                            options={autoUpdateModeOptions}
+                            value={settings["general.autoUpdateMode"]}
+                            onChange={(value) => void setSetting("general.autoUpdateMode", value)}
+                          />
+                        }
+                      />
+                    )}
+                    <SettingRow
+                      title="상태"
+                      description={getUpdaterStatusText({
+                        strategy: updaterStrategy,
+                        mode: settings["general.autoUpdateMode"],
+                        isChecking,
+                        isDownloading,
+                        updateDownloaded,
+                        updateAvailable,
+                        releaseVersion,
+                      })}
+                      control={
+                        updaterStrategy === "nsis" &&
+                        updateAvailable &&
+                        !updateDownloaded &&
+                        (updaterMode === "notify" ||
+                          settings["general.autoUpdateMode"] === "notify") ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            isLoading={isUpdateActionPending || isDownloading}
+                            onClick={() => {
+                              setIsUpdateActionPending(true);
+                              void window.api
+                                .invoke("updater:downloadUpdate")
+                                .catch((error) => {
+                                  toast.error("업데이트를 다운로드하지 못했습니다", {
+                                    description:
+                                      error instanceof Error ? error.message : String(error),
+                                  });
+                                })
+                                .finally(() => setIsUpdateActionPending(false));
+                            }}
+                          >
+                            다운로드
+                          </Button>
+                        ) : updaterStrategy === "nsis" && updateDownloaded ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => setShouldPromptForUpdate(true)}
+                          >
+                            설치
+                          </Button>
+                        ) : updaterStrategy === "manual" && updateAvailable ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => setShouldPromptForUpdate(true)}
+                          >
+                            확인
+                          </Button>
+                        ) : null
+                      }
+                    />
+                  </Section>
+                </div>
 
-        <Section icon={<FolderOpenIcon className="size-3.5" />} title="저장">
-          <SettingRow
-            title="컬렉션 이름 하위 폴더 생성"
-            description="최상위 항목이 두 개 이상일 때만 저장 경로 아래에 컬렉션 이름으로 하위 폴더를 만듭니다."
-            control={
-              <Switch
-                checked={settings["general.createCollectionSubfolder"]}
-                onCheckedChange={(value) =>
-                  void setSetting("general.createCollectionSubfolder", value)
-                }
-              />
-            }
-          />
-          <SettingRow
-            title="ASCII 파일명으로 저장"
-            description="다운로드 파일·폴더 이름에서 비ASCII 문자를 유사 ASCII 또는 _로 바꿉니다. 새로 시작하는 다운로드에만 적용됩니다."
-            control={
-              <Switch
-                checked={settings["general.asciiFilenames"]}
-                onCheckedChange={(value) => void setSetting("general.asciiFilenames", value)}
-              />
-            }
-          />
-        </Section>
-
-        <Section icon={<LockIcon className="size-3.5" />} title="컬렉션 비밀번호">
-          <SettingRow
-            title="비밀번호 자동 시도"
-            description="보호된 컬렉션 로드 시 등록된 비밀번호를 병렬로 시도합니다."
-            control={
-              <Switch
-                checked={settings["general.autoTryCollectionPasswords"]}
-                onCheckedChange={(value) =>
-                  void setSetting("general.autoTryCollectionPasswords", value)
-                }
-              />
-            }
-          />
-          <CollectionPasswordListSetting
-            value={settings["general.collectionPasswordList"]}
-            onChange={(value) => void setSetting("general.collectionPasswordList", value)}
-          />
-        </Section>
-
-        <Section icon={<ArrowLeftRightIcon className="size-3.5" />} title="전송 큐">
-          <SettingRow
-            title="요청 풀 크기"
-            description="모든 업로드·다운로드의 실제 데이터 전송 요청이 공유하는 동시 실행 상한입니다."
-            control={
-              <NumberSetting
-                value={settings["transfer.requestPoolSize"]}
-                min={REQUEST_POOL_SIZE_MIN}
-                max={REQUEST_POOL_SIZE_MAX}
-                onChange={(value) => void setSetting("transfer.requestPoolSize", value)}
-              />
-            }
-          />
-        </Section>
-
-        <Section icon={<DownloadIcon className="size-3.5" />} title="다운로드 큐">
-          <SettingRow
-            title="대역폭 제한"
-            description="다운로드 합산 속도 상한입니다. 0이면 무제한입니다."
-            control={
-              <div className="flex items-center gap-2">
-                <NumberSetting
-                  value={settings["transfer.downloadBandwidthLimitMibps"]}
-                  min={BANDWIDTH_LIMIT_MIBPS_MIN}
-                  max={BANDWIDTH_LIMIT_MIBPS_MAX}
-                  onChange={(value) =>
-                    void setSetting("transfer.downloadBandwidthLimitMibps", value)
-                  }
-                />
-                <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="외관" />
+                  <Section>
+                    <SettingRow
+                      title="테마"
+                      description="앱의 색상 테마를 선택합니다."
+                      control={
+                        <SettingSelect
+                          options={themeOptions}
+                          value={settings["general.theme"]}
+                          onChange={(value) => void setSetting("general.theme", value)}
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
               </div>
-            }
-          />
-          <SettingRow
-            title="청크 재시도"
-            description="청크 다운로드 실패 시 최대 재시도 횟수입니다."
-            control={
-              <SettingSelect
-                options={chunkRetryOptions}
-                value={String(settings["transfer.maxChunkRetries"])}
-                onChange={(value) =>
-                  void setSetting("transfer.maxChunkRetries", Number.parseInt(value, 10))
-                }
-              />
-            }
-          />
-          <SettingRow
-            title="스트림 쓰기 배치"
-            description="스트림으로 받은 데이터를 디스크에 쓰기 전에 모으는 크기입니다."
-            control={
-              <SettingSelect
-                options={streamWriteBatchOptions}
-                value={String(settings["transfer.streamWriteBatchBytes"])}
-                onChange={(value) =>
-                  void setSetting("transfer.streamWriteBatchBytes", Number.parseInt(value, 10))
-                }
-              />
-            }
-          />
-          <SettingRow
-            title="압축 해제 배치"
-            description="Deflate ZIP 항목을 압축 해제할 때 사용하는 버퍼 크기입니다."
-            control={
-              <SettingSelect
-                options={inflateBufferOptions}
-                value={String(settings["transfer.inflateBufferBytes"])}
-                onChange={(value) =>
-                  void setSetting("transfer.inflateBufferBytes", Number.parseInt(value, 10))
-                }
-              />
-            }
-          />
-          <SettingRow
-            title="시작 시 이어받기"
-            description="앱 시작 시 이전 다운로드를 자동으로 다시 시작할지 선택합니다."
-            control={
-              <SettingSelect
-                options={startupResumeModeOptions}
-                value={settings["transfer.startupResumeMode"]}
-                onChange={(value) => void setSetting("transfer.startupResumeMode", value)}
-              />
-            }
-          />
-        </Section>
+            </TabsContent>
 
-        <Section icon={<UploadIcon className="size-3.5" />} title="업로드 큐">
-          <SettingRow
-            title="대역폭 제한"
-            description="업로드 합산 속도 상한입니다. 0이면 무제한입니다."
-            control={
-              <div className="flex items-center gap-2">
-                <NumberSetting
-                  value={settings["transfer.uploadBandwidthLimitMibps"]}
-                  min={BANDWIDTH_LIMIT_MIBPS_MIN}
-                  max={BANDWIDTH_LIMIT_MIBPS_MAX}
-                  onChange={(value) => void setSetting("transfer.uploadBandwidthLimitMibps", value)}
-                />
-                <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+            <TabsContent value="collection" keepMounted>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="저장" />
+                  <Section>
+                    <SettingRow
+                      title="컬렉션 이름 하위 폴더 생성"
+                      description="최상위 항목이 두 개 이상일 때만 저장 경로 아래에 컬렉션 이름으로 하위 폴더를 만듭니다."
+                      control={
+                        <Switch
+                          checked={settings["general.createCollectionSubfolder"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("general.createCollectionSubfolder", value)
+                          }
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="ASCII 파일명으로 저장"
+                      description="다운로드 파일·폴더 이름에서 비ASCII 문자를 유사 ASCII 또는 _로 바꿉니다. 새로 시작하는 다운로드에만 적용됩니다."
+                      control={
+                        <Switch
+                          checked={settings["general.asciiFilenames"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("general.asciiFilenames", value)
+                          }
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="컬렉션 비밀번호" />
+                  <Section>
+                    <SettingRow
+                      title="비밀번호 자동 시도"
+                      description="보호된 컬렉션 로드 시 등록된 비밀번호를 병렬로 시도합니다."
+                      control={
+                        <Switch
+                          checked={settings["general.autoTryCollectionPasswords"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("general.autoTryCollectionPasswords", value)
+                          }
+                        />
+                      }
+                    />
+                    <CollectionPasswordListSetting
+                      value={settings["general.collectionPasswordList"]}
+                      onChange={(value) => void setSetting("general.collectionPasswordList", value)}
+                    />
+                  </Section>
+                </div>
               </div>
-            }
-          />
-          <SettingRow
-            title="청크 재시도"
-            description="청크 업로드 실패 시 최대 재시도 횟수입니다."
-            control={
-              <SettingSelect
-                options={uploadChunkRetryOptions}
-                value={String(settings["transfer.uploadMaxChunkRetries"])}
-                onChange={(value) =>
-                  void setSetting("transfer.uploadMaxChunkRetries", Number.parseInt(value, 10))
-                }
-              />
-            }
-          />
-          <SettingRow
-            title="시작 시 이어받기"
-            description="앱 시작 시 이전 업로드를 자동으로 다시 시작할지 선택합니다."
-            control={
-              <SettingSelect
-                options={startupResumeModeOptions}
-                value={settings["transfer.uploadStartupResumeMode"]}
-                onChange={(value) => void setSetting("transfer.uploadStartupResumeMode", value)}
-              />
-            }
-          />
-        </Section>
+            </TabsContent>
 
-        <Section icon={<CpuIcon className="size-3.5" />} title="고급">
-          <SettingRow
-            title="IPv4 연결 우선"
-            description="다운로드·업로드 요청을 IPv4로만 시도합니다. IPv6 경로에서 연결이 멈추는 문제가 있다면 켜두세요."
-            control={
-              <Switch
-                checked={settings["network.forceIpv4"]}
-                onCheckedChange={(value) => void setSetting("network.forceIpv4", value)}
-              />
-            }
-          />
-          <SettingRow
-            title="로그 레벨"
-            description="앱 로그의 상세 정도를 설정합니다."
-            control={
-              <SettingSelect
-                options={logLevelOptions}
-                value={settings["general.logLevel"]}
-                onChange={(value) => void setSetting("general.logLevel", value)}
-              />
-            }
-          />
-        </Section>
+            <TabsContent value="transfer" keepMounted>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="전송 동작" />
+                  <Section>
+                    <SettingRow
+                      title="전송 중 절전 방지"
+                      description="다운로드 진행 중 시스템이 절전 모드로 전환되지 않도록 합니다."
+                      control={
+                        <Switch
+                          checked={settings["general.powerSaveBlockInTransfer"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("general.powerSaveBlockInTransfer", value)
+                          }
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="전송 완료 후 시스템 종료"
+                      description="업로드·다운로드가 모두 끝나면 기기를 종료합니다."
+                      control={
+                        <Switch
+                          checked={settings["general.shutdownAfterTransfer"]}
+                          onCheckedChange={(value) => {
+                            if (value) {
+                              setShutdownConfirmOpen(true);
+                              return;
+                            }
+                            void setSetting("general.shutdownAfterTransfer", false);
+                          }}
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
 
-        <Section icon={<MoonIcon className="size-3.5" />} title="외관">
-          <SettingRow
-            title="테마"
-            description="앱의 색상 테마를 선택합니다."
-            control={
-              <SettingSelect
-                options={themeOptions}
-                value={settings["general.theme"]}
-                onChange={(value) => void setSetting("general.theme", value)}
-              />
-            }
-          />
-        </Section>
-      </div>
-    </ScrollArea>
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="전송 큐" />
+                  <Section>
+                    <SettingRow
+                      title="요청 풀 크기"
+                      description="모든 업로드·다운로드의 실제 데이터 전송 요청이 공유하는 동시 실행 상한입니다."
+                      control={
+                        <NumberSetting
+                          value={settings["transfer.requestPoolSize"]}
+                          min={REQUEST_POOL_SIZE_MIN}
+                          max={REQUEST_POOL_SIZE_MAX}
+                          onChange={(value) => void setSetting("transfer.requestPoolSize", value)}
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="다운로드 큐" />
+                  <Section>
+                    <SettingRow
+                      title="대역폭 제한"
+                      description="다운로드 합산 속도 상한입니다. 0이면 무제한입니다."
+                      control={
+                        <div className="flex items-center gap-2">
+                          <NumberSetting
+                            value={settings["transfer.downloadBandwidthLimitMibps"]}
+                            min={BANDWIDTH_LIMIT_MIBPS_MIN}
+                            max={BANDWIDTH_LIMIT_MIBPS_MAX}
+                            onChange={(value) =>
+                              void setSetting("transfer.downloadBandwidthLimitMibps", value)
+                            }
+                          />
+                          <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+                        </div>
+                      }
+                    />
+                    <SettingRow
+                      title="청크 재시도"
+                      description="청크 다운로드 실패 시 최대 재시도 횟수입니다."
+                      control={
+                        <SettingSelect
+                          options={chunkRetryOptions}
+                          value={String(settings["transfer.maxChunkRetries"])}
+                          onChange={(value) =>
+                            void setSetting("transfer.maxChunkRetries", Number.parseInt(value, 10))
+                          }
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="스트림 쓰기 배치"
+                      description="스트림으로 받은 데이터를 디스크에 쓰기 전에 모으는 크기입니다."
+                      control={
+                        <SettingSelect
+                          options={streamWriteBatchOptions}
+                          value={String(settings["transfer.streamWriteBatchBytes"])}
+                          onChange={(value) =>
+                            void setSetting(
+                              "transfer.streamWriteBatchBytes",
+                              Number.parseInt(value, 10),
+                            )
+                          }
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="압축 해제 배치"
+                      description="Deflate ZIP 항목을 압축 해제할 때 사용하는 버퍼 크기입니다."
+                      control={
+                        <SettingSelect
+                          options={inflateBufferOptions}
+                          value={String(settings["transfer.inflateBufferBytes"])}
+                          onChange={(value) =>
+                            void setSetting(
+                              "transfer.inflateBufferBytes",
+                              Number.parseInt(value, 10),
+                            )
+                          }
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="시작 시 이어받기"
+                      description="앱 시작 시 이전 다운로드를 자동으로 다시 시작할지 선택합니다."
+                      control={
+                        <SettingSelect
+                          options={startupResumeModeOptions}
+                          value={settings["transfer.startupResumeMode"]}
+                          onChange={(value) => void setSetting("transfer.startupResumeMode", value)}
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="업로드 큐" />
+                  <Section>
+                    <SettingRow
+                      title="대역폭 제한"
+                      description="업로드 합산 속도 상한입니다. 0이면 무제한입니다."
+                      control={
+                        <div className="flex items-center gap-2">
+                          <NumberSetting
+                            value={settings["transfer.uploadBandwidthLimitMibps"]}
+                            min={BANDWIDTH_LIMIT_MIBPS_MIN}
+                            max={BANDWIDTH_LIMIT_MIBPS_MAX}
+                            onChange={(value) =>
+                              void setSetting("transfer.uploadBandwidthLimitMibps", value)
+                            }
+                          />
+                          <span className="text-xs text-muted-foreground tabular-nums">MiB/s</span>
+                        </div>
+                      }
+                    />
+                    <SettingRow
+                      title="청크 재시도"
+                      description="청크 업로드 실패 시 최대 재시도 횟수입니다."
+                      control={
+                        <SettingSelect
+                          options={uploadChunkRetryOptions}
+                          value={String(settings["transfer.uploadMaxChunkRetries"])}
+                          onChange={(value) =>
+                            void setSetting(
+                              "transfer.uploadMaxChunkRetries",
+                              Number.parseInt(value, 10),
+                            )
+                          }
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="시작 시 이어받기"
+                      description="앱 시작 시 이전 업로드를 자동으로 다시 시작할지 선택합니다."
+                      control={
+                        <SettingSelect
+                          options={startupResumeModeOptions}
+                          value={settings["transfer.uploadStartupResumeMode"]}
+                          onChange={(value) =>
+                            void setSetting("transfer.uploadStartupResumeMode", value)
+                          }
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="advanced" keepMounted>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="네트워크 및 로그" />
+                  <Section>
+                    <SettingRow
+                      title="IPv4 연결 우선"
+                      description="다운로드·업로드 요청을 IPv4로만 시도합니다. IPv6 경로에서 연결이 멈추는 문제가 있다면 켜두세요."
+                      control={
+                        <Switch
+                          checked={settings["network.forceIpv4"]}
+                          onCheckedChange={(value) => void setSetting("network.forceIpv4", value)}
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="로그 레벨"
+                      description="앱 로그의 상세 정도를 설정합니다."
+                      control={
+                        <SettingSelect
+                          options={logLevelOptions}
+                          value={settings["general.logLevel"]}
+                          onChange={(value) => void setSetting("general.logLevel", value)}
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+              </div>
+            </TabsContent>
+          </div>
+        </div>
+      </Tabs>
+    </>
   );
 }
 
@@ -709,29 +800,20 @@ function SettingSelect<T extends string>({
   );
 }
 
-function Section({
-  icon,
-  title,
-  children,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  children: React.ReactNode;
-}) {
+function SectionTitle({ title }: { title: string }) {
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1.5 px-1 pb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {icon}
-        {title}
-      </div>
-      <div className="flex flex-col rounded-xl border bg-card">
-        {React.Children.toArray(children).map((child, i, arr) => (
-          <React.Fragment key={i}>
-            {child}
-            {i < arr.length - 1 && <Separator />}
-          </React.Fragment>
-        ))}
-      </div>
+    <h3 className="cn-font-heading px-1 pb-2 text-sm font-medium text-muted-foreground">{title}</h3>
+  );
+}
+
+function Section({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col border-l border-foreground/20 pl-4">
+      {React.Children.toArray(children).map((child, i, arr) => (
+        <React.Fragment key={i}>
+          {child}
+        </React.Fragment>
+      ))}
     </div>
   );
 }
