@@ -1,3 +1,4 @@
+import { BulkTransferButtons } from "@renderer/components/transfer/bulk-transfer-buttons";
 import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-pool-usage";
 import { FileTree, type FileTreeError } from "@renderer/components/tree/file-tree";
 import {
@@ -26,13 +27,12 @@ import {
   DialogTitle,
 } from "@renderer/components/ui/dialog";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@renderer/components/ui/tooltip";
 import { useRemoveTransfer } from "@renderer/hooks/use-remove-transfer";
+import { isBulkPausable, isBulkStartable, runBulkItemActions } from "@renderer/lib/bulk-transfer";
 import { cn } from "@renderer/lib/utils";
 import type { DownloadStatus, FileProgress, UploadFileProgress, UploadItem } from "@shared/types";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import {
-  BrushCleaningIcon,
   ClockIcon,
   CopyIcon,
   FilterIcon,
@@ -59,6 +59,9 @@ const removeUploadOptions = {
   errorMessage: "삭제하지 못했습니다",
   dialogTitle: "업로드 삭제",
   dialogDescription: "아직 완료되지 않은 업로드입니다. 정말 삭제하시겠습니까?",
+  bulkDialogTitle: "전체 삭제",
+  bulkDialogDescription:
+    "모든 업로드 항목을 목록에서 삭제합니다. 아직 완료되지 않은 업로드도 포함됩니다.",
 };
 
 export function UploadList({
@@ -113,13 +116,14 @@ export function UploadList({
   }, [items, replacementTarget]);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
-  const { remove, removeCompleted, dialog, removing } =
+  const { remove, removeCompleted, removeAll, dialog, removing, removingKind, confirming } =
     useRemoveTransfer<UploadItem>(removeUploadOptions);
-  const hasCompleted = items.some((item) => item.status === "completed");
   const [pendingAction, setPendingAction] = React.useState(false);
+  const [bulkAction, setBulkAction] = React.useState<"start" | "pause" | null>(null);
+  const busy = pendingAction || bulkAction !== null || removing || confirming;
 
   const runAction = async (action: () => Promise<unknown>, success?: string) => {
-    if (pendingAction) return;
+    if (busy) return;
     setPendingAction(true);
     try {
       await action();
@@ -132,6 +136,41 @@ export function UploadList({
       setPendingAction(false);
     }
   };
+
+  const runBulk = async (kind: "start" | "pause", action: () => Promise<void>) => {
+    if (busy) return;
+    setBulkAction(kind);
+    try {
+      await action();
+    } catch (error) {
+      toast.error("작업을 완료하지 못했습니다", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBulkAction(null);
+    }
+  };
+
+  const handleBulkStart = () =>
+    void runBulk("start", async () => {
+      const firstError = await runBulkItemActions(
+        items.filter((item) => isBulkStartable(item.status)),
+        (item) =>
+          window.api.invoke("upload:resume", item.id, {
+            force: item.status === "error",
+          }),
+      );
+      if (firstError) throw firstError;
+    });
+
+  const handleBulkPause = () =>
+    void runBulk("pause", async () => {
+      const firstError = await runBulkItemActions(
+        items.filter((item) => isBulkPausable("upload", item.status)),
+        (item) => window.api.invoke("upload:pause", item.id),
+      );
+      if (firstError) throw firstError;
+    });
 
   const handleShareInfo = async (item: UploadItem) => {
     if (!item.shareLink && !item.shareValue) {
@@ -180,22 +219,21 @@ export function UploadList({
               {f === "all" ? "전체" : f === "active" ? "진행중" : "완료"}
             </button>
           ))}
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  disabled={!hasCompleted || removing}
-                  onClick={() => void removeCompleted(items)}
-                  className="ml-auto size-6 text-muted-foreground"
-                >
-                  <BrushCleaningIcon className="size-3.5" />
-                </Button>
-              }
-            />
-            <TooltipContent>완료된 항목 제거</TooltipContent>
-          </Tooltip>
+          <BulkTransferButtons
+            canStart={items.some((item) => isBulkStartable(item.status))}
+            canPause={items.some((item) => isBulkPausable("upload", item.status))}
+            canDelete={items.length > 0}
+            canCleanup={items.some((item) => item.status === "completed")}
+            busy={busy}
+            loading={
+              bulkAction ??
+              (removingKind === "all" ? "delete" : removingKind === "completed" ? "cleanup" : null)
+            }
+            onStart={handleBulkStart}
+            onPause={handleBulkPause}
+            onDelete={() => removeAll(items)}
+            onCleanup={() => void removeCompleted(items)}
+          />
         </div>
         <ScrollArea className="flex-1">
           <div className="flex w-full flex-col gap-2 p-2">

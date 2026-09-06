@@ -1,3 +1,16 @@
+# [1.11.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.10.0...v1.11.0) (2026-09-06)
+
+
+### Bug Fixes
+
+* **download:** isolate concurrent share preparation ([42c7eb5](https://github.com/myparsleycat/kiosk-downloader/commit/42c7eb5c0617aaecb8ddcf45e1df14e50a093688))
+
+
+### Features
+
+* **download:** add bulk share drafts with concurrent prepare ([9e71d76](https://github.com/myparsleycat/kiosk-downloader/commit/9e71d766a533e44696016a9e144ad1fff0454245))
+* **transfer:** add bulk start, pause, and delete buttons ([655a4eb](https://github.com/myparsleycat/kiosk-downloader/commit/655a4eb5f452ec002f7df95e23dc675134fd0412))
+
 # [1.10.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.9.4...v1.10.0) (2026-08-15)
 
 

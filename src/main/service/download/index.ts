@@ -19,24 +19,26 @@ import {
     uuidBytesToShareId,
 } from "@shared/share-url";
 import { applyRenamesToTree, toDisplayPath, validateNodeName } from "@shared/tree-rename";
-import type {
-    Collection,
-    CreateDownloadPayload,
-    DownloadItem,
-    DownloadProvider,
-    FileProgress,
-    ListZipEntriesPayload,
-    ListZipEntriesResult,
-    LoadCollectionPayload,
-    PrepareDownloadPayload,
-    PrepareDownloadResult,
-    ResumePayload,
-    ZipNode,
+import {
+    DOWNLOAD_PREPARE_CONCURRENCY,
+    type Collection,
+    type CreateDownloadPayload,
+    type DownloadItem,
+    type DownloadProvider,
+    type FileProgress,
+    type ListZipEntriesPayload,
+    type ListZipEntriesResult,
+    type LoadCollectionPayload,
+    type PrepareDownloadPayload,
+    type PrepareDownloadResult,
+    type ResumePayload,
+    type ZipNode,
 } from "@shared/types";
 import { findZipNodeById, isZipExtractMode, listZipNodes, setZipEntries } from "@shared/zip-tree";
 import { shell } from "electron";
 import fg from "fast-glob";
 import fse from "fs-extra";
+import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
 import type {
@@ -80,7 +82,6 @@ import { indexZipFromSegments } from "./zip-index";
 const KDX_FILTERS = [{ name: "Kiosk Download Transfer", extensions: ["kdx"] }];
 const KDS_FILTERS = [{ name: "Kiosk Extended Share", extensions: ["kds"] }];
 const MAX_SHARE_FILE_BYTES = KDS_HEADER_SIZE + MAX_EXTENDED_SHARE_ENCODED_BYTES;
-
 type LoadedExtendedCollection = {
     collection: Collection;
     sources: LoadedKioskCollection[];
@@ -92,6 +93,7 @@ type PreparedDownloadDraft = {
     sourceInput: string;
     password?: string;
     asciiFilenames: boolean;
+    correlationId: string;
     loaded: LoadedCollection | LoadedExtendedCollection;
 };
 
@@ -119,9 +121,10 @@ export class DownloadService {
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
-    private preparedDraft: PreparedDownloadDraft | null = null;
-    private prepareController: AbortController | null = null;
-    private prepareGeneration = 0;
+    private readonly preparedDrafts = new Map<string, PreparedDownloadDraft>();
+    private readonly prepareControllers = new Map<string, AbortController>();
+    private readonly prepareLimit = pLimit(DOWNLOAD_PREPARE_CONCURRENCY);
+    private prepareEpoch = 0;
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
     private unsubscribeRequestPoolUsage?: () => void;
     private revision = 0;
@@ -253,140 +256,53 @@ export class DownloadService {
     }
 
     public destroy() {
-        this.prepareGeneration += 1;
-        this.prepareController?.abort();
-        this.prepareController = null;
-        this.preparedDraft = null;
+        this.abortAllPrepares();
+        this.preparedDrafts.clear();
         this.unsubscribeRequestPoolUsage?.();
         this.scheduler.destroy();
     }
 
     public async prepare(payload: PrepareDownloadPayload): Promise<PrepareDownloadResult> {
-        this.prepareController?.abort();
-        const controller = new AbortController();
-        this.prepareController = controller;
-        const generation = ++this.prepareGeneration;
-        this.preparedDraft = null;
         const sourceInput = payload.url.trim();
         const parsed = tryParseDownloadUrl(sourceInput);
         if (!parsed && !sourceInput.startsWith(EXTENDED_SHARE_PREFIX)) {
-            this.prepareController = null;
             return { status: "failed", code: "invalidUrl", message: "Invalid share URL." };
         }
 
-        const asciiFilenames =
-            payload.asciiFilenames ?? (await this.kd.setting.get("general.asciiFilenames"));
-        const attempt = async (password?: string) => {
-            const loadPayload = { url: sourceInput, password, signal: controller.signal };
-            const loaded = sourceInput.startsWith(EXTENDED_SHARE_PREFIX)
-                ? await this.loadExtendedCollection(loadPayload)
-                : await this.loadCollectionUnlocked(loadPayload, asciiFilenames);
-            if (generation !== this.prepareGeneration) {
-                throw new DOMException("The operation was aborted.", "AbortError");
-            }
-            return { loaded, password };
-        };
+        const epoch = this.prepareEpoch;
+        const correlationId = payload.correlationId ?? randomUUID();
+        const controller = new AbortController();
+        this.prepareControllers.get(correlationId)?.abort();
+        this.prepareControllers.set(correlationId, controller);
 
         try {
-            let prepared: Awaited<ReturnType<typeof attempt>>;
-            try {
-                prepared = await attempt(payload.password);
-            } catch (error) {
-                const invalid =
-                    isCollectionInvalidPasswordError(error) ||
-                    isExtendedShareInvalidPasswordError(error);
-                const required =
-                    isCollectionPasswordRequiredError(error) ||
-                    isExtendedSharePasswordRequiredError(error);
-                if (payload.password && invalid) {
-                    return { status: "passwordRequired", invalid: true };
-                }
-                if (!payload.password && required) {
-                    const settings = await this.kd.setting.getMany([
-                        "general.autoTryCollectionPasswords",
-                        "general.collectionPasswordList",
-                    ]);
-                    if (!settings["general.autoTryCollectionPasswords"]) {
-                        return { status: "passwordRequired", invalid: false };
-                    }
-                    let matched: Awaited<ReturnType<typeof attempt>> | null = null;
-                    for (const candidate of settings["general.collectionPasswordList"]) {
-                        if (generation !== this.prepareGeneration) {
-                            throw new DOMException("The operation was aborted.", "AbortError");
-                        }
-                        try {
-                            matched = await attempt(candidate);
-                            break;
-                        } catch (candidateError) {
-                            if (
-                                !isCollectionInvalidPasswordError(candidateError) &&
-                                !isExtendedShareInvalidPasswordError(candidateError)
-                            ) {
-                                throw candidateError;
-                            }
-                        }
-                    }
-                    if (!matched) {
-                        return { status: "passwordRequired", invalid: false };
-                    }
-                    prepared = matched;
-                } else {
-                    throw error;
-                }
-            }
-
-            const id = randomUUID();
-            this.preparedDraft = {
-                id,
-                sourceInput,
-                password: prepared.password,
-                asciiFilenames,
-                loaded: prepared.loaded,
-            };
-            this.prepareController = null;
-            const collection = prepared.loaded.collection;
-            return {
-                status: "ready",
-                draftId: id,
-                collection:
-                    "resource" in prepared.loaded
-                        ? { ...collection, resource: prepared.loaded.resource }
-                        : collection,
-            };
-        } catch (error) {
-            if (generation !== this.prepareGeneration) {
-                return {
-                    status: "failed",
-                    code: "remoteFailure",
-                    message: "Preparation superseded.",
-                };
-            }
-            logCaughtError(
-                this.kd.logger,
-                "DownloadService:prepare",
-                { channel: "download:prepare", stage: "load", url: sourceInput },
-                error,
+            return await this.prepareLimit(() =>
+                this.prepareDraft(payload, sourceInput, epoch, controller, correlationId),
             );
-            return {
-                status: "failed",
-                code: "remoteFailure",
-                message: error instanceof Error ? error.message : String(error),
-            };
         } finally {
-            if (this.prepareController === controller) {
-                this.prepareController = null;
+            if (this.prepareControllers.get(correlationId) === controller) {
+                this.prepareControllers.delete(correlationId);
             }
         }
     }
 
     public discardDraft(payload: { draftId?: string }) {
-        if (payload.draftId && this.preparedDraft?.id !== payload.draftId) {
+        if (!payload.draftId) {
+            this.abortAllPrepares();
+            this.preparedDrafts.clear();
             return;
         }
-        this.prepareGeneration += 1;
-        this.prepareController?.abort();
-        this.prepareController = null;
-        this.preparedDraft = null;
+        const controller = this.prepareControllers.get(payload.draftId);
+        if (controller) {
+            controller.abort();
+            this.prepareControllers.delete(payload.draftId);
+        }
+        this.preparedDrafts.delete(payload.draftId);
+        for (const [id, draft] of this.preparedDrafts) {
+            if (draft.correlationId === payload.draftId) {
+                this.preparedDrafts.delete(id);
+            }
+        }
     }
 
     public async listZipEntries(payload: ListZipEntriesPayload): Promise<ListZipEntriesResult> {
@@ -395,10 +311,10 @@ export class DownloadService {
             code: "staleDraft" as const,
             message: "Prepared download draft is no longer available.",
         };
-        if (!this.preparedDraft || this.preparedDraft.id !== payload.draftId) {
+        const draft = this.preparedDrafts.get(payload.draftId);
+        if (!draft) {
             return staleDraft;
         }
-        const draft = this.preparedDraft;
         if ("manifest" in draft.loaded || draft.loaded.provider !== "kiosk") {
             return {
                 status: "failed",
@@ -422,7 +338,7 @@ export class DownloadService {
                 found.zip.size,
                 payload.zipPassword,
             );
-            if (this.preparedDraft !== draft) {
+            if (this.preparedDrafts.get(draft.id) !== draft) {
                 return staleDraft;
             }
             loaded.collection = {
@@ -543,15 +459,154 @@ export class DownloadService {
     }
 
     private requirePreparedDraft(draftId: string) {
-        if (!this.preparedDraft || this.preparedDraft.id !== draftId) {
+        const draft = this.preparedDrafts.get(draftId);
+        if (!draft) {
             throw new Error("Prepared download draft is no longer available.");
         }
-        return this.preparedDraft;
+        return draft;
     }
 
     private clearPreparedDraft(draftId: string) {
-        if (this.preparedDraft?.id === draftId) {
-            this.preparedDraft = null;
+        this.preparedDrafts.delete(draftId);
+    }
+
+    private abortAllPrepares() {
+        this.prepareEpoch += 1;
+        for (const controller of this.prepareControllers.values()) {
+            controller.abort();
+        }
+        this.prepareControllers.clear();
+    }
+
+    private async prepareDraft(
+        payload: PrepareDownloadPayload,
+        sourceInput: string,
+        epoch: number,
+        controller: AbortController,
+        correlationId: string,
+    ): Promise<PrepareDownloadResult> {
+        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            return {
+                status: "failed",
+                code: "remoteFailure",
+                message: "Preparation superseded.",
+            };
+        }
+
+        const asciiFilenames =
+            payload.asciiFilenames ?? (await this.kd.setting.get("general.asciiFilenames"));
+        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            return {
+                status: "failed",
+                code: "remoteFailure",
+                message: "Preparation superseded.",
+            };
+        }
+
+        const attempt = async (password?: string) => {
+            const loadPayload = { url: sourceInput, password, signal: controller.signal };
+            const loaded = sourceInput.startsWith(EXTENDED_SHARE_PREFIX)
+                ? await this.loadExtendedCollection(loadPayload)
+                : await this.loadCollectionUnlocked(loadPayload, asciiFilenames);
+            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+                throw new DOMException("The operation was aborted.", "AbortError");
+            }
+            return { loaded, password };
+        };
+
+        try {
+            let prepared: Awaited<ReturnType<typeof attempt>>;
+            try {
+                prepared = await attempt(payload.password);
+            } catch (error) {
+                const invalid =
+                    isCollectionInvalidPasswordError(error) ||
+                    isExtendedShareInvalidPasswordError(error);
+                const required =
+                    isCollectionPasswordRequiredError(error) ||
+                    isExtendedSharePasswordRequiredError(error);
+                if (payload.password && invalid) {
+                    return { status: "passwordRequired", invalid: true };
+                }
+                if (!payload.password && required) {
+                    const settings = await this.kd.setting.getMany([
+                        "general.autoTryCollectionPasswords",
+                        "general.collectionPasswordList",
+                    ]);
+                    if (!settings["general.autoTryCollectionPasswords"]) {
+                        return { status: "passwordRequired", invalid: false };
+                    }
+                    let matched: Awaited<ReturnType<typeof attempt>> | null = null;
+                    for (const candidate of settings["general.collectionPasswordList"]) {
+                        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+                            throw new DOMException("The operation was aborted.", "AbortError");
+                        }
+                        try {
+                            matched = await attempt(candidate);
+                            break;
+                        } catch (candidateError) {
+                            if (
+                                !isCollectionInvalidPasswordError(candidateError) &&
+                                !isExtendedShareInvalidPasswordError(candidateError)
+                            ) {
+                                throw candidateError;
+                            }
+                        }
+                    }
+                    if (!matched) {
+                        return { status: "passwordRequired", invalid: false };
+                    }
+                    prepared = matched;
+                } else {
+                    throw error;
+                }
+            }
+
+            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+                return {
+                    status: "failed",
+                    code: "remoteFailure",
+                    message: "Preparation superseded.",
+                };
+            }
+
+            const id = randomUUID();
+            this.preparedDrafts.set(id, {
+                id,
+                sourceInput,
+                password: prepared.password,
+                asciiFilenames,
+                correlationId,
+                loaded: prepared.loaded,
+            });
+            const collection = prepared.loaded.collection;
+            return {
+                status: "ready",
+                draftId: id,
+                collection:
+                    "resource" in prepared.loaded
+                        ? { ...collection, resource: prepared.loaded.resource }
+                        : collection,
+            };
+        } catch (error) {
+            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+                return {
+                    status: "failed",
+                    code: "remoteFailure",
+                    message: "Preparation superseded.",
+                };
+            }
+            logCaughtError(
+                this.kd.logger,
+                "DownloadService:prepare",
+                { channel: "download:prepare", stage: "load", url: sourceInput },
+                error,
+            );
+            return {
+                status: "failed",
+                code: "remoteFailure",
+                message: error instanceof Error ? error.message : String(error),
+            };
         }
     }
 
@@ -610,6 +665,7 @@ export class DownloadService {
             this.kd.ipc.sendToMainWindow("download:extended-load-progress", {
                 current: index + 1,
                 total: manifest.collectionIds.length,
+                url: sourceInput,
             });
             sources.push(
                 await this.api.loadCollection({

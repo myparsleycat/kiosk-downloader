@@ -266,3 +266,33 @@ export function tryDecodeShareUrlBase64(input: string) {
 
     return null;
 }
+
+export function isDownloadShareInput(value: string) {
+    const trimmed = value.trim();
+    return Boolean(tryParseDownloadUrl(trimmed) || trimmed.startsWith(EXTENDED_SHARE_PREFIX));
+}
+
+export function parseBulkShareInputs(text: string) {
+    const urls: string[] = [];
+    const invalid: string[] = [];
+    const seen = new Set<string>();
+
+    for (const raw of text.split(/[\n\r,]+/)) {
+        const token = raw.trim();
+        if (!token) {
+            continue;
+        }
+        const resolved = (tryDecodeShareUrlBase64(token) ?? token).trim();
+        if (!isDownloadShareInput(resolved)) {
+            invalid.push(token);
+            continue;
+        }
+        if (seen.has(resolved)) {
+            continue;
+        }
+        seen.add(resolved);
+        urls.push(resolved);
+    }
+
+    return { urls, invalid };
+}
