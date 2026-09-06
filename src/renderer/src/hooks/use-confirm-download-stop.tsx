@@ -78,5 +78,5 @@ export function useConfirmDownloadStop() {
     </AlertDialog>
   );
 
-  return { runWithStopConfirmation, dialog };
+  return { runWithStopConfirmation, dialog, open: target !== null };
 }
