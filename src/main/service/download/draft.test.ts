@@ -28,7 +28,7 @@ type DownloadServiceInternals = {
         fileSize: number,
         zipPassword?: string,
     ) => Promise<{ entries: TreeEntry[]; indexed: [] }>;
-    preparedDraft: { id: string; loaded: LoadedCollection } | null;
+    preparedDrafts: Map<string, { id: string; loaded: LoadedCollection }>;
     repository: {
         insertDownload: ReturnType<typeof vi.fn>;
     };
@@ -172,18 +172,20 @@ describe("DownloadService prepared draft", () => {
         expect(logger.error).not.toHaveBeenCalled();
     });
 
-    it("aborts the previous prepare when a new URL is prepared", async () => {
+    it("keeps an in-flight prepare when another URL is prepared", async () => {
         const { service } = createService();
         let firstSignal: AbortSignal | undefined;
+        let releaseFirst: () => void = () => undefined;
         const load = vi
             .spyOn(internals(service), "loadCollectionUnlocked")
             .mockImplementationOnce(
                 async (payload) =>
-                    await new Promise<LoadedCollection>((_resolve, reject) => {
+                    await new Promise<LoadedCollection>((resolve, reject) => {
                         firstSignal = payload.signal;
                         payload.signal?.addEventListener("abort", () =>
                             reject(payload.signal?.reason),
                         );
+                        releaseFirst = () => resolve(loadedCollection());
                     }),
             )
             .mockResolvedValueOnce(loadedCollection());
@@ -191,10 +193,32 @@ describe("DownloadService prepared draft", () => {
         const first = service.prepare({ url: URL });
         await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
         const second = await service.prepare({ url: URL });
+        releaseFirst();
 
         expect(second.status).toBe("ready");
+        expect(firstSignal?.aborted).toBe(false);
+        await expect(first).resolves.toMatchObject({ status: "ready" });
+        expect(internals(service).preparedDrafts.size).toBe(2);
+    });
+
+    it("aborts in-flight prepares when every draft is discarded", async () => {
+        const { service } = createService();
+        let firstSignal: AbortSignal | undefined;
+        const load = vi.spyOn(internals(service), "loadCollectionUnlocked").mockImplementationOnce(
+            async (payload) =>
+                await new Promise<LoadedCollection>((_resolve, reject) => {
+                    firstSignal = payload.signal;
+                    payload.signal?.addEventListener("abort", () => reject(payload.signal?.reason));
+                }),
+        );
+
+        const first = service.prepare({ url: URL });
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+        service.discardDraft({});
+
         expect(firstSignal?.aborted).toBe(true);
         await expect(first).resolves.toMatchObject({ status: "failed" });
+        expect(internals(service).preparedDrafts.size).toBe(0);
     });
 
     it("creates from the canonical snapshot without loading the collection again", async () => {
@@ -222,7 +246,7 @@ describe("DownloadService prepared draft", () => {
         expect(state.repository.insertDownload).toHaveBeenCalledWith(
             expect.objectContaining({ loaded: expect.objectContaining({ provider: "kiosk" }) }),
         );
-        expect(state.preparedDraft).toBeNull();
+        expect(state.preparedDrafts.size).toBe(0);
     });
 
     it("does not clear a replacement draft after create finishes", async () => {
@@ -255,7 +279,8 @@ describe("DownloadService prepared draft", () => {
         releaseCreate();
         await expect(creating).resolves.toMatchObject({ id: "created" });
 
-        expect(state.preparedDraft?.id).toBe(replacement.draftId);
+        expect(state.preparedDrafts.get(replacement.draftId)?.id).toBe(replacement.draftId);
+        expect(state.preparedDrafts.has(prepared.draftId)).toBe(false);
     });
 
     it("rejects paths outside the canonical tree and keeps the draft retryable", async () => {
@@ -365,7 +390,10 @@ describe("DownloadService prepared draft", () => {
         ).resolves.toEqual({ status: "ready", entries: zipEntries() });
 
         expect(
-            zipNodeEntries(internals(service).preparedDraft?.loaded.collection.tree.entries[0]),
+            zipNodeEntries(
+                internals(service).preparedDrafts.get(prepared.draftId)?.loaded.collection.tree
+                    .entries[0],
+            ),
         ).toEqual(zipEntries());
     });
 
@@ -383,7 +411,7 @@ describe("DownloadService prepared draft", () => {
         );
         const prepared = await service.prepare({ url: URL });
         if (prepared.status !== "ready") throw new Error("Expected a prepared draft");
-        const firstDraft = internals(service).preparedDraft;
+        const firstDraft = internals(service).preparedDrafts.get(prepared.draftId);
 
         const pending = service.listZipEntries({
             draftId: prepared.draftId,
@@ -401,9 +429,9 @@ describe("DownloadService prepared draft", () => {
         expect(zipNodeEntries(firstDraft?.loaded.collection.tree.entries[0])).toBeNull();
     });
 
-    it("does not attach ZIP entries to a replacement draft", async () => {
+    it("keeps ZIP entries on the original draft when another draft is prepared", async () => {
         const { service } = createService();
-        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockImplementation(async () =>
             loadedZipCollection(),
         );
         let releaseIndexing: () => void = () => undefined;
@@ -421,18 +449,84 @@ describe("DownloadService prepared draft", () => {
             fileId: "zip-remote",
         });
         await vi.waitFor(() => expect(index).toHaveBeenCalledTimes(1));
-        const replacement = await service.prepare({ url: URL });
-        if (replacement.status !== "ready") throw new Error("Expected a replacement draft");
+        const other = await service.prepare({ url: URL });
+        if (other.status !== "ready") throw new Error("Expected a second prepared draft");
         releaseIndexing();
 
-        await expect(pending).resolves.toEqual({
-            status: "failed",
-            code: "staleDraft",
-            message: "Prepared download draft is no longer available.",
-        });
-        expect(internals(service).preparedDraft?.id).toBe(replacement.draftId);
+        await expect(pending).resolves.toEqual({ status: "ready", entries: zipEntries() });
         expect(
-            zipNodeEntries(internals(service).preparedDraft?.loaded.collection.tree.entries[0]),
+            zipNodeEntries(
+                internals(service).preparedDrafts.get(prepared.draftId)?.loaded.collection.tree
+                    .entries[0],
+            ),
+        ).toEqual(zipEntries());
+        expect(
+            zipNodeEntries(
+                internals(service).preparedDrafts.get(other.draftId)?.loaded.collection.tree
+                    .entries[0],
+            ),
         ).toBeNull();
+    });
+
+    it("keeps completed drafts when another URL is prepared", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedCollection(),
+        );
+        const first = await service.prepare({ url: URL });
+        const second = await service.prepare({ url: URL });
+        if (first.status !== "ready" || second.status !== "ready") {
+            throw new Error("Expected two prepared drafts");
+        }
+
+        expect(internals(service).preparedDrafts.has(first.draftId)).toBe(true);
+        expect(internals(service).preparedDrafts.has(second.draftId)).toBe(true);
+
+        service.discardDraft({ draftId: first.draftId });
+        expect(internals(service).preparedDrafts.has(first.draftId)).toBe(false);
+        expect(internals(service).preparedDrafts.has(second.draftId)).toBe(true);
+    });
+
+    it("clears every draft when discardDraft is called without an id", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedCollection(),
+        );
+        const first = await service.prepare({ url: URL });
+        const second = await service.prepare({ url: URL });
+        if (first.status !== "ready" || second.status !== "ready") {
+            throw new Error("Expected two prepared drafts");
+        }
+
+        service.discardDraft({});
+        expect(internals(service).preparedDrafts.size).toBe(0);
+    });
+
+    it("does not remove a sibling draft when create finishes", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedCollection(),
+        );
+        const first = await service.prepare({ url: URL });
+        const second = await service.prepare({ url: URL });
+        if (first.status !== "ready" || second.status !== "ready") {
+            throw new Error("Expected two prepared drafts");
+        }
+        const state = internals(service);
+        state.repository.insertDownload = vi.fn(() => "created");
+        state.scheduler.schedule = vi.fn(async () => undefined);
+        state.emitUpdate = vi.fn(async () => undefined);
+        state.getEnrichedItem = vi.fn(() => ({ id: "created" }));
+
+        await expect(
+            service.create({
+                draftId: first.draftId,
+                savePath: "E:\\Downloads",
+                selectedPaths: ["a.txt"],
+            }),
+        ).resolves.toMatchObject({ id: "created" });
+
+        expect(state.preparedDrafts.has(first.draftId)).toBe(false);
+        expect(state.preparedDrafts.has(second.draftId)).toBe(true);
     });
 });

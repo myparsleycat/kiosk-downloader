@@ -367,7 +367,11 @@ export type IpcEvents = {
     "fn:toast": (message: string, data?: ToastData) => void;
     "renderer:reload": () => void;
     "download:changed": (change: TransferItemChange<DownloadItem>) => void;
-    "download:extended-load-progress": (progress: { current: number; total: number }) => void;
+    "download:extended-load-progress": (progress: {
+        current: number;
+        total: number;
+        url: string;
+    }) => void;
     "upload:changed": (change: TransferItemChange<UploadItem>) => void;
     "upload:plan-progress": (progress: UploadPlanProgress) => void;
     "setting:update": (payload: SettingUpdatePayload) => void;

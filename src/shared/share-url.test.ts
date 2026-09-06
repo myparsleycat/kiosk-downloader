@@ -9,6 +9,7 @@ import {
     buildWorkuploadUrl,
     shareIdToUuidBytes,
     tryDecodeShareUrlBase64,
+    parseBulkShareInputs,
     tryExtractShareId,
     tryExtractTransferId,
     tryParseDownloadUrl,
@@ -16,6 +17,7 @@ import {
     tryParseTransferUrl,
     tryParseWorkuploadUrl,
     uuidBytesToShareId,
+    EXTENDED_SHARE_PREFIX,
 } from "./share-url";
 
 // 22 base64url chars carry 132 bits; a UUID is 128. The top 4 bits of the
@@ -284,5 +286,31 @@ describe("tryDecodeShareUrlBase64", () => {
         expect(tryDecodeShareUrlBase64("")).toBeNull();
         expect(tryDecodeShareUrlBase64("   ")).toBeNull();
         expect(tryDecodeShareUrlBase64("not!base64?")).toBeNull();
+    });
+});
+
+describe("parseBulkShareInputs", () => {
+    const kiosk = "https://kio.ac/c/aaaaaaaaaaaaaaaaaaaaaa";
+    const transfer = "https://transfer.it/t/abcd1234ef56";
+    it("splits on newlines, commas, and trims empty tokens", () => {
+        expect(parseBulkShareInputs(` ${kiosk} ,\n${transfer}\r\n\n`)).toEqual({
+            urls: [kiosk, transfer],
+            invalid: [],
+        });
+    });
+    it("decodes base64 tokens and keeps raw extended share inputs", () => {
+        const encoded = Buffer.from(kiosk).toString("base64");
+        const extended = `${EXTENDED_SHARE_PREFIX}payload`;
+        expect(parseBulkShareInputs(`${encoded}\n${extended}`)).toEqual({
+            urls: [kiosk, extended],
+            invalid: [],
+        });
+    });
+    it("deduplicates resolved URLs and reports invalid tokens", () => {
+        const encoded = Buffer.from(kiosk).toString("base64");
+        expect(parseBulkShareInputs(`${kiosk}, not-a-link, ${encoded}, garbage`)).toEqual({
+            urls: [kiosk],
+            invalid: ["not-a-link", "garbage"],
+        });
     });
 });
