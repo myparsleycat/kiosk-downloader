@@ -1,9 +1,5 @@
 import { cn } from "@renderer/lib/utils";
-import {
-  EXTENDED_SHARE_PREFIX,
-  tryDecodeShareUrlBase64,
-  tryParseDownloadUrl,
-} from "@shared/share-url";
+import { isDownloadShareInput, tryDecodeShareUrlBase64 } from "@shared/share-url";
 import {
   DownloadIcon,
   LoaderCircleIcon,
@@ -33,7 +29,7 @@ import {
   useTransferItems,
 } from "./hooks/use-transfer-items";
 import { useDownloadTreeExpanded } from "./stores/download-tree-expanded";
-import { useNewDownloadDraft } from "./stores/new-download-draft";
+import { shouldLoadPastedShare, useNewDownloadDraft } from "./stores/new-download-draft";
 import { useUpdaterStore } from "./stores/updater";
 
 export function RootProvider({ children }: { children: React.ReactNode }) {
@@ -147,10 +143,13 @@ function MainComponent() {
 
       const text = e.clipboardData?.getData("text") ?? "";
       const resolved = (tryDecodeShareUrlBase64(text) ?? text).trim();
-      if (!tryParseDownloadUrl(resolved) && !resolved.startsWith(EXTENDED_SHARE_PREFIX)) return;
+      if (!isDownloadShareInput(resolved)) return;
 
       e.preventDefault();
-      useNewDownloadDraft.getState().setUrl(resolved);
+      const draft = useNewDownloadDraft.getState();
+      if (shouldLoadPastedShare(draft.items, resolved)) {
+        draft.setUrl(resolved);
+      }
       setTab("new");
     };
 

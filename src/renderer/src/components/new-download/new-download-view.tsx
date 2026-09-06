@@ -1,6 +1,7 @@
-import { FileTree } from "@renderer/components/tree/file-tree";
+import { BulkShareDialog } from "@renderer/components/new-download/bulk-share-dialog";
+import { DraftItemCard } from "@renderer/components/new-download/draft-item-card";
+import { DraftTreePanel } from "@renderer/components/new-download/draft-tree-panel";
 import { RenameDialog, type RenameTarget } from "@renderer/components/tree/rename-dialog";
-import { Badge } from "@renderer/components/ui/badge";
 import { Button } from "@renderer/components/ui/button";
 import { Field, FieldDescription, FieldLabel } from "@renderer/components/ui/field";
 import {
@@ -11,34 +12,30 @@ import {
 } from "@renderer/components/ui/input-group";
 import { Label } from "@renderer/components/ui/label";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
-import { Separator } from "@renderer/components/ui/separator";
+import { useNewDownloadSession } from "@renderer/hooks/use-new-download-session";
 import {
-  collectAllPaths,
+  type Collection,
   countFiles,
   dirTotalSize,
-  selectExpandedZipEntries,
   type SortDir,
   type SortField,
-  sortTree,
   summarizeSelection,
   toggleTreeSelection,
 } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
-import { applyZipEntriesResult, useNewDownloadDraft } from "@renderer/stores/new-download-draft";
-import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
-import { getIpcErrorCause, isCollectionExpiresNever } from "@shared/download-errors";
 import {
-  EXTENDED_SHARE_PREFIX,
-  tryDecodeShareUrlBase64,
-  tryParseDownloadUrl,
-} from "@shared/share-url";
-import { applyRenamesToTree, basename } from "@shared/tree-rename";
+  canStartDownloads,
+  getStartableDraftItems,
+  hasPreparingDraftItems,
+  itemDisplayTree,
+  useNewDownloadDraft,
+} from "@renderer/stores/new-download-draft";
+import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
+import { isCollectionExpiresNever } from "@shared/download-errors";
+import { isDownloadShareInput, tryDecodeShareUrlBase64 } from "@shared/share-url";
+import { basename } from "@shared/tree-rename";
 import { formatSize } from "@shared/utils";
 import {
-  ArrowDownIcon,
-  ArrowUpDownIcon,
-  ArrowUpIcon,
-  CheckIcon,
   ClockIcon,
   DownloadIcon,
   FileUpIcon,
@@ -47,9 +44,9 @@ import {
   HashIcon,
   LinkIcon,
   Loader2Icon,
-  LockIcon,
+  MenuIcon,
   PackageIcon,
-  RefreshCwIcon,
+  XIcon,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -66,91 +63,55 @@ import { Input } from "../ui/input";
 
 export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string) => void }) {
   const url = useNewDownloadDraft((state) => state.url);
-  const password = useNewDownloadDraft((state) => state.password);
+  const items = useNewDownloadDraft((state) => state.items);
   const savePath = useNewDownloadDraft((state) => state.savePath);
   const createCollectionSubfolder = useNewDownloadDraft((state) => state.createCollectionSubfolder);
-  const preparation = useNewDownloadDraft((state) => state.preparation);
-  const collection = preparation.status === "ready" ? preparation.collection : null;
-  const draftId = preparation.status === "ready" ? preparation.draftId : null;
-  const passwordRequired = preparation.status === "passwordRequired";
-  const passwordInvalid = passwordRequired && preparation.invalid;
-  const loading = preparation.status === "preparing";
-  const selected = useNewDownloadDraft((state) => state.selected);
-  const setUrl = useNewDownloadDraft((state) => state.setUrl);
-  const setPassword = useNewDownloadDraft((state) => state.setPassword);
   const setSavePath = useNewDownloadDraft((state) => state.setSavePath);
-  const setPreparation = useNewDownloadDraft((state) => state.setPreparation);
-  const setSelected = useNewDownloadDraft((state) => state.setSelected);
-  const updateSelected = useNewDownloadDraft((state) => state.updateSelected);
-  const clearPreparation = useNewDownloadDraft((state) => state.clearPreparation);
-  const resetDraft = useNewDownloadDraft((state) => state.resetDraft);
-  const hydrateSettings = useNewDownloadDraft((state) => state.hydrateSettings);
-  const zipPasswords = useNewDownloadDraft((state) => state.zipPasswords);
-  const zipLoadingPaths = useNewDownloadDraft((state) => state.zipLoadingPaths);
-  const renames = useNewDownloadDraft((state) => state.renames);
-  const setZipPassword = useNewDownloadDraft((state) => state.setZipPassword);
-  const setZipLoading = useNewDownloadDraft((state) => state.setZipLoading);
-  const renameNode = useNewDownloadDraft((state) => state.renameNode);
+  const setItemPassword = useNewDownloadDraft((state) => state.setItemPassword);
+  const setItemPreparation = useNewDownloadDraft((state) => state.setItemPreparation);
+  const updateItemSelected = useNewDownloadDraft((state) => state.updateItemSelected);
+  const renameItemNode = useNewDownloadDraft((state) => state.renameItemNode);
+  const {
+    applyUrlInput,
+    commitUrls,
+    expandZip,
+    extendedLoadProgress,
+    handleRemoveItem,
+    handleStart,
+    loadCollection,
+    starting,
+    zipPasswordInput,
+    zipPasswordPrompt,
+    setZipPasswordInput,
+    setZipPasswordPrompt,
+  } = useNewDownloadSession({ onCreated });
+
+  const readyItem = items.length === 1 && items[0].preparation.status === "ready" ? items[0] : null;
+  const collection =
+    readyItem?.preparation.status === "ready" ? readyItem.preparation.collection : null;
+  const anyPreparing = hasPreparingDraftItems(items);
 
   const [shareDragOver, setShareDragOver] = React.useState(false);
   const [readingShareFile, setReadingShareFile] = React.useState(false);
-  const [extendedLoadProgress, setExtendedLoadProgress] = React.useState<{
-    current: number;
-    total: number;
-  } | null>(null);
-  const [starting, setStarting] = React.useState(false);
+  const [bulkDialogOpen, setBulkDialogOpen] = React.useState(false);
   const [sortField, setSortField] = React.useState<SortField>("name");
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
-  const [zipPasswordPrompt, setZipPasswordPrompt] = React.useState<{
-    path: string;
-    fileId: string;
-    invalid: boolean;
-  } | null>(null);
-  const [zipPasswordInput, setZipPasswordInput] = React.useState("");
-  const [renameTarget, setRenameTarget] = React.useState<RenameTarget | null>(null);
+  const [renameTarget, setRenameTarget] = React.useState<
+    (RenameTarget & { itemKey: string }) | null
+  >(null);
   const [renameError, setRenameError] = React.useState<string | null>(null);
-
-  const loadSeqRef = React.useRef(0);
-  const draftIdRef = React.useRef<string | null>(draftId);
   const urlInputRef = React.useRef<HTMLInputElement>(null);
-  const passwordInputRef = React.useRef<HTMLInputElement>(null);
-
-  React.useEffect(() => {
-    void hydrateSettings();
-  }, [hydrateSettings]);
-
-  React.useEffect(() => {
-    draftIdRef.current = draftId;
-  }, [draftId]);
-
-  React.useEffect(
-    () => () => {
-      void window.api.invoke("download:discardDraft", {
-        draftId: draftIdRef.current ?? undefined,
-      });
-      resetDraft();
-    },
-    [resetDraft],
-  );
 
   React.useEffect(() => {
     requestAnimationFrame(() => urlInputRef.current?.focus());
   }, []);
 
-  React.useEffect(
-    () =>
-      window.api.on("download:extended-load-progress", (progress) =>
-        setExtendedLoadProgress(progress),
-      ),
-    [],
-  );
-
   const loadShareFromResult = React.useCallback(
     (result: { shareInput: string } | null) => {
       if (!result) return;
-      setUrl(result.shareInput);
+      applyUrlInput(result.shareInput);
     },
-    [setUrl],
+    [applyUrlInput],
   );
 
   const handlePickShareFile = React.useCallback(async () => {
@@ -186,193 +147,31 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     [loadShareFromResult],
   );
 
-  const loadCollection = React.useCallback(
-    async (trimmedUrl: string, loadPassword?: string) => {
-      const parsed = tryParseDownloadUrl(trimmedUrl);
-      const extended = trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX);
-      if (!parsed && !extended) {
-        return;
-      }
-
-      const seq = ++loadSeqRef.current;
-      setPreparation({ status: "preparing" });
-      setExtendedLoadProgress(extended ? { current: 0, total: 0 } : null);
-
-      try {
-        await hydrateSettings();
-        const result = await window.api.invoke("download:prepare", {
-          url: trimmedUrl,
-          password: loadPassword || undefined,
-          asciiFilenames: useNewDownloadDraft.getState().asciiFilenames,
-        });
-
-        if (seq !== loadSeqRef.current) {
-          return;
-        }
-
-        if (result.status === "ready") {
-          setPreparation(result);
-          setSelected(collectAllPaths(result.collection.tree));
-          return;
-        }
-        if (result.status === "passwordRequired") {
-          setPreparation(result);
-          setSelected(new Set());
-          requestAnimationFrame(() => passwordInputRef.current?.focus());
-          return;
-        }
-        setPreparation({ status: "error", message: result.message });
-        setSelected(new Set());
-        toast.error("컬렉션을 불러오지 못했습니다", { description: result.message });
-      } catch (error) {
-        if (seq !== loadSeqRef.current) {
-          return;
-        }
-        const message = getIpcErrorCause(error);
-        setPreparation({ status: "error", message });
-        setSelected(new Set());
-        toast.error("컬렉션을 불러오지 못했습니다", {
-          description: message,
-        });
-      } finally {
-        if (seq === loadSeqRef.current) {
-          setExtendedLoadProgress(null);
-        }
-      }
-    },
-    [hydrateSettings, setPreparation, setSelected],
-  );
-
-  const verifyPassword = React.useCallback(() => {
-    const trimmedUrl = url.trim();
-    if (
-      !passwordRequired ||
-      !password.trim() ||
-      (!tryParseDownloadUrl(trimmedUrl) && !trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX))
-    ) {
-      return;
+  const readySummaries = items.flatMap((item) => {
+    const tree = itemDisplayTree(item);
+    if (!tree) {
+      return [];
     }
-
-    void loadCollection(trimmedUrl, password);
-  }, [loadCollection, password, passwordRequired, url]);
-
-  React.useEffect(() => {
-    const trimmedUrl = url.trim();
-    const parsed = tryParseDownloadUrl(trimmedUrl);
-    const valid = parsed || trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX);
-
-    if (!valid) {
-      loadSeqRef.current += 1;
-      void window.api.invoke("download:discardDraft", {
-        draftId: draftIdRef.current ?? undefined,
-      });
-      draftIdRef.current = null;
-      clearPreparation();
-      return;
-    }
-    clearPreparation();
-    void loadCollection(trimmedUrl);
-  }, [clearPreparation, loadCollection, url]);
-
-  const displayTree = React.useMemo(
-    () => (collection ? applyRenamesToTree(collection.tree, renames) : null),
-    [collection, renames],
+    const selection = summarizeSelection(item.selected, tree);
+    return [
+      {
+        count: selection.count,
+        bytes: selection.bytes,
+        totalFiles: countFiles(tree),
+        totalBytes: dirTotalSize(tree),
+        collectionName: item.preparation.status === "ready" ? item.preparation.collection.name : "",
+        tree,
+      },
+    ];
+  });
+  const summary = readySummaries.reduce(
+    (acc, item) => ({ count: acc.count + item.count, bytes: acc.bytes + item.bytes }),
+    { count: 0, bytes: 0 },
   );
-
-  const handleToggle = (key: string) => {
-    if (!displayTree) return;
-    updateSelected((prev) => toggleTreeSelection(prev, key, displayTree));
-  };
-
-  const expandZip = React.useCallback(
-    async (zipPath: string, fileId: string, zipPassword?: string) => {
-      if (!collection || !draftId) {
-        return;
-      }
-      const requestedDraftId = draftId;
-      setZipLoading(zipPath, true);
-      try {
-        const result = await window.api.invoke("download:listZipEntries", {
-          draftId: requestedDraftId,
-          fileId,
-          zipPassword,
-        });
-        const applied = applyZipEntriesResult(
-          requestedDraftId,
-          useNewDownloadDraft.getState().preparation,
-          result,
-          fileId,
-        );
-        if (applied.action === "ignore") {
-          return;
-        }
-        if (applied.action === "passwordRequired") {
-          setZipPasswordPrompt({ path: zipPath, fileId, invalid: applied.invalid });
-          return;
-        }
-        if (applied.action === "clear") {
-          clearPreparation();
-          toast.error("ZIP 목록을 불러오지 못했습니다", {
-            description: result.status === "failed" ? result.message : undefined,
-          });
-          return;
-        }
-        if (applied.action === "failed") {
-          toast.error("ZIP 목록을 불러오지 못했습니다", {
-            description: result.status === "failed" ? result.message : undefined,
-          });
-          return;
-        }
-        const current = useNewDownloadDraft.getState().preparation;
-        if (current.status !== "ready" || current.draftId !== requestedDraftId) {
-          return;
-        }
-        if (zipPassword) {
-          setZipPassword(fileId, zipPassword);
-        }
-        setPreparation({
-          status: "ready",
-          draftId: requestedDraftId,
-          collection: { ...current.collection, tree: applied.nextTree },
-        });
-        updateSelected((prev) => selectExpandedZipEntries(prev, applied.nextTree, zipPath, fileId));
-        setZipPasswordPrompt(null);
-        setZipPasswordInput("");
-      } catch (error) {
-        toast.error("ZIP 목록을 불러오지 못했습니다", {
-          description: getIpcErrorCause(error),
-        });
-      } finally {
-        setZipLoading(zipPath, false);
-      }
-    },
-    [
-      clearPreparation,
-      collection,
-      draftId,
-      setPreparation,
-      setZipLoading,
-      setZipPassword,
-      updateSelected,
-    ],
-  );
-
-  const handleExpandZip = (zipPath: string, fileId: string) => {
-    void expandZip(zipPath, fileId, zipPasswords[fileId]);
-  };
-
-  const summary = displayTree ? summarizeSelection(selected, displayTree) : { count: 0, bytes: 0 };
-  const totalFiles = displayTree ? countFiles(displayTree) : 0;
-  const totalBytes = displayTree ? dirTotalSize(displayTree) : 0;
-
-  const sortedTree = React.useMemo(
-    () =>
-      displayTree
-        ? sortDir !== "none"
-          ? sortTree(displayTree, sortField, sortDir)
-          : displayTree
-        : undefined,
-    [displayTree, sortField, sortDir],
+  const usesCollectionSubfolder = readySummaries.some(
+    (item) =>
+      savePath.trim() &&
+      shouldCreateCollectionSubfolder(item.tree, item.collectionName, createCollectionSubfolder),
   );
 
   const handleSortClick = (field: SortField) => {
@@ -384,49 +183,12 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
     setSortDir("desc");
   };
 
-  const canStart =
-    collection !== null &&
-    draftId !== null &&
-    summary.count > 0 &&
-    savePath.trim().length > 0 &&
-    !loading;
+  const canStart = canStartDownloads(items, savePath);
+  const startableCount = getStartableDraftItems(items).length;
   const effectiveSavePath =
-    displayTree &&
-    collection &&
-    savePath.trim() &&
-    shouldCreateCollectionSubfolder(displayTree, collection.name, createCollectionSubfolder)
+    collection && savePath.trim() && usesCollectionSubfolder
       ? `${savePath.trim().replace(/[/\\]+$/, "")}/${collection.name}`
       : null;
-
-  const handleStart = async () => {
-    if (!collection || !draftId || !canStart || loading) {
-      return;
-    }
-    setStarting(true);
-    try {
-      const created = await window.api.invoke("download:create", {
-        draftId,
-        savePath: savePath.trim(),
-        selectedPaths: [...selected],
-        zipPasswords: Object.keys(zipPasswords).length > 0 ? zipPasswords : undefined,
-        renames: Object.keys(renames).length > 0 ? renames : undefined,
-      });
-      if (!created) {
-        throw new Error("다운로드 항목을 만들지 못했습니다.");
-      }
-      toast.success("다운로드가 대기열에 추가되었습니다", {
-        description: `${collection.name} · ${summary.count}개 파일`,
-      });
-      resetDraft();
-      onCreated(created.id);
-    } catch (error) {
-      toast.error("다운로드를 시작하지 못했습니다", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setStarting(false);
-    }
-  };
 
   return (
     <div className="flex h-full">
@@ -463,125 +225,90 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                     id="url-input"
                     placeholder="Kiosk · Transfer.it · Workupload URL 또는 .kds"
                     value={url}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      setUrl(tryDecodeShareUrlBase64(value) ?? value);
-                    }}
+                    onChange={(e) => applyUrlInput(e.target.value)}
                     onPaste={(e) => {
                       const value = e.clipboardData.getData("text").trim();
                       const resolved = tryDecodeShareUrlBase64(value) ?? value;
-                      if (
-                        !tryParseDownloadUrl(resolved) &&
-                        !resolved.startsWith(EXTENDED_SHARE_PREFIX)
-                      ) {
+                      if (!isDownloadShareInput(resolved)) {
                         return;
                       }
                       e.preventDefault();
-                      setUrl(resolved);
+                      applyUrlInput(resolved);
                     }}
                   />
                   <InputGroupAddon align="inline-end">
-                    {(loading || readingShareFile) && (
+                    {(readingShareFile || anyPreparing) && (
                       <Loader2Icon className="size-4 animate-spin" />
                     )}
                     <InputGroupButton
                       size="icon-xs"
                       aria-label="공유 정보 파일 선택"
-                      disabled={readingShareFile || loading}
+                      disabled={readingShareFile}
                       onClick={() => void handlePickShareFile()}
                     >
                       <FileUpIcon />
+                    </InputGroupButton>
+                    <InputGroupButton
+                      size="icon-xs"
+                      aria-label="링크 일괄 추가"
+                      disabled={readingShareFile}
+                      onClick={() => setBulkDialogOpen(true)}
+                    >
+                      <MenuIcon />
                     </InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
                 <FieldDescription className="text-xs">
                   .kds 파일을 드래그하거나 파일 선택 버튼으로 불러올 수 있습니다
                 </FieldDescription>
-                {loading && extendedLoadProgress && extendedLoadProgress.total > 0 && (
-                  <FieldDescription className="text-xs">
-                    컬렉션 {extendedLoadProgress.current}/{extendedLoadProgress.total} 불러오는 중
-                  </FieldDescription>
-                )}
               </Field>
             </div>
 
-            {passwordRequired === true && (
-              <div className="flex flex-col gap-1.5">
-                <Field {...(passwordInvalid ? { "data-invalid": true } : {})}>
-                  <FieldLabel htmlFor="password-input" className="text-xs">
-                    <LockIcon className="size-3" />
-                    비밀번호
-                  </FieldLabel>
-                  <InputGroup>
-                    <InputGroupInput
-                      ref={passwordInputRef}
-                      id="password-input"
-                      placeholder="비밀번호 입력"
-                      value={password}
-                      aria-invalid={passwordInvalid || undefined}
-                      onChange={(e) => {
-                        setPassword(e.target.value);
-                        if (passwordInvalid) {
-                          setPreparation({ status: "passwordRequired", invalid: false });
+            {collection && readyItem ? (
+              <CollectionMetaCard
+                collection={collection}
+                totalFiles={readySummaries[0]?.totalFiles ?? 0}
+                totalBytes={readySummaries[0]?.totalBytes ?? 0}
+                onRemove={() => handleRemoveItem(readyItem)}
+              />
+            ) : (
+              items.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  {items.map((item) => (
+                    <DraftItemCard
+                      key={item.key}
+                      item={item}
+                      extendedLoadProgress={
+                        item.preparation.status === "preparing"
+                          ? (extendedLoadProgress[item.url] ?? null)
+                          : null
+                      }
+                      onPasswordChange={(value) => {
+                        setItemPassword(item.key, value);
+                        if (
+                          item.preparation.status === "passwordRequired" &&
+                          item.preparation.invalid
+                        ) {
+                          setItemPreparation(item.key, {
+                            status: "passwordRequired",
+                            invalid: false,
+                          });
                         }
                       }}
-                      onKeyDown={(e) => {
-                        if (e.key !== "Enter") return;
-                        e.preventDefault();
-                        verifyPassword();
+                      onVerifyPassword={() => {
+                        if (!item.password.trim()) {
+                          return;
+                        }
+                        void loadCollection(item.key, item.url, item.password);
                       }}
+                      onRetry={() => {
+                        void loadCollection(item.key, item.url, item.password || undefined);
+                      }}
+                      onRemove={() => handleRemoveItem(item)}
                     />
-                    <InputGroupAddon align="inline-end">
-                      <InputGroupButton
-                        size="icon-xs"
-                        disabled={!password.trim() || loading}
-                        aria-label="비밀번호 확인"
-                        onClick={verifyPassword}
-                      >
-                        {loading ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}
-                      </InputGroupButton>
-                    </InputGroupAddon>
-                  </InputGroup>
-                  {passwordInvalid && (
-                    <FieldDescription className="text-xs">잘못된 비밀번호 입니다.</FieldDescription>
-                  )}
-                </Field>
-              </div>
-            )}
-
-            {collection && (
-              <>
-                <Separator />
-                <div className="flex min-w-0 flex-col gap-2 overflow-hidden rounded-lg border bg-muted/30 p-3">
-                  <MetaRow
-                    icon={<PackageIcon className="size-3" />}
-                    label="이름"
-                    title={collection.name}
-                  >
-                    {collection.name}
-                  </MetaRow>
-                  <MetaRow
-                    icon={<HashIcon className="size-3" />}
-                    label={
-                      collection.provider === "workupload"
-                        ? collection.resource === "archive"
-                          ? "Workupload Archive ID"
-                          : "Workupload File ID"
-                        : "Share ID"
-                    }
-                  >
-                    <span className="font-mono text-[11px]">{collection.shareId}</span>
-                  </MetaRow>
-                  <MetaRow icon={<ClockIcon className="size-3" />} label="만료">
-                    {isCollectionExpiresNever(collection.expires)
-                      ? "없음"
-                      : new Date(collection.expires * 1000).toLocaleString("ko-KR")}
-                  </MetaRow>
-                  <MetaRow icon={<HardDriveIcon className="size-3" />} label="총 파일">
-                    {totalFiles}개 · {formatSize(totalBytes)}
-                  </MetaRow>
+                  ))}
                 </div>
-              </>
+              )
             )}
           </div>
         </ScrollArea>
@@ -614,11 +341,15 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                 <FolderOpenIcon className="size-4" />
               </Button>
             </div>
-            {effectiveSavePath && (
+            {effectiveSavePath ? (
               <p className="truncate text-xs text-muted-foreground" title={effectiveSavePath}>
                 실제 저장: {effectiveSavePath}
               </p>
-            )}
+            ) : items.length > 1 && usesCollectionSubfolder ? (
+              <p className="truncate text-xs text-muted-foreground">
+                실제 저장: {savePath.trim()}/[컬렉션 이름]
+              </p>
+            ) : null}
           </div>
           <div className="mb-2 flex items-center justify-between text-xs">
             <span className="text-muted-foreground">선택</span>
@@ -628,56 +359,44 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           </div>
           <Button
             className="w-full"
-            disabled={!canStart || loading}
+            disabled={!canStart}
             isLoading={starting}
-            onClick={handleStart}
+            onClick={() => void handleStart()}
           >
             <DownloadIcon className="size-3.5" />
-            다운로드 시작
+            {items.length > 1 ? `${startableCount}개 다운로드 시작` : "다운로드 시작"}
           </Button>
         </div>
       </div>
 
       <div className="flex flex-1 flex-col">
-        {collection ? (
-          <>
-            <div className="flex items-center justify-between border-b px-4 py-2.5">
-              <div>
-                <span className="cn-font-heading text-sm font-medium">파일 선택</span>
-                {collection.provider === "extended" && (
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    확장 공유의 ZIP은 완성 파일로 다운로드되며 내부 목록은 미리 열 수 없습니다.
-                  </p>
-                )}
-              </div>
-              <div className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-                <span className="tabular-nums">{summary.count}</span>
-                <span>/</span>
-                <span className="tabular-nums">{totalFiles} 파일</span>
-              </div>
-            </div>
-            <SortHeader field={sortField} dir={sortDir} onSort={handleSortClick} />
-            <ScrollArea className="flex-1">
-              <div className="p-2">
-                <FileTree
-                  mode="selection"
-                  root={sortedTree ?? displayTree ?? collection.tree}
-                  selected={selected}
-                  onToggle={handleToggle}
-                  onExpandZip={collection.provider === "kiosk" ? handleExpandZip : undefined}
-                  zipLoadingPaths={zipLoadingPaths}
-                  onRename={(key, kind) => {
-                    setRenameError(null);
-                    setRenameTarget({ path: key, name: basename(key), kind });
-                  }}
-                />
-              </div>
-            </ScrollArea>
-          </>
-        ) : (
-          <EmptyState loading={loading} />
-        )}
+        <DraftTreePanel
+          items={items}
+          sortField={sortField}
+          sortDir={sortDir}
+          onSort={handleSortClick}
+          onToggle={(item, key) => {
+            const tree = itemDisplayTree(item);
+            if (!tree) return;
+            updateItemSelected(item.key, (prev) => toggleTreeSelection(prev, key, tree));
+          }}
+          onExpandZip={(item, zipPath, fileId) => {
+            if (item.preparation.status !== "ready") return;
+            if (item.preparation.collection.provider !== "kiosk") return;
+            void expandZip(item.key, zipPath, fileId, item.zipPasswords[fileId]);
+          }}
+          onRename={(item, key, kind) => {
+            setRenameError(null);
+            setRenameTarget({ itemKey: item.key, path: key, name: basename(key), kind });
+          }}
+        />
       </div>
+
+      <BulkShareDialog
+        open={bulkDialogOpen}
+        onOpenChange={setBulkDialogOpen}
+        onConfirm={(urls) => void commitUrls(urls)}
+      />
 
       <RenameDialog
         target={renameTarget}
@@ -689,10 +408,17 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           }
         }}
         onConfirm={(nextName) => {
-          if (!renameTarget || !displayTree) {
+          if (!renameTarget) {
             return;
           }
-          const error = renameNode(renameTarget.path, nextName, displayTree);
+          const item = useNewDownloadDraft
+            .getState()
+            .items.find((candidate) => candidate.key === renameTarget.itemKey);
+          const tree = item ? itemDisplayTree(item) : null;
+          if (!item || !tree) {
+            return;
+          }
+          const error = renameItemNode(renameTarget.itemKey, renameTarget.path, nextName, tree);
           if (error) {
             setRenameError(error);
             return;
@@ -731,7 +457,12 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                   return;
                 }
                 event.preventDefault();
-                void expandZip(zipPasswordPrompt.path, zipPasswordPrompt.fileId, zipPasswordInput);
+                void expandZip(
+                  zipPasswordPrompt.itemKey,
+                  zipPasswordPrompt.path,
+                  zipPasswordPrompt.fileId,
+                  zipPasswordInput,
+                );
               }}
             />
             {zipPasswordPrompt?.invalid ? (
@@ -753,7 +484,12 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                 if (!zipPasswordPrompt) {
                   return;
                 }
-                void expandZip(zipPasswordPrompt.path, zipPasswordPrompt.fileId, zipPasswordInput);
+                void expandZip(
+                  zipPasswordPrompt.itemKey,
+                  zipPasswordPrompt.path,
+                  zipPasswordPrompt.fileId,
+                  zipPasswordInput,
+                );
               }}
             >
               확인
@@ -761,6 +497,51 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function CollectionMetaCard({
+  collection,
+  totalFiles,
+  totalBytes,
+  onRemove,
+}: {
+  collection: Collection;
+  totalFiles: number;
+  totalBytes: number;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="flex min-w-0 items-start gap-2 overflow-hidden rounded-lg border bg-muted/30 p-3">
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <MetaRow icon={<PackageIcon className="size-3" />} label="이름" title={collection.name}>
+          {collection.name}
+        </MetaRow>
+        <MetaRow
+          icon={<HashIcon className="size-3" />}
+          label={
+            collection.provider === "workupload"
+              ? collection.resource === "archive"
+                ? "Workupload Archive ID"
+                : "Workupload File ID"
+              : "Share ID"
+          }
+        >
+          <span className="font-mono text-[11px]">{collection.shareId}</span>
+        </MetaRow>
+        <MetaRow icon={<ClockIcon className="size-3" />} label="만료">
+          {isCollectionExpiresNever(collection.expires)
+            ? "없음"
+            : new Date(collection.expires * 1000).toLocaleString("ko-KR")}
+        </MetaRow>
+        <MetaRow icon={<HardDriveIcon className="size-3" />} label="총 파일">
+          {totalFiles}개 · {formatSize(totalBytes)}
+        </MetaRow>
+      </div>
+      <Button type="button" variant="ghost" size="icon-xs" aria-label="제거" onClick={onRemove}>
+        <XIcon />
+      </Button>
     </div>
   );
 }
@@ -785,96 +566,6 @@ function MetaRow({
       <span className="min-w-0 flex-1 truncate" title={title}>
         {children}
       </span>
-    </div>
-  );
-}
-
-function SortHeader({
-  field,
-  dir,
-  onSort,
-}: {
-  field: SortField;
-  dir: SortDir;
-  onSort: (field: SortField) => void;
-}) {
-  return (
-    <div className="grid items-center gap-x-1 border-b px-2 py-1 text-xs text-muted-foreground grid-cols-[auto_minmax(0,1fr)_4rem]">
-      <span className="flex items-center gap-1">
-        <span className="size-4 shrink-0" />
-      </span>
-      <SortButton
-        label="이름"
-        active={dir !== "none" && field === "name"}
-        dir={field === "name" ? dir : "none"}
-        onClick={() => onSort("name")}
-      />
-      <div className="flex justify-end">
-        <SortButton
-          label="크기"
-          active={dir !== "none" && field === "size"}
-          dir={field === "size" ? dir : "none"}
-          onClick={() => onSort("size")}
-        />
-      </div>
-    </div>
-  );
-}
-
-function SortButton({
-  label,
-  active,
-  dir,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  dir: SortDir;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={cn(
-        "flex shrink-0 items-center gap-1 rounded px-1 py-0.5 font-medium transition-colors hover:bg-muted hover:text-foreground",
-        active ? "text-foreground" : "text-muted-foreground",
-      )}
-      onClick={onClick}
-    >
-      <span>{label}</span>
-      {dir === "asc" ? (
-        <ArrowUpIcon className="size-3" />
-      ) : dir === "desc" ? (
-        <ArrowDownIcon className="size-3" />
-      ) : (
-        <ArrowUpDownIcon className={cn("size-3", active ? "opacity-100" : "opacity-40")} />
-      )}
-    </button>
-  );
-}
-
-const SUPPORTED_PROVIDERS = ["Kiosk", "Transfer.it", "Workupload", "확장 공유 (.kds)"] as const;
-
-function EmptyState({ loading }: { loading: boolean }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
-      {loading ? (
-        <RefreshCwIcon className="size-8 animate-spin opacity-50" />
-      ) : (
-        <DownloadIcon className="size-8 opacity-30" />
-      )}
-      <span className="text-sm">
-        {loading ? "컬렉션을 불러오는 중..." : "좌측에서 URL 또는 공유 파일을 불러오세요"}
-      </span>
-      {!loading && (
-        <div className="flex flex-wrap items-center justify-center gap-1.5 px-6">
-          {SUPPORTED_PROVIDERS.map((name) => (
-            <Badge key={name} variant="outline" className="text-muted-foreground">
-              {name}
-            </Badge>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
