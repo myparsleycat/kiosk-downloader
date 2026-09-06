@@ -13,6 +13,7 @@ import {
     isDownloadShareInput,
     tryDecodeShareUrlBase64,
 } from "@shared/share-url";
+import { DOWNLOAD_PREPARE_CONCURRENCY } from "@shared/types";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -30,11 +31,9 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
     const resetDraft = useNewDownloadDraft((state) => state.resetDraft);
     const hydrateSettings = useNewDownloadDraft((state) => state.hydrateSettings);
 
-    const [extendedLoadProgress, setExtendedLoadProgress] = React.useState<{
-        url: string;
-        current: number;
-        total: number;
-    } | null>(null);
+    const [extendedLoadProgress, setExtendedLoadProgress] = React.useState<
+        Record<string, { current: number; total: number }>
+    >({});
     const [starting, setStarting] = React.useState(false);
     const [zipPasswordPrompt, setZipPasswordPrompt] = React.useState<{
         itemKey: string;
@@ -45,6 +44,7 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
     const [zipPasswordInput, setZipPasswordInput] = React.useState("");
 
     const sessionRef = React.useRef(0);
+    const loadGenerationRef = React.useRef(new Map<string, number>());
 
     React.useEffect(() => {
         void hydrateSettings();
@@ -62,7 +62,10 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
     React.useEffect(
         () =>
             window.api.on("download:extended-load-progress", (progress) =>
-                setExtendedLoadProgress(progress),
+                setExtendedLoadProgress((current) => ({
+                    ...current,
+                    [progress.url]: { current: progress.current, total: progress.total },
+                })),
             ),
         [],
     );
@@ -75,11 +78,14 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
 
             const findItem = () =>
                 useNewDownloadDraft.getState().items.find((item) => item.key === itemKey);
-            const isCurrent = () => Boolean(findItem());
             const existing = findItem();
             if (!existing) {
                 return;
             }
+            const generation = (loadGenerationRef.current.get(itemKey) ?? 0) + 1;
+            loadGenerationRef.current.set(itemKey, generation);
+            const isCurrentGeneration = () =>
+                Boolean(findItem()) && loadGenerationRef.current.get(itemKey) === generation;
             if (existing.preparation.status === "ready") {
                 void window.api.invoke("download:discardDraft", {
                     draftId: existing.preparation.draftId,
@@ -89,20 +95,24 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
             const extended = trimmedUrl.startsWith(EXTENDED_SHARE_PREFIX);
             setItemPreparation(itemKey, { status: "preparing" });
             if (extended) {
-                setExtendedLoadProgress({ url: trimmedUrl, current: 0, total: 0 });
+                setExtendedLoadProgress((current) => ({
+                    ...current,
+                    [trimmedUrl]: { current: 0, total: 0 },
+                }));
             }
 
             try {
                 await hydrateSettings();
-                if (!isCurrent()) {
+                if (!isCurrentGeneration()) {
                     return;
                 }
                 const result = await window.api.invoke("download:prepare", {
                     url: trimmedUrl,
                     password: loadPassword || undefined,
                     asciiFilenames: useNewDownloadDraft.getState().asciiFilenames,
+                    correlationId: itemKey,
                 });
-                if (!isCurrent()) {
+                if (!isCurrentGeneration()) {
                     if (result.status === "ready") {
                         void window.api.invoke("download:discardDraft", {
                             draftId: result.draftId,
@@ -125,7 +135,7 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
                 setItemSelected(itemKey, new Set());
                 toast.error("컬렉션을 불러오지 못했습니다", { description: result.message });
             } catch (error) {
-                if (!isCurrent()) {
+                if (!isCurrentGeneration()) {
                     return;
                 }
                 const message = getIpcErrorCause(error);
@@ -133,10 +143,15 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
                 setItemSelected(itemKey, new Set());
                 toast.error("컬렉션을 불러오지 못했습니다", { description: message });
             } finally {
-                if (extended) {
-                    setExtendedLoadProgress((current) =>
-                        current?.url === trimmedUrl ? null : current,
-                    );
+                if (extended && loadGenerationRef.current.get(itemKey) === generation) {
+                    setExtendedLoadProgress((current) => {
+                        if (!(trimmedUrl in current)) {
+                            return current;
+                        }
+                        const next = { ...current };
+                        delete next[trimmedUrl];
+                        return next;
+                    });
                 }
             }
         },
@@ -151,10 +166,20 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
                 return;
             }
             replaceItems(urls);
+            const draftItems = useNewDownloadDraft.getState().items;
+            let cursor = 0;
+            const workerCount = Math.min(DOWNLOAD_PREPARE_CONCURRENCY, draftItems.length);
             await Promise.all(
-                useNewDownloadDraft
-                    .getState()
-                    .items.map((item) => loadCollection(item.key, item.url)),
+                Array.from({ length: workerCount }, async () => {
+                    while (true) {
+                        const index = cursor++;
+                        const item = draftItems[index];
+                        if (item === undefined) {
+                            return;
+                        }
+                        await loadCollection(item.key, item.url);
+                    }
+                }),
             );
         },
         [loadCollection, replaceItems],
@@ -329,11 +354,7 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
 
     const handleRemoveItem = React.useCallback(
         (item: NewDownloadItem) => {
-            if (item.preparation.status === "ready") {
-                void window.api.invoke("download:discardDraft", {
-                    draftId: item.preparation.draftId,
-                });
-            }
+            void window.api.invoke("download:discardDraft", { draftId: item.key });
             removeItem(item.key);
             if (useNewDownloadDraft.getState().items.length === 0) {
                 sessionRef.current += 1;

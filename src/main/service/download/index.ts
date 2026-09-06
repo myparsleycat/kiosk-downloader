@@ -19,19 +19,20 @@ import {
     uuidBytesToShareId,
 } from "@shared/share-url";
 import { applyRenamesToTree, toDisplayPath, validateNodeName } from "@shared/tree-rename";
-import type {
-    Collection,
-    CreateDownloadPayload,
-    DownloadItem,
-    DownloadProvider,
-    FileProgress,
-    ListZipEntriesPayload,
-    ListZipEntriesResult,
-    LoadCollectionPayload,
-    PrepareDownloadPayload,
-    PrepareDownloadResult,
-    ResumePayload,
-    ZipNode,
+import {
+    DOWNLOAD_PREPARE_CONCURRENCY,
+    type Collection,
+    type CreateDownloadPayload,
+    type DownloadItem,
+    type DownloadProvider,
+    type FileProgress,
+    type ListZipEntriesPayload,
+    type ListZipEntriesResult,
+    type LoadCollectionPayload,
+    type PrepareDownloadPayload,
+    type PrepareDownloadResult,
+    type ResumePayload,
+    type ZipNode,
 } from "@shared/types";
 import { findZipNodeById, isZipExtractMode, listZipNodes, setZipEntries } from "@shared/zip-tree";
 import { shell } from "electron";
@@ -81,8 +82,6 @@ import { indexZipFromSegments } from "./zip-index";
 const KDX_FILTERS = [{ name: "Kiosk Download Transfer", extensions: ["kdx"] }];
 const KDS_FILTERS = [{ name: "Kiosk Extended Share", extensions: ["kds"] }];
 const MAX_SHARE_FILE_BYTES = KDS_HEADER_SIZE + MAX_EXTENDED_SHARE_ENCODED_BYTES;
-const PREPARE_CONCURRENCY = 4;
-
 type LoadedExtendedCollection = {
     collection: Collection;
     sources: LoadedKioskCollection[];
@@ -94,6 +93,7 @@ type PreparedDownloadDraft = {
     sourceInput: string;
     password?: string;
     asciiFilenames: boolean;
+    correlationId: string;
     loaded: LoadedCollection | LoadedExtendedCollection;
 };
 
@@ -122,8 +122,8 @@ export class DownloadService {
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
     private readonly preparedDrafts = new Map<string, PreparedDownloadDraft>();
-    private readonly prepareControllers = new Set<AbortController>();
-    private readonly prepareLimit = pLimit(PREPARE_CONCURRENCY);
+    private readonly prepareControllers = new Map<string, AbortController>();
+    private readonly prepareLimit = pLimit(DOWNLOAD_PREPARE_CONCURRENCY);
     private prepareEpoch = 0;
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
     private unsubscribeRequestPoolUsage?: () => void;
@@ -270,25 +270,39 @@ export class DownloadService {
         }
 
         const epoch = this.prepareEpoch;
+        const correlationId = payload.correlationId ?? randomUUID();
         const controller = new AbortController();
-        this.prepareControllers.add(controller);
+        this.prepareControllers.get(correlationId)?.abort();
+        this.prepareControllers.set(correlationId, controller);
 
         try {
             return await this.prepareLimit(() =>
-                this.prepareDraft(payload, sourceInput, epoch, controller),
+                this.prepareDraft(payload, sourceInput, epoch, controller, correlationId),
             );
         } finally {
-            this.prepareControllers.delete(controller);
+            if (this.prepareControllers.get(correlationId) === controller) {
+                this.prepareControllers.delete(correlationId);
+            }
         }
     }
 
     public discardDraft(payload: { draftId?: string }) {
-        if (payload.draftId) {
-            this.preparedDrafts.delete(payload.draftId);
+        if (!payload.draftId) {
+            this.abortAllPrepares();
+            this.preparedDrafts.clear();
             return;
         }
-        this.abortAllPrepares();
-        this.preparedDrafts.clear();
+        const controller = this.prepareControllers.get(payload.draftId);
+        if (controller) {
+            controller.abort();
+            this.prepareControllers.delete(payload.draftId);
+        }
+        this.preparedDrafts.delete(payload.draftId);
+        for (const [id, draft] of this.preparedDrafts) {
+            if (draft.correlationId === payload.draftId) {
+                this.preparedDrafts.delete(id);
+            }
+        }
     }
 
     public async listZipEntries(payload: ListZipEntriesPayload): Promise<ListZipEntriesResult> {
@@ -458,7 +472,7 @@ export class DownloadService {
 
     private abortAllPrepares() {
         this.prepareEpoch += 1;
-        for (const controller of this.prepareControllers) {
+        for (const controller of this.prepareControllers.values()) {
             controller.abort();
         }
         this.prepareControllers.clear();
@@ -469,6 +483,7 @@ export class DownloadService {
         sourceInput: string,
         epoch: number,
         controller: AbortController,
+        correlationId: string,
     ): Promise<PrepareDownloadResult> {
         if (epoch !== this.prepareEpoch || controller.signal.aborted) {
             return {
@@ -561,6 +576,7 @@ export class DownloadService {
                 sourceInput,
                 password: prepared.password,
                 asciiFilenames,
+                correlationId,
                 loaded: prepared.loaded,
             });
             const collection = prepared.loaded.collection;

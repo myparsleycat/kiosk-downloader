@@ -221,6 +221,47 @@ describe("DownloadService prepared draft", () => {
         expect(internals(service).preparedDrafts.size).toBe(0);
     });
 
+    it("aborts only the matching in-flight prepare when a correlated draft is discarded", async () => {
+        const { service } = createService();
+        let firstSignal: AbortSignal | undefined;
+        let secondSignal: AbortSignal | undefined;
+        let releaseSecond: () => void = () => undefined;
+        const load = vi
+            .spyOn(internals(service), "loadCollectionUnlocked")
+            .mockImplementationOnce(
+                async (payload) =>
+                    await new Promise<LoadedCollection>((_resolve, reject) => {
+                        firstSignal = payload.signal;
+                        payload.signal?.addEventListener("abort", () =>
+                            reject(payload.signal?.reason),
+                        );
+                    }),
+            )
+            .mockImplementationOnce(
+                async (payload) =>
+                    await new Promise<LoadedCollection>((resolve, reject) => {
+                        secondSignal = payload.signal;
+                        payload.signal?.addEventListener("abort", () =>
+                            reject(payload.signal?.reason),
+                        );
+                        releaseSecond = () => resolve(loadedCollection());
+                    }),
+            );
+
+        const first = service.prepare({ url: URL, correlationId: "item-a" });
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+        const second = service.prepare({ url: URL, correlationId: "item-b" });
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+        service.discardDraft({ draftId: "item-a" });
+
+        expect(firstSignal?.aborted).toBe(true);
+        expect(secondSignal?.aborted).toBe(false);
+        await expect(first).resolves.toMatchObject({ status: "failed" });
+        releaseSecond();
+        await expect(second).resolves.toMatchObject({ status: "ready" });
+        expect(internals(service).preparedDrafts.size).toBe(1);
+    });
+
     it("creates from the canonical snapshot without loading the collection again", async () => {
         const { service } = createService();
         const load = vi
@@ -483,6 +524,22 @@ describe("DownloadService prepared draft", () => {
         expect(internals(service).preparedDrafts.has(second.draftId)).toBe(true);
 
         service.discardDraft({ draftId: first.draftId });
+        expect(internals(service).preparedDrafts.has(first.draftId)).toBe(false);
+        expect(internals(service).preparedDrafts.has(second.draftId)).toBe(true);
+    });
+
+    it("removes a completed draft when discarded by its correlation id", async () => {
+        const { service } = createService();
+        vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
+            loadedCollection(),
+        );
+        const first = await service.prepare({ url: URL, correlationId: "item-a" });
+        const second = await service.prepare({ url: URL, correlationId: "item-b" });
+        if (first.status !== "ready" || second.status !== "ready") {
+            throw new Error("Expected two prepared drafts");
+        }
+
+        service.discardDraft({ draftId: "item-a" });
         expect(internals(service).preparedDrafts.has(first.draftId)).toBe(false);
         expect(internals(service).preparedDrafts.has(second.draftId)).toBe(true);
     });

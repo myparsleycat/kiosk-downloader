@@ -253,13 +253,16 @@ export interface CreateUploadPayload {
     turnstileToken?: string;
 }
 
+export const DOWNLOAD_PREPARE_CONCURRENCY = 4;
+
 export interface PrepareDownloadPayload {
     url: string;
     password?: string;
     asciiFilenames?: boolean;
+    correlationId?: string;
 }
 
-export type LoadCollectionPayload = PrepareDownloadPayload;
+export type LoadCollectionPayload = Omit<PrepareDownloadPayload, "correlationId">;
 
 export type PrepareDownloadResult =
     | { status: "ready"; draftId: string; collection: Collection }

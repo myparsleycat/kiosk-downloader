@@ -279,9 +279,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
                       key={item.key}
                       item={item}
                       extendedLoadProgress={
-                        item.preparation.status === "preparing" &&
-                        extendedLoadProgress?.url === item.url
-                          ? extendedLoadProgress
+                        item.preparation.status === "preparing"
+                          ? (extendedLoadProgress[item.url] ?? null)
                           : null
                       }
                       onPasswordChange={(value) => {
