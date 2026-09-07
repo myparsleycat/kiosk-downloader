@@ -115,14 +115,17 @@ export class KioskDownloadRunner {
         return await this.deps.runControl(async () => {
             throwIfAborted(signal);
             const cachedToken = this.collectionTokens.get(collection.id);
-            const cat = cachedToken ?? (await this.refreshCollectionToken(collection));
+            const cat = cachedToken ?? (await this.refreshCollectionToken(collection, signal));
             throwIfAborted(signal);
-            return await this.deps.api.getSegments(file.remoteId, cat);
+            const segments = await this.deps.api.getSegments(file.remoteId, cat, signal);
+            throwIfAborted(signal);
+            return segments;
         });
     }
 
-    private async refreshCollectionToken(collection: DownloadCollectionRow) {
-        const refreshed = await this.deps.api.refreshCollectionToken(collection);
+    private async refreshCollectionToken(collection: DownloadCollectionRow, signal: AbortSignal) {
+        const refreshed = await this.deps.api.refreshCollectionToken(collection, signal);
+        throwIfAborted(signal);
         this.deps.repository.updateCollectionFreshMeta(collection.id, {
             expires: refreshed.expires,
         });

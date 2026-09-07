@@ -177,13 +177,18 @@ export class TransferItApiClient {
         return deriveTransferPassword(row.shareId, row.passwordPlain);
     }
 
-    public async getDownloadUrl(xh: string, nodeHandle: string, authPw?: string) {
+    public async getDownloadUrl(
+        xh: string,
+        nodeHandle: string,
+        authPw?: string,
+        signal?: AbortSignal,
+    ) {
         const query: Record<string, string> = { x: xh };
         if (authPw) {
             query.pw = authPw;
         }
         const g = assertMegaResult(
-            await this.megaApi({ a: "g", n: nodeHandle, g: 1, ssl: 2 }, query),
+            await this.megaApi({ a: "g", n: nodeHandle, g: 1, ssl: 2 }, query, signal),
             "g",
         ) as { e?: number; g?: string; s?: number };
 
@@ -210,47 +215,56 @@ export class TransferItApiClient {
         signal?: AbortSignal,
     ) {
         return await this.controlPlane(async () => {
+            signal?.throwIfAborted();
             const qs = new URLSearchParams(query).toString();
             const url = `${API_BASE}?${qs}`;
             const body = JSON.stringify([payload]);
 
-            const response = await this.kd.http.controlRequest(url, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "text/plain;charset=UTF-8",
-                    Origin: "https://transfer.it",
-                    Referer: "https://transfer.it/",
+            return await this.kd.http.consumeControlResponse(
+                url,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "text/plain;charset=UTF-8",
+                        Origin: "https://transfer.it",
+                        Referer: "https://transfer.it/",
+                    },
+                    body,
+                    signal,
                 },
-                body,
-                signal,
-            });
+                async (response) => {
+                    if (response.status === 402) {
+                        await response.body?.cancel().catch(() => undefined);
+                        throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
+                    }
+                    if (response.status === 509) {
+                        await response.body?.cancel().catch(() => undefined);
+                        throw new TransferRateLimitError(
+                            parseTransferRetryAfterMs(response.headers.get("retry-after")),
+                        );
+                    }
+                    if (!response.ok) {
+                        await response.body?.cancel().catch(() => undefined);
+                        throw new Error(`Transfer API HTTP ${response.status}.`);
+                    }
 
-            if (response.status === 402) {
-                await response.body?.cancel().catch(() => undefined);
-                throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
-            }
-            if (response.status === 509) {
-                await response.body?.cancel().catch(() => undefined);
-                throw new TransferRateLimitError(
-                    parseTransferRetryAfterMs(response.headers.get("retry-after")),
-                );
-            }
-            if (!response.ok) {
-                await response.body?.cancel().catch(() => undefined);
-                throw new Error(`Transfer API HTTP ${response.status}.`);
-            }
+                    const raw = await response.text();
+                    signal?.throwIfAborted();
+                    let parsed: unknown;
+                    try {
+                        parsed = JSON.parse(raw);
+                    } catch (error) {
+                        throw new Error(`Transfer API bad JSON: ${toErrorMessage(error)}`);
+                    }
 
-            let parsed: unknown;
-            try {
-                parsed = await response.json();
-            } catch (error) {
-                throw new Error(`Transfer API bad JSON: ${toErrorMessage(error)}`);
-            }
-
-            if (!Array.isArray(parsed)) {
-                throw new Error(`Unexpected Transfer API response: ${JSON.stringify(parsed)}`);
-            }
-            return parsed[0];
+                    if (!Array.isArray(parsed)) {
+                        throw new Error(
+                            `Unexpected Transfer API response: ${JSON.stringify(parsed)}`,
+                        );
+                    }
+                    return parsed[0];
+                },
+            );
         });
     }
 

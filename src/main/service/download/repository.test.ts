@@ -990,3 +990,170 @@ describe("DownloadRepository Workupload persistence", () => {
         ).toThrow("Missing Workupload source metadata for file: remote.");
     });
 });
+
+async function createResumeRepository() {
+    const { db, repo } = await createRepository();
+    const timestamp = new Date().toISOString();
+    db.run(
+        `INSERT INTO "download_collection"
+         ("id", "share_id", "source_url", "name", "root_id", "segment_size", "expires",
+          "tree_json", "save_path", "status", "created_at", "updated_at", "error")
+         VALUES ('resume', 'share', 'https://example.com/share', 'Collection', 'root', 10,
+                 ?, '{}', '/tmp', 'error', ?, ?, 'network failure')`,
+        [Math.floor(Date.now() / 1000) + 3600, timestamp, timestamp],
+    );
+    for (const [id, status, selected, completedElsewhere, pausedByUser] of [
+        ["failed", "error", 1, 0, 0],
+        ["paused", "paused", 1, 0, 0],
+        ["manual", "paused", 1, 0, 1],
+        ["active", "downloading", 1, 0, 0],
+        ["complete", "completed", 1, 0, 0],
+        ["excluded", "error", 0, 0, 0],
+        ["elsewhere", "error", 1, 1, 0],
+    ] as const) {
+        db.run(
+            `INSERT INTO "download_file"
+             ("id", "collection_id", "remote_id", "path", "name", "size", "selected",
+              "completed_elsewhere", "status", "paused_by_user", "created_at", "updated_at", "error")
+             VALUES (?, 'resume', ?, ?, ?, 20, ?, ?, ?, ?, ?, ?, 'network failure')`,
+            [
+                id,
+                id,
+                `${id}.bin`,
+                `${id}.bin`,
+                selected,
+                completedElsewhere,
+                status,
+                pausedByUser,
+                timestamp,
+                timestamp,
+            ],
+        );
+        for (const [chunkIndex, chunkStatus, downloadedBytes] of [
+            [0, "completed", 10],
+            [1, "error", 4],
+        ] as const) {
+            db.run(
+                `INSERT INTO "download_chunk"
+                 ("collection_id", "file_id", "chunk_index", "offset", "size", "status",
+                  "downloaded_bytes", "updated_at", "error")
+                 VALUES ('resume', ?, ?, ?, 10, ?, ?, ?, ?)`,
+                [
+                    id,
+                    chunkIndex,
+                    chunkIndex * 10,
+                    chunkStatus,
+                    downloadedBytes,
+                    timestamp,
+                    chunkStatus === "error" ? "network failure" : null,
+                ],
+            );
+        }
+    }
+    return { db, repo };
+}
+
+describe("DownloadRepository explicit resume", () => {
+    it.each([false, true])(
+        "retries failed and paused selected files after collection pause (force=%s)",
+        async (force) => {
+            const { repo } = await createResumeRepository();
+            const completedChunk = repo.listChunks("failed")[0];
+            const protectedFiles = ["complete", "excluded", "elsewhere"].map((id) => ({
+                file: repo.getFile(id),
+                chunks: repo.listChunks(id),
+            }));
+
+            repo.pauseCollection("resume");
+            repo.resumeCollection("resume", force);
+
+            expect(repo.getCollection("resume")).toMatchObject({ status: "queued", error: null });
+            for (const id of ["failed", "paused", "manual", "active"]) {
+                expect(repo.getFile(id)).toMatchObject({
+                    status: "pending",
+                    pausedByUser: 0,
+                    error: null,
+                });
+                expect(repo.hasErroredChunk(id)).toBe(false);
+            }
+            expect(repo.listChunks("failed")[0]).toEqual(completedChunk);
+            expect(repo.listChunks("failed")[1]).toMatchObject({
+                status: "pending",
+                downloadedBytes: 0,
+                error: null,
+            });
+            for (const original of protectedFiles) {
+                expect(repo.getFile(original.file!.id)).toEqual(original.file);
+                expect(repo.listChunks(original.file!.id)).toEqual(original.chunks);
+            }
+        },
+    );
+
+    it.each([false, true])(
+        "clears failed chunks on individual retry without changing completed chunks (force=%s)",
+        async (force) => {
+            const { repo } = await createResumeRepository();
+            const completedChunk = repo.listChunks("failed")[0];
+            repo.pauseFile("failed");
+            repo.resumeFile("failed", force);
+            expect(repo.getFile("failed")).toMatchObject({
+                status: "pending",
+                pausedByUser: 0,
+                error: null,
+            });
+            expect(repo.listChunks("failed")[0]).toEqual(completedChunk);
+            expect(repo.listChunks("failed")[1]).toMatchObject({
+                status: "pending",
+                downloadedBytes: 0,
+                error: null,
+            });
+            expect(repo.getFile("paused")).toMatchObject({ status: "paused" });
+            expect(repo.hasErroredChunk("paused")).toBe(true);
+        },
+    );
+
+    it("preserves completed, excluded, and completed-elsewhere files on individual retry", async () => {
+        const { repo } = await createResumeRepository();
+        for (const id of ["complete", "excluded", "elsewhere"]) {
+            const original = repo.getFile(id);
+            const chunks = repo.listChunks(id);
+            repo.resumeFile(id, true);
+            expect(repo.getFile(id)).toEqual(original);
+            expect(repo.listChunks(id)).toEqual(chunks);
+        }
+    });
+
+    it("does not retry expired collection files or remove their failed chunks", async () => {
+        const { db, repo } = await createResumeRepository();
+        db.run(`UPDATE "download_collection" SET "expires" = 1 WHERE "id" = 'resume'`);
+        const original = repo.getFile("failed");
+        const chunks = repo.listChunks("failed");
+        repo.resumeCollection("resume", false);
+        repo.resumeFile("failed", true);
+        expect(repo.getCollection("resume")).toMatchObject({ status: "expired" });
+        expect(repo.getFile("failed")).toEqual(original);
+        expect(repo.listChunks("failed")).toEqual(chunks);
+    });
+
+    it("applies resume semantics to a bundle's constituent collection", async () => {
+        const { db, repo } = await createResumeRepository();
+        repo.insertBundle({
+            id: "resume-bundle",
+            sourceInput: "KDE1.test",
+            name: "Bundle",
+            treeJson: "{}",
+            manifestJson: "{}",
+            savePath: "/tmp",
+            expires: Math.floor(Date.now() / 1000) + 3600,
+        });
+        db.run(
+            `UPDATE "download_collection" SET "bundle_id" = 'resume-bundle' WHERE "id" = 'resume'`,
+        );
+        for (const collection of repo.listBundleCollections("resume-bundle")) {
+            repo.resumeCollection(collection.id, false);
+        }
+        expect(repo.getFile("failed")).toMatchObject({ status: "pending" });
+        expect(repo.hasErroredChunk("failed")).toBe(false);
+        expect(repo.getFile("complete")).toMatchObject({ status: "completed" });
+    });
+});

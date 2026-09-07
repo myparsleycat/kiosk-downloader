@@ -1,6 +1,7 @@
 import { encode } from "cbor-x";
 import { describe, expect, it, vi } from "vitest";
 
+import { TimeoutError, type ControlRequestOptions } from "../../lib/http";
 import { KioApiClient, streamSegmentBytes } from "./kio-api-client";
 
 describe("streamSegmentBytes request pool", () => {
@@ -81,7 +82,13 @@ describe("streamSegmentBytes request pool", () => {
             throw new Error(`Unexpected URL: ${url}`);
         });
         const client = new KioApiClient({
-            http: { controlRequest },
+            http: {
+                consumeControlResponse: async <T>(
+                    url: string,
+                    _options: unknown,
+                    consume: (response: ReturnType<typeof cborResponse>) => Promise<T>,
+                ) => consume(await controlRequest(url)),
+            },
         } as never);
 
         const loading = client.loadCollection({
@@ -100,6 +107,97 @@ describe("streamSegmentBytes request pool", () => {
         await loading;
     });
 });
+
+describe("KioApiClient control cancellation", () => {
+    it("forwards cancellation to token refresh and segment lookup", async () => {
+        const controller = new AbortController();
+        const request = vi.fn(async (url: string, _options: ControlRequestOptions) =>
+            url.endsWith("/collection/get")
+                ? cborResponse(200, {
+                      token: "cat",
+                      name: "Prepared",
+                      root: Buffer.alloc(16, 1),
+                      segment_size: 16,
+                      expires: 4_102_444_800,
+                  })
+                : segmentResponse(),
+        );
+        const client = controlClient(request);
+        await expect(
+            client.refreshCollectionToken(
+                { shareId: "abcdefghijklmnopqrstuv", passwordPlain: null } as never,
+                controller.signal,
+            ),
+        ).resolves.toMatchObject({ cat: "cat" });
+        await client.getSegments("aa".repeat(16), "cat", controller.signal);
+        expect(request).toHaveBeenCalledTimes(2);
+        for (const [, options] of request.mock.calls)
+            expect(options.signal).toBe(controller.signal);
+    });
+
+    it("does not send an operation canceled while waiting for a control slot", async () => {
+        let release: () => void = () => undefined;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const request = vi.fn(async () => {
+            await gate;
+            return segmentResponse();
+        });
+        const client = controlClient(request);
+        const running = Array.from({ length: 4 }, () => client.getSegments("aa".repeat(16), "cat"));
+        await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(4));
+        const controller = new AbortController();
+        const queued = expect(
+            client.getSegments("bb".repeat(16), "cat", controller.signal),
+        ).rejects.toMatchObject({ name: "AbortError" });
+        controller.abort();
+        try {
+            await queued;
+            expect(request).toHaveBeenCalledTimes(4);
+        } finally {
+            release();
+            await Promise.all(running);
+        }
+        expect(request).toHaveBeenCalledTimes(4);
+    });
+
+    it.each([
+        new DOMException("Stopped", "AbortError"),
+        new TimeoutError(new Request("https://api.kio.ac")),
+    ])("preserves body read failure $name", async (error) => {
+        const client = controlClient(async () => ({
+            status: 200,
+            arrayBuffer: async () => {
+                throw error;
+            },
+        }));
+        await expect(client.getSegments("aa".repeat(16), "cat")).rejects.toBe(error);
+    });
+});
+
+function segmentResponse() {
+    return cborResponse(200, {
+        files: [{ segments: [{ type: "cdn", data: new Map([["url", "https://cdn.test/file"]]) }] }],
+    });
+}
+
+function controlClient(
+    request: (
+        url: string,
+        options: ControlRequestOptions,
+    ) => Promise<ReturnType<typeof cborResponse>>,
+) {
+    return new KioApiClient({
+        http: {
+            consumeControlResponse: async <T>(
+                url: string,
+                options: ControlRequestOptions,
+                consume: (response: ReturnType<typeof cborResponse>) => Promise<T>,
+            ) => consume(await request(url, options)),
+        },
+    } as never);
+}
 
 function cborResponse(status: number, body: unknown) {
     const raw = Buffer.from(encode(body));

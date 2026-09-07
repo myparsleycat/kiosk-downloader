@@ -47,9 +47,24 @@ function passwordForm(kind: "file" | "archive", key: string, invalid = false) {
     </form>`;
 }
 
-function createClient(request: ReturnType<typeof vi.fn>) {
+function createClient(
+    request: (
+        url: string,
+        options: PayloadRequestOptions & { headers: Headers },
+    ) => Promise<Response>,
+) {
     return new WorkuploadApiClient({
-        http: { controlRequest: request, payloadRequest: request },
+        http: {
+            consumeControlResponse: async <T>(
+                url: string,
+                options: PayloadRequestOptions,
+                consume: (response: Response) => Promise<T>,
+            ) =>
+                await consume(
+                    await request(url, { ...options, headers: new Headers(options.headers) }),
+                ),
+            payloadRequest: request,
+        },
         logger: { warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     } as never);
 }
@@ -790,6 +805,55 @@ describe("WorkuploadApiClient", () => {
         );
     });
 
+    it.each(["abort", "timeout"] as const)(
+        "settles a stalled resolver body on %s and allows another lookup",
+        async (stop) => {
+            vi.useFakeTimers();
+            const controller = new AbortController();
+            const stalled = new Response(new ReadableStream<Uint8Array>());
+            let lookups = 0;
+            const http = new HTTP({} as never);
+            const controlRequest = vi
+                .spyOn(http, "controlRequest")
+                .mockImplementation(async (url) => {
+                    if (url.endsWith("/file/FileKey")) return new Response(FILE_HTML);
+                    if (url.endsWith("/start/FileKey"))
+                        return new Response("/api/file/getDownloadServer/FileKey");
+                    if (url.endsWith("/api/file/getDownloadServer/FileKey")) {
+                        lookups += 1;
+                        return lookups === 1
+                            ? stalled
+                            : new Response(
+                                  JSON.stringify({
+                                      success: true,
+                                      data: { url: "https://f12.workupload.com/download/FileKey" },
+                                  }),
+                              );
+                    }
+                    throw new Error(`Unexpected request: ${url}`);
+                });
+            const client = new WorkuploadApiClient({ http } as never);
+            try {
+                const session = await client.createSession("https://workupload.com/file/FileKey");
+                const pending = session.requestDownload("FileKey", { signal: controller.signal });
+                const rejected = expect(pending).rejects.toMatchObject({
+                    name: stop === "abort" ? "AbortError" : "TimeoutError",
+                });
+                await vi.advanceTimersByTimeAsync(0);
+                if (stop === "abort") controller.abort();
+                else await vi.advanceTimersByTimeAsync(100_000);
+                await rejected;
+                expect(controlRequest.mock.calls.at(-1)?.[1]?.signal?.aborted).toBe(true);
+                await expect(session.resolveDownloadUrl("FileKey")).resolves.toBe(
+                    "https://f12.workupload.com/download/FileKey",
+                );
+            } finally {
+                controlRequest.mockRestore();
+                vi.useRealTimers();
+            }
+        },
+    );
+
     it("times out a CDN download that never sends response headers", async () => {
         vi.useFakeTimers();
         const fileRequests = vi.fn(async () => new Response(FILE_HTML));
@@ -823,8 +887,16 @@ describe("WorkuploadApiClient", () => {
         const http = new HTTP({} as never);
         const client = new WorkuploadApiClient({
             http: {
-                controlRequest: (url: string, options: PayloadRequestOptions = {}) =>
-                    http.controlRequest(url, { ...options, fetch: fetchStub as typeof fetch }),
+                consumeControlResponse: <T>(
+                    url: string,
+                    options: PayloadRequestOptions,
+                    consume: (response: Response) => Promise<T>,
+                ) =>
+                    http.consumeControlResponse(
+                        url,
+                        { ...options, fetch: fetchStub as typeof fetch },
+                        consume,
+                    ),
                 payloadRequest: (url: string, options: PayloadRequestOptions = {}) =>
                     http.payloadRequest(url, { ...options, fetch: fetchStub as typeof fetch }),
             },

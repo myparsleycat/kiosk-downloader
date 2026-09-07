@@ -19,6 +19,7 @@ import {
     SLOW_CHUNK_THRESHOLD_RATIO,
     SlowChunkMonitor,
     isAbortError,
+    type SlowChunkTransferPhase,
     sleepWithAbort,
     slowReconnectDelayMs,
 } from "./slow-chunk-monitor";
@@ -231,6 +232,9 @@ export class GlobalSegmentPool {
     }
 
     private tryCompleteSession(session: FileDownloadSession) {
+        if (session.inFlightChunks > 0) {
+            return;
+        }
         if (session.failed) {
             this.finishSession(session, "failed");
             return;
@@ -247,7 +251,7 @@ export class GlobalSegmentPool {
     }
 
     private finishSession(session: FileDownloadSession, outcome: FileDownloadOutcome) {
-        if (!this.sessions.has(session.id)) {
+        if (this.sessions.get(session.id) !== session) {
             return;
         }
 
@@ -272,6 +276,42 @@ export class GlobalSegmentPool {
     }
 
     private async processChunk(session: FileDownloadSession, chunk: DownloadChunkRow) {
+        try {
+            await this.downloadChunk(session, chunk);
+        } catch (error) {
+            this.deps.kd.logger.error(
+                {
+                    channel: "segment-download",
+                    provider: "kiosk",
+                    collectionId: session.collectionId,
+                    fileId: session.id,
+                    chunkIndex: chunk.chunkIndex,
+                    stage: "process-chunk",
+                    inFlightChunks: session.inFlightChunks,
+                    aborted: session.registration.controller.signal.aborted,
+                    message: toErrorMessage(error),
+                },
+                "DownloadService:processChunk",
+            );
+            this.deps.kd.logger.error(error, "DownloadService:processChunk");
+            try {
+                this.failSession(session, toErrorMessage(error), session.registration.controller);
+            } catch (cleanupError) {
+                this.deps.kd.logger.error(cleanupError, "DownloadService:failSession");
+            }
+        } finally {
+            if (session.registration.controller.signal.aborted) {
+                session.aborted = true;
+                this.removeSessionItemsFromQueue(session.id);
+            }
+            session.inFlightChunks -= 1;
+            this.tryCompleteSession(session);
+            this.deps.onChunkSettled();
+            this.ensureWorkers();
+        }
+    }
+
+    private async downloadChunk(session: FileDownloadSession, chunk: DownloadChunkRow) {
         const {
             collection,
             file,
@@ -286,15 +326,7 @@ export class GlobalSegmentPool {
         } = session.registration;
         const maxAttempts = maxChunkRetries + 1;
 
-        const releaseInFlight = () => {
-            session.inFlightChunks -= 1;
-            this.tryCompleteSession(session);
-            this.deps.onChunkSettled();
-            this.ensureWorkers();
-        };
-
         if (session.failed || session.aborted || controller.signal.aborted) {
-            releaseInFlight();
             return;
         }
 
@@ -305,7 +337,6 @@ export class GlobalSegmentPool {
                 `Missing byte-range mapping for chunk ${chunk.chunkIndex}.`,
                 controller,
             );
-            releaseInFlight();
             return;
         }
 
@@ -313,7 +344,6 @@ export class GlobalSegmentPool {
         const segment = segments[segmentIndex];
         if (!segment) {
             this.failSession(session, `Missing segment ${segmentIndex}.`, controller);
-            releaseInFlight();
             return;
         }
 
@@ -325,7 +355,6 @@ export class GlobalSegmentPool {
         while (errorAttempt <= maxAttempts) {
             if (session.failed || session.aborted || controller.signal.aborted) {
                 this.deps.repository.markChunkPending(file.id, chunk.chunkIndex);
-                releaseInFlight();
                 return;
             }
 
@@ -341,6 +370,7 @@ export class GlobalSegmentPool {
                 }
             };
             const transfer = this.slowChunkMonitor.register({
+                phase: "request-wait",
                 fileId: file.id,
                 chunkIndex: chunk.chunkIndex,
                 chunkSize: chunk.size,
@@ -358,7 +388,7 @@ export class GlobalSegmentPool {
                     controller.signal.addEventListener("abort", onSessionAbort);
                 }
 
-                const onPhaseChange = (phase: "network" | "bandwidth-wait") => {
+                const onPhaseChange = (phase: SlowChunkTransferPhase) => {
                     this.slowChunkMonitor.setPhase(transfer.key, phase);
                 };
                 const source =
@@ -454,7 +484,6 @@ export class GlobalSegmentPool {
                     );
                 }
                 session.remainingChunks -= 1;
-                releaseInFlight();
                 return;
             } catch (error) {
                 const abortReason = transfer.abortReason;
@@ -466,7 +495,6 @@ export class GlobalSegmentPool {
 
                 if (controller.signal.aborted || session.aborted) {
                     this.deps.repository.markChunkPending(file.id, chunk.chunkIndex);
-                    releaseInFlight();
                     return;
                 }
 
@@ -496,7 +524,6 @@ export class GlobalSegmentPool {
                     } catch (abortError) {
                         if (isAbortError(abortError) || controller.signal.aborted) {
                             this.deps.repository.markChunkPending(file.id, chunk.chunkIndex);
-                            releaseInFlight();
                             return;
                         }
                         throw abortError;
@@ -524,10 +551,6 @@ export class GlobalSegmentPool {
                         },
                         "DownloadService:streamSegment",
                     );
-                } else if (isAbortError(error)) {
-                    this.deps.repository.markChunkPending(file.id, chunk.chunkIndex);
-                    releaseInFlight();
-                    return;
                 }
 
                 const message =
@@ -554,7 +577,6 @@ export class GlobalSegmentPool {
                         await sleepWithAbort(chunkBackoffMs(errorAttempt), controller.signal);
                     } catch (abortError) {
                         if (isAbortError(abortError) || controller.signal.aborted) {
-                            releaseInFlight();
                             return;
                         }
                         throw abortError;
@@ -567,6 +589,10 @@ export class GlobalSegmentPool {
                 this.deps.kd.logger.error(
                     {
                         channel: "segment-download",
+                        collectionId: collection.id,
+                        provider: "kiosk",
+                        phase: transfer.phase,
+                        inFlightChunks: session.inFlightChunks,
                         fileId: file.id,
                         chunkIndex: chunk.chunkIndex,
                         offset: chunk.offset,
@@ -579,9 +605,9 @@ export class GlobalSegmentPool {
                     },
                     "DownloadService:streamSegment",
                 );
+                this.deps.kd.logger.error(error, "DownloadService:streamSegment");
                 this.deps.repository.markChunkError(chunk, message);
                 this.failSession(session, message, controller);
-                releaseInFlight();
                 return;
             } finally {
                 this.slowChunkMonitor.unregister(transfer.key);
@@ -600,9 +626,9 @@ export class GlobalSegmentPool {
         }
 
         session.failed = true;
-        this.deps.repository.markFileStatus(session.registration.file.id, "error", message);
         controller.abort();
         this.removeSessionItemsFromQueue(session.id);
+        this.deps.repository.markFileStatus(session.registration.file.id, "error", message);
         this.tryCompleteSession(session);
     }
 }

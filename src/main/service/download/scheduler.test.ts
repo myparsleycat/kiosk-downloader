@@ -46,6 +46,117 @@ type SchedulerInternals = {
 };
 
 describe("DownloadScheduler", () => {
+    it("waits for a paused run to drain before immediately resumed file starts again", async () => {
+        const collection = createCollection("resume-draining", 0);
+        const file = createFile("draining-file", collection.id);
+        const repository = createRepository([collection], [file]);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const firstRun = Promise.withResolvers<void>();
+        const secondRun = Promise.withResolvers<void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementationOnce(async () => {
+                file.status = "downloading";
+                await firstRun.promise;
+            })
+            .mockImplementationOnce(async () => {
+                file.status = "downloading";
+                await secondRun.promise;
+            });
+
+        try {
+            await scheduler.schedule();
+            scheduler.pauseCollection(collection.id);
+            collection.status = "paused";
+            file.status = "paused";
+            expect(runFile.mock.calls[0]?.[3].signal.aborted).toBe(true);
+
+            collection.status = "queued";
+            file.status = "pending";
+            scheduler.resumeCollection(collection.id);
+            await scheduler.schedule();
+            expect(runFile).toHaveBeenCalledTimes(1);
+            expect(scheduler.hasActiveTransfers()).toBe(true);
+
+            firstRun.resolve();
+            await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(2));
+            expect(runFile.mock.calls[1]?.[1]).toBe(file.id);
+            expect(runFile.mock.calls[1]?.[3].signal.aborted).toBe(false);
+        } finally {
+            file.status = "completed";
+            firstRun.resolve();
+            secondRun.resolve();
+            await vi.waitFor(() => expect(scheduler.hasActiveTransfers()).toBe(false));
+            scheduler.destroy();
+        }
+    });
+
+    it("releases four cancelled Kiosk preparation slots so a queued collection proceeds", async () => {
+        const collections = Array.from({ length: 5 }, (_, index) =>
+            createCollection(`blocked-${index}`, index),
+        );
+        const files = collections.map((collection, index) =>
+            createFile(`blocked-file-${index}`, collection.id),
+        );
+        const repository = createRepository(collections, files);
+        const signals: AbortSignal[] = [];
+        const refreshCollectionToken = vi.fn(
+            (_collection: DownloadCollectionRow, signal: AbortSignal) => {
+                signals.push(signal);
+                signal.throwIfAborted();
+                return new Promise<never>((_, reject) => {
+                    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+                });
+            },
+        );
+        const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(logger),
+            { refreshCollectionToken } as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        try {
+            await scheduler.schedule();
+            await vi.waitFor(() => expect(refreshCollectionToken).toHaveBeenCalledTimes(4));
+            expect(signals.every((signal) => !signal.aborted)).toBe(true);
+            for (const collection of collections.slice(0, 4)) {
+                scheduler.pauseCollection(collection.id);
+                collection.status = "paused";
+                const file = files.find((candidate) => candidate.collectionId === collection.id)!;
+                file.status = "paused";
+            }
+
+            await vi.waitFor(() => expect(refreshCollectionToken).toHaveBeenCalledTimes(5));
+            expect(signals.slice(0, 4).every((signal) => signal.aborted)).toBe(true);
+            expect(refreshCollectionToken.mock.calls[4]?.[0].id).toBe(collections[4].id);
+            expect(signals[4].aborted).toBe(false);
+            expect(logger.error).not.toHaveBeenCalled();
+        } finally {
+            for (const collection of collections) {
+                scheduler.pauseCollection(collection.id);
+                collection.status = "paused";
+            }
+            for (const file of files) file.status = "paused";
+            await vi.waitFor(() => expect(scheduler.hasActiveTransfers()).toBe(false));
+            scheduler.destroy();
+        }
+    });
+
     it("starts every collection when demand exceeds the configured segment pool", async () => {
         const collections = Array.from({ length: 10 }, (_, index) =>
             createCollection(`collection-${index}`, index),
@@ -1081,6 +1192,10 @@ function createRepository(
             collection.status = "queued";
         }),
         resetRunningChunksForFile,
+        hasErroredChunk: vi.fn((fileId: string) =>
+            chunks.some((chunk) => chunk.fileId === fileId && chunk.status === "error"),
+        ),
+        syncFileDownloadedBytes: vi.fn(),
         completeFile,
         markChunkPartial,
         markChunkPending,

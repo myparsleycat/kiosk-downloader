@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { GlobalSegmentPool } from "./segment-pool";
+import type { KioskDownloader } from "../..";
+
+import { TransferScheduler } from "../transfer-request-pool";
+import { KioApiClient } from "./kio-api-client";
+import { GlobalSegmentPool, type FileDownloadRegistration } from "./segment-pool";
 
 function createPool() {
     return new GlobalSegmentPool({
@@ -76,5 +80,191 @@ describe("GlobalSegmentPool", () => {
 
         await expect(outcome).resolves.toBe("paused");
         expect((pool as unknown as { queue: unknown[] }).queue).toHaveLength(0);
+    });
+});
+
+function createRunningPool() {
+    const requestPool = new TransferScheduler(2);
+    const payloadRequest = vi.fn(async () => new Response("x"));
+    const repository = {
+        markFileStatus: vi.fn(),
+        markChunkDownloading: vi.fn(),
+        markChunkPending: vi.fn(),
+        markChunkPartial: vi.fn(),
+        markChunkCompleted: vi.fn(),
+        markChunkError: vi.fn(),
+        addFileDownloadedBytes: vi.fn(),
+        getFile: vi.fn(() => ({ downloadedBytes: 0 })),
+    };
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const kd = {
+        http: { payloadRequest },
+        logger,
+        service: { transfer: { requestPool, downloadBandwidth: { take: vi.fn() } } },
+    } as unknown as KioskDownloader;
+    const onChunkSettled = vi.fn();
+    const pool = new GlobalSegmentPool({
+        kd,
+        api: new KioApiClient(kd),
+        repository: repository as never,
+        metrics: {
+            registerFile: vi.fn(),
+            setChunkTransferProgress: vi.fn(),
+            setChunkWriteProgress: vi.fn(),
+            clearChunk: vi.fn(),
+        } as never,
+        onChunkSettled,
+        onProgress: vi.fn(),
+    });
+    const partWriter = {
+        writeChunkFromStream: vi.fn(
+            async (_offset: number, _index: number, source: AsyncIterable<Uint8Array>) => {
+                let bytes = 0;
+                for await (const chunk of source) bytes += chunk.length;
+                return bytes;
+            },
+        ),
+    };
+    const input = {
+        collection: { id: "collection" },
+        file: { id: "file", downloadedBytes: 0 },
+        controller: new AbortController(),
+        chunks: [0, 1].map((chunkIndex) => ({
+            fileId: "file",
+            collectionId: "collection",
+            chunkIndex,
+            offset: chunkIndex,
+            size: 1,
+            downloadedBytes: 0,
+            status: "pending",
+            attempts: 0,
+        })),
+        segments: [0, 1].map(() => ({
+            type: "cdn",
+            data: new Map([["url", "https://cdn.test/file"]]),
+        })),
+        partWriter,
+        maxChunkRetries: 0,
+        streamWriteBatchBytes: 1,
+        priority: 0,
+        startedAt: 0,
+        collectionStartedAt: 0,
+    } as unknown as FileDownloadRegistration;
+    return {
+        pool,
+        input,
+        partWriter,
+        requestPool,
+        payloadRequest,
+        repository,
+        logger,
+        onChunkSettled,
+    };
+}
+
+async function flushMicrotasks() {
+    for (let i = 0; i < 30; i += 1) await Promise.resolve();
+}
+
+describe("GlobalSegmentPool recovery", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it.each(["full-segment", "byte-range"] as const)(
+        "drains failed %s work before allowing a clean retry",
+        async (mode) => {
+            const { pool, input, partWriter, repository } = createRunningPool();
+            input.mode = mode;
+            input.ranges = new Map(
+                input.chunks.map((chunk) => [
+                    chunk.chunkIndex,
+                    {
+                        segmentIndex: chunk.chunkIndex,
+                        localStart: 0,
+                        localEnd: 1,
+                    },
+                ]),
+            );
+            const failed = Promise.withResolvers<number>();
+            const sibling = Promise.withResolvers<number>();
+            partWriter.writeChunkFromStream
+                .mockImplementationOnce(() => failed.promise)
+                .mockImplementationOnce(() => sibling.promise);
+            pool.resize(2);
+            let settled = false;
+            const first = pool.register(input).then((outcome) => {
+                settled = true;
+                return outcome;
+            });
+            expect(partWriter.writeChunkFromStream).toHaveBeenCalledTimes(2);
+            failed.reject(new Error("network failure"));
+            await flushMicrotasks();
+            expect(input.controller.signal.aborted).toBe(true);
+            expect(settled).toBe(false);
+            expect(pool.getOutstandingChunks("file")).not.toBeNull();
+            sibling.reject(new DOMException("Delayed cancellation", "AbortError"));
+            await expect(first).resolves.toBe("failed");
+            expect(pool.getOutstandingChunks("file")).toBeNull();
+            await expect(
+                pool.register({ ...input, controller: new AbortController() }),
+            ).resolves.toBe("completed");
+            expect(repository.markChunkCompleted).toHaveBeenCalledTimes(2);
+            expect(pool.getOutstandingChunks("file")).toBeNull();
+        },
+    );
+
+    it("does not delete a replacement when stale completion runs", async () => {
+        const { pool, input } = createRunningPool();
+        type Internals = {
+            sessions: Map<string, unknown>;
+            finishSession: (session: unknown, outcome: string) => void;
+        };
+        const internals = pool as unknown as Internals;
+        const old = pool.register(input);
+        const oldSession = internals.sessions.get("file");
+        pool.cancelSession("file");
+        await expect(old).resolves.toBe("paused");
+        const next = pool.register({ ...input, controller: new AbortController() });
+        const nextSession = internals.sessions.get("file");
+        internals.finishSession(oldSession, "failed");
+        expect(internals.sessions.get("file")).toBe(nextSession);
+        pool.cancelSession("file");
+        await expect(next).resolves.toBe("paused");
+    });
+
+    it("settles and logs unexpected setup errors without losing a worker", async () => {
+        const { pool, input, repository, logger, onChunkSettled } = createRunningPool();
+        const error = new Error("write status failed");
+        repository.markChunkDownloading.mockImplementationOnce(() => {
+            throw error;
+        });
+        pool.resize(2);
+        await expect(pool.register(input)).resolves.toBe("failed");
+        expect(logger.error).toHaveBeenCalledWith(error, "DownloadService:processChunk");
+        expect(onChunkSettled).toHaveBeenCalledTimes(3);
+        expect(pool.getOutstandingChunks("file")).toBeNull();
+        await expect(pool.register({ ...input, controller: new AbortController() })).resolves.toBe(
+            "completed",
+        );
+    });
+
+    it("does not spend retries while waiting more than 15 seconds for payload permits", async () => {
+        vi.useFakeTimers();
+        const { pool, input, requestPool, payloadRequest, logger } = createRunningPool();
+        const context = {
+            collectionId: "other",
+            providerId: "kiosk-download",
+            direction: "download",
+        } as const;
+        const releases = [await requestPool.acquire(context), await requestPool.acquire(context)];
+        pool.resize(2);
+        const outcome = pool.register(input);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(payloadRequest).not.toHaveBeenCalled();
+        expect(input.controller.signal.aborted).toBe(false);
+        expect(logger.warn).not.toHaveBeenCalled();
+        expect(logger.error).not.toHaveBeenCalled();
+        releases.forEach((release) => release());
+        await expect(outcome).resolves.toBe("completed");
+        expect(payloadRequest).toHaveBeenCalledTimes(2);
     });
 });
