@@ -9,6 +9,7 @@ import { decode, encode } from "cbor-x";
 import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
+import type { SlowChunkTransferPhase } from "./slow-chunk-monitor";
 import type {
     DownloadChunkRow,
     DownloadCollectionRow,
@@ -113,12 +114,16 @@ export class KioApiClient {
         };
     }
 
-    public async refreshCollectionToken(row: DownloadCollectionRow) {
+    public async refreshCollectionToken(row: DownloadCollectionRow, signal?: AbortSignal) {
         const uuid = shareIdToUuid(row.shareId);
-        return this.unlockCollection(uuid, row.passwordPlain ?? undefined);
+        return this.unlockCollection(uuid, row.passwordPlain ?? undefined, signal);
     }
 
-    public async getSegments(remoteFileId: string, cat: string): Promise<SegmentDescriptor[]> {
+    public async getSegments(
+        remoteFileId: string,
+        cat: string,
+        signal?: AbortSignal,
+    ): Promise<SegmentDescriptor[]> {
         const response = await this.cborPost(
             this.downloadControlPlane,
             `${API_BASE_URL}/v0/collection/file/gets`,
@@ -127,6 +132,7 @@ export class KioApiClient {
                 "Kiosk-CAT": cat,
                 "Kiosk-Download-Capability": "cdn, edge",
             },
+            signal,
         );
         const body = asRecord(response.body);
         const files = Array.isArray(body?.files) ? body.files : [];
@@ -158,7 +164,7 @@ export class KioApiClient {
         segment: SegmentDescriptor,
         chunk: DownloadChunkRow,
         signal: AbortSignal,
-        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
+        onPhaseChange?: (phase: SlowChunkTransferPhase) => void,
         localStart = 0,
     ) {
         return streamSegmentBytes(this.kd, segment, localStart, chunk.size, signal, {
@@ -179,7 +185,7 @@ export class KioApiClient {
         segment: SegmentDescriptor,
         range: { localStart: number; localEnd: number },
         signal: AbortSignal,
-        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
+        onPhaseChange?: (phase: SlowChunkTransferPhase) => void,
         useRange = false,
     ) {
         return streamSegmentBytes(this.kd, segment, range.localStart, range.localEnd, signal, {
@@ -333,34 +339,48 @@ export class KioApiClient {
         headers: Record<string, string> = {},
         signal?: AbortSignal,
     ): Promise<CborResponse> {
-        return await plane(async () => {
+        signal?.throwIfAborted();
+        const operation = plane(async () => {
             signal?.throwIfAborted();
             const body = Buffer.from(encode(bodyObj));
-            const response = await this.kd.http.controlRequest(url, {
-                method: "POST",
-                headers: {
-                    "content-type": "application/cbor",
-                    accept: "application/cbor",
-                    ...headers,
+            return await this.kd.http.consumeControlResponse(
+                url,
+                {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/cbor",
+                        accept: "application/cbor",
+                        ...headers,
+                    },
+                    body: body as BodyInit,
+                    signal,
                 },
-                body: body as BodyInit,
-                signal,
-            });
-            const raw = Buffer.from(await response.arrayBuffer());
-
-            let decoded: unknown = null;
-            try {
-                decoded = decode(raw);
-            } catch {
-                decoded = null;
-            }
-
-            return {
-                status: response.status,
-                raw,
-                body: decoded,
-            };
+                async (response) => {
+                    const raw = Buffer.from(await response.arrayBuffer());
+                    signal?.throwIfAborted();
+                    let decoded: unknown = null;
+                    try {
+                        decoded = decode(raw);
+                    } catch {
+                        decoded = null;
+                    }
+                    return { status: response.status, raw, body: decoded };
+                },
+            );
         });
+        if (!signal) return await operation;
+
+        let onAbort: () => void = () => undefined;
+        const aborted = new Promise<never>((_resolve, reject) => {
+            onAbort = () => reject(signal.reason);
+            signal.addEventListener("abort", onAbort, { once: true });
+            if (signal.aborted) onAbort();
+        });
+        try {
+            return await Promise.race([operation, aborted]);
+        } finally {
+            signal.removeEventListener("abort", onAbort);
+        }
     }
 }
 
@@ -396,7 +416,7 @@ export async function* streamSegmentBytes(
     options: {
         label: string;
         mode: "full" | "range" | "slice";
-        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void;
+        onPhaseChange?: (phase: SlowChunkTransferPhase) => void;
         collectionId: string;
     },
 ): AsyncGenerator<Uint8Array> {
@@ -410,6 +430,7 @@ export async function* streamSegmentBytes(
         headers.Range = `bytes=${localStart}-${localEnd - 1}`;
     }
 
+    options.onPhaseChange?.("request-wait");
     yield* kd.service.transfer.requestPool.runPayloadStream(
         {
             collectionId: options.collectionId,
@@ -418,6 +439,7 @@ export async function* streamSegmentBytes(
             signal,
         },
         async function* () {
+            options.onPhaseChange?.("network");
             const response = await kd.http.payloadRequest(url, {
                 headers,
                 signal,

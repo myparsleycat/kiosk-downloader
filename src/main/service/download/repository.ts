@@ -1202,14 +1202,28 @@ export class DownloadRepository {
         });
     }
 
-    public resumeCollection(collectionId: string, force: boolean) {
+    public resumeCollection(collectionId: string, _force: boolean) {
+        if (this.ensureCollectionNotExpired(collectionId)) {
+            return;
+        }
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(
                 `UPDATE "download_collection"
                  SET "status" = 'queued', "updated_at" = ?, "error" = NULL
-                 WHERE "id" = ?`,
+                 WHERE "id" = ? AND "status" != 'completed'`,
                 [timestamp, collectionId],
+            );
+            tx.run(
+                `DELETE FROM "download_chunk"
+                 WHERE "status" = 'error' AND "file_id" IN (
+                     SELECT "id" FROM "download_file"
+                     WHERE "collection_id" = ?
+                       AND "selected" = 1
+                       AND "completed_elsewhere" = 0
+                       AND "status" IN ('paused', 'pending', 'error')
+                 )`,
+                [collectionId],
             );
             tx.run(
                 `UPDATE "download_file"
@@ -1219,27 +1233,10 @@ export class DownloadRepository {
                      "error" = NULL
                  WHERE "collection_id" = ?
                    AND "selected" = 1
-                   AND "status" = 'paused'`,
+                   AND "completed_elsewhere" = 0
+                   AND "status" IN ('paused', 'error')`,
                 [timestamp, collectionId],
             );
-            if (force) {
-                tx.run(
-                    `UPDATE "download_file"
-                     SET "status" = 'pending',
-                         "paused_by_user" = 0,
-                         "updated_at" = ?,
-                         "error" = NULL
-                     WHERE "collection_id" = ?
-                       AND "selected" = 1
-                       AND "status" = 'error'`,
-                    [timestamp, collectionId],
-                );
-                tx.run(
-                    `DELETE FROM "download_chunk"
-                     WHERE "collection_id" = ? AND "status" = 'error'`,
-                    [collectionId],
-                );
-            }
         });
     }
 
@@ -1261,9 +1258,15 @@ export class DownloadRepository {
         });
     }
 
-    public resumeFile(fileId: string, force: boolean) {
+    public resumeFile(fileId: string, _force: boolean) {
         const file = this.getFile(fileId);
-        if (!file || file.completedElsewhere === 1) {
+        if (
+            !file ||
+            file.selected !== 1 ||
+            file.completedElsewhere === 1 ||
+            !["paused", "pending", "error"].includes(file.status) ||
+            this.ensureCollectionNotExpired(file.collectionId)
+        ) {
             return;
         }
         const timestamp = nowIso();
@@ -1277,13 +1280,11 @@ export class DownloadRepository {
                  WHERE "id" = ? AND "status" IN ('paused', 'pending', 'error')`,
                 [timestamp, fileId],
             );
-            if (force) {
-                tx.run(
-                    `DELETE FROM "download_chunk"
-                     WHERE "file_id" = ? AND "status" = 'error'`,
-                    [fileId],
-                );
-            }
+            tx.run(
+                `DELETE FROM "download_chunk"
+                 WHERE "file_id" = ? AND "status" = 'error'`,
+                [fileId],
+            );
         });
     }
 

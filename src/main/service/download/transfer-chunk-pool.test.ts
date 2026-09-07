@@ -17,7 +17,11 @@ function createHarness(payloadRequest: ReturnType<typeof vi.fn>) {
         syncFileDownloadedBytes: vi.fn(),
         getFile: vi.fn(() => ({ downloadedBytes: 0 })),
     };
-    const getDownloadUrl = vi.fn(async () => ({ url: "https://cdn.test/file" }));
+    const getDownloadUrl = vi.fn(
+        async (_shareId: string, _remoteId: string, _authPw?: string, _signal?: AbortSignal) => ({
+            url: "https://cdn.test/file",
+        }),
+    );
     const pool = new TransferChunkPool({
         kd: {
             http: { payloadRequest },
@@ -179,4 +183,64 @@ describe("TransferChunkPool", () => {
         await expect(outcome).resolves.toBe("paused");
         expect((pool as unknown as { queue: unknown[] }).queue).toHaveLength(0);
     });
+});
+
+it("keeps permit wait out of the network stall and retry budget", async () => {
+    vi.useFakeTimers();
+    const payloadRequest = vi.fn(async (_url: string, options: { headers: { Range: string } }) =>
+        successResponse(options.headers.Range),
+    );
+    const { pool, requestPool, repository } = createHarness(payloadRequest);
+    requestPool.resize(2);
+    const context = {
+        collectionId: "other",
+        providerId: "kiosk-download",
+        direction: "download",
+    } as const;
+    const releases = [await requestPool.acquire(context), await requestPool.acquire(context)];
+    pool.start(2);
+    const item = registration();
+    const outcome = pool.register(item);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(payloadRequest).not.toHaveBeenCalled();
+    expect(repository.markChunkError).not.toHaveBeenCalled();
+    expect(item.controller.signal.aborted).toBe(false);
+    releases.forEach((release) => release());
+    await expect(outcome).resolves.toBe("completed");
+    expect(payloadRequest).toHaveBeenCalledOnce();
+});
+
+it("keeps CDN lookup out of the network stall budget", async () => {
+    vi.useFakeTimers();
+    const payloadRequest = vi.fn(async (_url: string, options: { headers: { Range: string } }) =>
+        successResponse(options.headers.Range),
+    );
+    const { pool, getDownloadUrl, repository } = createHarness(payloadRequest);
+    const lookup = Promise.withResolvers<{ url: string }>();
+    getDownloadUrl.mockImplementationOnce(() => lookup.promise);
+    pool.start(2);
+    const outcome = pool.register(registration());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(payloadRequest).not.toHaveBeenCalled();
+    expect(repository.markChunkError).not.toHaveBeenCalled();
+    lookup.resolve({ url: "https://cdn.test/file" });
+    await expect(outcome).resolves.toBe("completed");
+    expect(payloadRequest).toHaveBeenCalledOnce();
+});
+
+it("aborts a sibling CDN lookup when another chunk fails", async () => {
+    const { pool, getDownloadUrl } = createHarness(vi.fn());
+    getDownloadUrl.mockRejectedValueOnce(new Error("lookup failed"));
+    getDownloadUrl.mockImplementationOnce(
+        async (_shareId, _remoteId, _authPw, signal) =>
+            new Promise((_, reject) =>
+                signal?.addEventListener("abort", () => reject(signal.reason), { once: true }),
+            ),
+    );
+    pool.start(2);
+    const item = registration(2);
+    item.maxChunkRetries = 0;
+    await expect(pool.register(item)).resolves.toBe("failed");
+    expect(getDownloadUrl).toHaveBeenCalledTimes(2);
+    expect(item.controller.signal.aborted).toBe(true);
 });

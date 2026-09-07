@@ -11,6 +11,31 @@ describe("SlowChunkMonitor", () => {
         vi.useRealTimers();
     });
 
+    it.each(["control-wait", "request-wait"] as const)(
+        "excludes %s and starts a fresh network deadline after waiting",
+        (phase) => {
+            const monitor = new SlowChunkMonitor();
+            const controller = new AbortController();
+            const transfer = monitor.register({
+                fileId: "waiting",
+                chunkIndex: 0,
+                chunkSize: 1024,
+                attemptController: controller,
+                slowReconnects: 0,
+                phase,
+            });
+            vi.advanceTimersByTime(60_000);
+            expect(controller.signal.aborted).toBe(false);
+            monitor.setPhase(transfer.key, "network");
+            vi.advanceTimersByTime(14_000);
+            expect(controller.signal.aborted).toBe(false);
+            vi.advanceTimersByTime(1_000);
+            expect(transfer.detect).toBe("stall");
+            expect(controller.signal.aborted).toBe(true);
+            monitor.unregister(transfer.key);
+        },
+    );
+
     it("aborts a stalled chunk after observe and stall timeout", () => {
         const monitor = new SlowChunkMonitor();
         const attemptController = new AbortController();

@@ -207,10 +207,12 @@ export class WorkuploadDownloadRunner {
                         file.remoteId,
                         controller.signal,
                     );
-                    return {
-                        session,
-                        downloadUrl: await session.resolveDownloadUrl(file.remoteId),
-                    };
+                    const downloadUrl = await session.resolveDownloadUrl(
+                        file.remoteId,
+                        controller.signal,
+                    );
+                    throwIfAborted(controller.signal);
+                    return { session, downloadUrl };
                 });
                 logContext.stage = "cdn-request";
                 const payloadResult = await this.deps.runPayload(
@@ -379,6 +381,7 @@ export class WorkuploadDownloadRunner {
         fileKey: string,
         signal?: AbortSignal,
     ) {
+        throwIfAborted(signal);
         const cached = this.sessions.get(collection.id);
         if (cached) {
             return cached;
@@ -388,6 +391,7 @@ export class WorkuploadDownloadRunner {
             password: collection.passwordPlain ?? undefined,
             signal,
         });
+        throwIfAborted(signal);
         this.sessions.set(collection.id, session);
         return session;
     }
@@ -646,8 +650,8 @@ function isActiveFileDownloadStatus(status: DownloadFileRow["status"] | undefine
     return status === "downloading" || status === "inflating";
 }
 
-function throwIfAborted(signal: AbortSignal) {
-    if (signal.aborted) {
+function throwIfAborted(signal?: AbortSignal) {
+    if (signal?.aborted) {
         throw new DOMException("The operation was aborted.", "AbortError");
     }
 }

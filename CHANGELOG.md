@@ -1,3 +1,11 @@
+## [1.11.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.11.0...v1.11.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **download:** cancel queued control requests immediately ([73354bf](https://github.com/myparsleycat/kiosk-downloader/commit/73354bf9a7a1cc24a9f1558da34204af54a31177))
+* **download:** recover concurrent downloads without restarting ([546357d](https://github.com/myparsleycat/kiosk-downloader/commit/546357dfc6930bbac2b708f73f432f3baf87b645))
+
 # [1.11.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.10.0...v1.11.0) (2026-09-06)
 
 
