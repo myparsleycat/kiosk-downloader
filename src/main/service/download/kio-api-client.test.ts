@@ -152,9 +152,13 @@ describe("KioApiClient control cancellation", () => {
             client.getSegments("bb".repeat(16), "cat", controller.signal),
         ).rejects.toMatchObject({ name: "AbortError" });
         controller.abort();
-        release();
-        await Promise.all(running);
-        await queued;
+        try {
+            await queued;
+            expect(request).toHaveBeenCalledTimes(4);
+        } finally {
+            release();
+            await Promise.all(running);
+        }
         expect(request).toHaveBeenCalledTimes(4);
     });
 
