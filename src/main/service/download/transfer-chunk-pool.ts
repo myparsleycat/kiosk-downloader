@@ -12,6 +12,7 @@ import {
     SLOW_CHUNK_MAX_RECONNECTS,
     SLOW_CHUNK_THRESHOLD_RATIO,
     SlowChunkMonitor,
+    type SlowChunkTransferPhase,
     isAbortError,
     sleepWithAbort,
     slowReconnectDelayMs,
@@ -222,7 +223,7 @@ export class TransferChunkPool {
     }
 
     private tryCompleteSession(session: TransferSession) {
-        if (session.inFlightChunks > 0) {
+        if (session.inFlightChunks > 0 || this.sessions.get(session.id) !== session) {
             return;
         }
         if (!session.aborted && !session.failed && session.remainingChunks > 0) {
@@ -270,18 +271,30 @@ export class TransferChunkPool {
                         session.aborted = true;
                     } else {
                         session.failed = true;
+                        session.registration.controller.abort();
                         this.removeSessionItemsFromQueue(session.id);
                         const message = toErrorMessage(error);
-                        this.deps.repository.markFileStatus(session.id, "error", message);
                         this.deps.kd.logger.error(
                             {
                                 stage: "transfer-chunk",
+                                provider: "transfer",
+                                collectionId: session.collectionId,
+                                inFlightChunks: session.inFlightChunks,
                                 fileId: session.id,
                                 chunkIndex: item.chunk.chunkIndex,
                                 message,
                             },
                             "TransferChunkPool:processChunk",
                         );
+                        this.deps.kd.logger.error(error, "TransferChunkPool:processChunk");
+                        try {
+                            this.deps.repository.markFileStatus(session.id, "error", message);
+                        } catch (cleanupError) {
+                            this.deps.kd.logger.error(
+                                cleanupError,
+                                "TransferChunkPool:markFileError",
+                            );
+                        }
                     }
                 } finally {
                     session.inFlightChunks = Math.max(0, session.inFlightChunks - 1);
@@ -326,6 +339,7 @@ export class TransferChunkPool {
                 }
             };
             const transfer = this.slowChunkMonitor.register({
+                phase: "control-wait",
                 fileId: registration.file.id,
                 chunkIndex: chunk.chunkIndex,
                 chunkSize: chunk.size,
@@ -420,6 +434,9 @@ export class TransferChunkPool {
                     this.deps.kd.logger.warn(
                         {
                             channel: "transfer-download",
+                            collectionId: session.collectionId,
+                            phase: transfer.phase,
+                            inFlightChunks: session.inFlightChunks,
                             reason: "slow-chunk-reconnect",
                             detect: detect ?? "relative",
                             fileId: registration.file.id,
@@ -454,6 +471,9 @@ export class TransferChunkPool {
                     this.deps.kd.logger.warn(
                         {
                             channel: "transfer-download",
+                            collectionId: session.collectionId,
+                            phase: transfer.phase,
+                            inFlightChunks: session.inFlightChunks,
                             reason: "slow-chunk-exhausted",
                             detect: detect ?? "relative",
                             fileId: registration.file.id,
@@ -480,6 +500,9 @@ export class TransferChunkPool {
                     this.deps.kd.logger.warn(
                         {
                             channel: "transfer-download",
+                            collectionId: session.collectionId,
+                            phase: transfer.phase,
+                            inFlightChunks: session.inFlightChunks,
                             reason: "provider-rate-limit",
                             fileId: registration.file.id,
                             chunkIndex: chunk.chunkIndex,
@@ -513,6 +536,9 @@ export class TransferChunkPool {
                     this.deps.kd.logger.warn(
                         {
                             channel: "transfer-download",
+                            collectionId: session.collectionId,
+                            phase: transfer.phase,
+                            inFlightChunks: session.inFlightChunks,
                             fileId: registration.file.id,
                             chunkIndex: chunk.chunkIndex,
                             offset: chunk.offset,
@@ -537,6 +563,22 @@ export class TransferChunkPool {
                     continue;
                 }
 
+                this.deps.kd.logger.error(
+                    {
+                        channel: "transfer-download",
+                        stage: "fetch-encrypted-range",
+                        collectionId: session.collectionId,
+                        fileId: registration.file.id,
+                        chunkIndex: chunk.chunkIndex,
+                        phase: transfer.phase,
+                        attempt: errorAttempt,
+                        maxRetries: registration.maxChunkRetries,
+                        inFlightChunks: session.inFlightChunks,
+                        message,
+                    },
+                    "TransferChunkPool:fetchEncryptedRange",
+                );
+                this.deps.kd.logger.error(error, "TransferChunkPool:fetchEncryptedRange");
                 this.deps.repository.markChunkError(chunk, message);
                 if (abortReason === "slow-chunk" || !(error instanceof Error)) {
                     throw new Error(message);
@@ -560,7 +602,12 @@ export class TransferChunkPool {
         const { collection, file, authPw } = session.registration;
         let result: Awaited<ReturnType<TransferItApiClient["getDownloadUrl"]>>;
         try {
-            result = await this.deps.api.getDownloadUrl(collection.shareId, file.remoteId, authPw);
+            result = await this.deps.api.getDownloadUrl(
+                collection.shareId,
+                file.remoteId,
+                authPw,
+                signal,
+            );
         } catch (error) {
             if (error instanceof TransferRateLimitError) {
                 this.deps.kd.service.transfer.requestPool.reportRateLimit(
@@ -575,6 +622,7 @@ export class TransferChunkPool {
             }
             throw error;
         }
+        signal.throwIfAborted();
         session.cdnUrl = result.url;
         return result.url;
     }
@@ -585,8 +633,9 @@ export class TransferChunkPool {
         signal: AbortSignal,
         alreadyWritten: number,
         onTransferProgress?: (transferredBytes: number) => void,
-        onPhaseChange?: (phase: "network" | "bandwidth-wait") => void,
+        onPhaseChange?: (phase: SlowChunkTransferPhase) => void,
     ) {
+        onPhaseChange?.("control-wait");
         let url = await this.ensureCdnUrl(session, signal);
         const requestStart = chunk.offset + alreadyWritten;
         const range = `bytes=${requestStart}-${chunk.offset + chunk.size - 1}`;
@@ -595,6 +644,7 @@ export class TransferChunkPool {
 
         for (let requestAttempt = 0; requestAttempt < 2; requestAttempt += 1) {
             try {
+                onPhaseChange?.("request-wait");
                 yield* deps.kd.service.transfer.requestPool.runPayloadStream(
                     {
                         collectionId: session.collectionId,
@@ -603,6 +653,7 @@ export class TransferChunkPool {
                         signal,
                     },
                     async function* () {
+                        onPhaseChange?.("network");
                         const response = await deps.kd.http.payloadRequest(url, {
                             method: "GET",
                             headers: { Range: range },
@@ -719,6 +770,7 @@ export class TransferChunkPool {
                     throw error;
                 }
                 session.cdnUrl = null;
+                onPhaseChange?.("control-wait");
                 url = await this.ensureCdnUrl(session, signal);
             }
         }

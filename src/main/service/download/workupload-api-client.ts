@@ -398,9 +398,9 @@ export class WorkuploadSession {
         private readonly allowedFileKeys = new Set(source.files.map((file) => file.fileKey)),
     ) {}
 
-    public async resolveDownloadUrl(fileKey: string) {
+    public async resolveDownloadUrl(fileKey: string, signal?: AbortSignal) {
         this.requireChild(fileKey);
-        const response = await request(
+        const envelope = await request(
             this.kd,
             this.jar,
             `${ORIGIN}/api/file/getDownloadServer/${fileKey}`,
@@ -410,9 +410,10 @@ export class WorkuploadSession {
                     Referer: this.referer,
                     "X-Requested-With": "XMLHttpRequest",
                 },
+                signal,
             },
+            (response) => readJson(response, `resolve-cdn ${fileKey}`),
         );
-        const envelope = await readJson(response, `resolve-cdn ${fileKey}`);
         const record = asRecord(envelope);
         const data = asRecord(record?.data);
         if (record?.success !== true || typeof data?.url !== "string") {
@@ -435,7 +436,7 @@ export class WorkuploadSession {
     }
 
     public async requestDownload(fileKey: string, options: RequestDownloadOptions = {}) {
-        const url = await this.resolveDownloadUrl(fileKey);
+        const url = await this.resolveDownloadUrl(fileKey, options.signal);
         return await this.requestResolvedDownload(fileKey, url, options);
     }
 
@@ -463,19 +464,21 @@ export class WorkuploadSession {
         }
         return {
             url,
-            response: await request(
-                this.kd,
-                this.jar,
-                url,
-                {
-                    headers,
-                    signal: options.signal
-                        ? AbortSignal.any([options.signal, requestController.signal])
-                        : requestController.signal,
-                    timeout: WORKUPLOAD_CDN_HEADER_TIMEOUT_MS,
-                },
-                "payload",
-            ),
+            response: await this.kd.http
+                .payloadRequest(
+                    url,
+                    requestOptions(this.jar, url, {
+                        headers,
+                        signal: options.signal
+                            ? AbortSignal.any([options.signal, requestController.signal])
+                            : requestController.signal,
+                        timeout: WORKUPLOAD_CDN_HEADER_TIMEOUT_MS,
+                    }),
+                )
+                .then((response) => {
+                    this.jar.store(response, url);
+                    return response;
+                }),
             abort: () => requestController.abort(),
         };
     }
@@ -663,28 +666,30 @@ function asRecord(value: unknown) {
     return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
-async function request(
+async function request<T>(
     kd: KioskDownloader,
     jar: CookieJar,
     url: string,
-    options: PayloadRequestOptions = {},
-    transport: "control" | "payload" = "control",
+    options: PayloadRequestOptions,
+    consume: (response: Response) => Promise<T>,
 ) {
+    return await kd.http.consumeControlResponse(
+        url,
+        requestOptions(jar, url, options),
+        async (response) => {
+            jar.store(response, url);
+            return await consume(response);
+        },
+    );
+}
+
+function requestOptions(jar: CookieJar, url: string, options: PayloadRequestOptions) {
     const headers = new Headers(options.headers);
     headers.set("Connection", "close");
     if (!headers.has("Accept")) headers.set("Accept", "*/*");
     const cookieHeader = jar.header(url);
     if (cookieHeader) headers.set("Cookie", cookieHeader);
-    const response = await kd.http[transport === "payload" ? "payloadRequest" : "controlRequest"](
-        url,
-        {
-            ...options,
-            headers,
-            redirect: "manual",
-        },
-    );
-    jar.store(response, url);
-    return response;
+    return { ...options, headers, redirect: "manual" as const };
 }
 
 async function readText(response: Response, stage: string) {
@@ -717,11 +722,19 @@ async function loadPage(
     signal?: AbortSignal,
 ) {
     for (let attempt = 0; ; attempt += 1) {
-        const response = await request(kd, jar, url, {
-            headers: { Referer: referer },
-            signal,
-        });
-        const html = await readText(response, attempt === 0 ? stage : `${stage} retry ${attempt}`);
+        const { status, html } = await request(
+            kd,
+            jar,
+            url,
+            {
+                headers: { Referer: referer },
+                signal,
+            },
+            async (response) => ({
+                status: response.status,
+                html: await readText(response, attempt === 0 ? stage : `${stage} retry ${attempt}`),
+            }),
+        );
         if (!html.includes("/puzzle")) return html;
         // Workupload always serves the captcha page on first load, so this
         // fires on the normal flow; keep it at debug and reserve warn for
@@ -731,7 +744,7 @@ async function loadPage(
                 stage,
                 url,
                 attempt,
-                status: response.status,
+                status,
                 responseLength: html.length,
                 responseHead: html.slice(0, 200),
             },
@@ -819,23 +832,37 @@ async function loadProtectedPage(
     }
 
     const name = passwordFormName(resource);
-    const response = await request(kd, jar, resource.sourceUrl, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            Referer: resource.sourceUrl,
+    const result = await request(
+        kd,
+        jar,
+        resource.sourceUrl,
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+                Referer: resource.sourceUrl,
+            },
+            body: new URLSearchParams({
+                [`${name}[password]`]: password,
+                [`${name}[submit]`]: "",
+                [`${name}[key]`]: resource.key,
+            }),
+            signal,
         },
-        body: new URLSearchParams({
-            [`${name}[password]`]: password,
-            [`${name}[submit]`]: "",
-            [`${name}[key]`]: resource.key,
-        }),
-        signal,
-    });
+        async (response) => {
+            if (response.status >= 300 && response.status < 400) {
+                const location = response.headers.get("location");
+                await response.body?.cancel();
+                return { location, html: null };
+            }
+            return {
+                location: null,
+                html: await readText(response, `password POST /${resource.kind}/${resource.key}`),
+            };
+        },
+    );
     const html =
-        response.status >= 300 && response.status < 400
-            ? await loadPasswordRedirect(kd, jar, response, resource, signal)
-            : await readText(response, `password POST /${resource.kind}/${resource.key}`);
+        result.html ?? (await loadPasswordRedirect(kd, jar, result.location, resource, signal));
     if (
         html.includes("The password you entered is incorrect.") ||
         hasPasswordForm(html, resource)
@@ -848,12 +875,10 @@ async function loadProtectedPage(
 async function loadPasswordRedirect(
     kd: KioskDownloader,
     jar: CookieJar,
-    response: Response,
+    location: string | null,
     resource: WorkuploadResource,
     signal?: AbortSignal,
 ) {
-    const location = response.headers.get("location");
-    await response.body?.cancel().catch(() => undefined);
     if (!location) {
         throw new Error(`Workupload ${resource.kind} password redirect is missing a location.`);
     }
@@ -940,28 +965,43 @@ async function passSecurityCheck(
     referer: string,
     signal?: AbortSignal,
 ) {
-    const puzzleResponse = await request(kd, jar, `${ORIGIN}/puzzle`, {
-        headers: {
-            Accept: AJAX_ACCEPT,
-            Referer: referer,
-            "X-Requested-With": "XMLHttpRequest",
+    const puzzleResponse = await request(
+        kd,
+        jar,
+        `${ORIGIN}/puzzle`,
+        {
+            headers: {
+                Accept: AJAX_ACCEPT,
+                Referer: referer,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            signal,
         },
-        signal,
-    });
-    const puzzle = parsePuzzle(await readJson(puzzleResponse, "puzzle"));
+        async (response) => ({ status: response.status, body: await readJson(response, "puzzle") }),
+    );
+    const puzzle = parsePuzzle(puzzleResponse.body);
     const captchaValue = await solvePuzzle(puzzle, signal);
-    const response = await request(kd, jar, `${ORIGIN}/captcha`, {
-        method: "POST",
-        headers: {
-            Accept: AJAX_ACCEPT,
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            Referer: referer,
-            "X-Requested-With": "XMLHttpRequest",
+    const response = await request(
+        kd,
+        jar,
+        `${ORIGIN}/captcha`,
+        {
+            method: "POST",
+            headers: {
+                Accept: AJAX_ACCEPT,
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                Referer: referer,
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            body: new URLSearchParams({ captcha: captchaValue }),
+            signal,
         },
-        body: new URLSearchParams({ captcha: captchaValue }),
-        signal,
-    });
-    const body = await readText(response, "captcha");
+        async (response) => ({
+            status: response.status,
+            body: await readText(response, "captcha"),
+        }),
+    );
+    const body = response.body;
     if (response.status !== 200 || body.trim() !== "") {
         kd.logger.warn(
             {
@@ -1006,9 +1046,8 @@ async function activateFileSession(
 ) {
     const first = await loadPage(kd, jar, startUrl, "activate GET /start/<key>", fileUrl, signal);
     if (first.includes("/api/file/getDownloadServer/")) return;
-    await readText(
-        await request(kd, jar, fileUrl, { headers: { Referer: startUrl }, signal }),
-        "activate GET /file/<key>",
+    await request(kd, jar, fileUrl, { headers: { Referer: startUrl }, signal }, (response) =>
+        readText(response, "activate GET /file/<key>"),
     );
     const second = await loadPage(
         kd,

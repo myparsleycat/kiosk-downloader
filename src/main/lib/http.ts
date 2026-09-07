@@ -366,6 +366,65 @@ export class HTTP {
         return this.executeRequest(url, options, options.fetch ?? (await this.controlFetch(url)));
     }
 
+    public async consumeControlResponse<T>(
+        url: string,
+        options: ControlRequestOptions,
+        consume: (response: Response) => Promise<T>,
+    ): Promise<T> {
+        options.signal?.throwIfAborted();
+        const controller = new AbortController();
+        let response: Response | undefined;
+        const cancelled = new Promise<never>((_, reject) => {
+            controller.signal.addEventListener("abort", () => reject(controller.signal.reason), {
+                once: true,
+            });
+        });
+        const onAbort = () => controller.abort(options.signal?.reason);
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        const timeoutId =
+            options.timeout === false
+                ? undefined
+                : setTimeout(() => {
+                      const logUrl = new URL(url);
+                      logUrl.username = "";
+                      logUrl.password = "";
+                      logUrl.search = "";
+                      logUrl.hash = "";
+                      controller.abort(
+                          new TimeoutError(new Request(logUrl, { method: options.method })),
+                      );
+                  }, options.timeout ?? DEFAULT_TIMEOUT_MS);
+        const cancelUnreadBody = () => {
+            if (response?.body && !response.body.locked) {
+                // A body already errored by request abort can reject cancellation too.
+                void response.body.cancel().catch(() => undefined);
+            }
+        };
+
+        try {
+            return await Promise.race([
+                cancelled,
+                (async () => {
+                    response = await this.controlRequest(url, {
+                        ...options,
+                        timeout: false,
+                        signal: controller.signal,
+                    });
+                    if (controller.signal.aborted) {
+                        cancelUnreadBody();
+                        controller.signal.throwIfAborted();
+                    }
+                    return await consume(response);
+                })(),
+            ]);
+        } finally {
+            clearTimeout(timeoutId);
+            options.signal?.removeEventListener("abort", onAbort);
+            controller.abort();
+            cancelUnreadBody();
+        }
+    }
+
     public async payloadRequest(url: string, options: PayloadRequestOptions = {}) {
         return this.executeRequest(url, options, options.fetch ?? (await this.payloadFetch(url)));
     }

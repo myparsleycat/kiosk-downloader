@@ -1,5 +1,11 @@
 export type SlowChunkDetect = "stall" | "relative";
-export type SlowChunkTransferPhase = "network" | "bandwidth-wait" | "disk-write" | "processing";
+export type SlowChunkTransferPhase =
+    | "control-wait"
+    | "request-wait"
+    | "network"
+    | "bandwidth-wait"
+    | "disk-write"
+    | "processing";
 
 export type InFlightChunkTransfer = {
     key: string;
@@ -153,6 +159,7 @@ export class SlowChunkMonitor {
         chunkSize: number;
         cohortKey?: string;
         initialTransferredBytes?: number;
+        phase?: SlowChunkTransferPhase;
         attemptController: AbortController;
         slowReconnects: number;
     }) {
@@ -179,7 +186,7 @@ export class SlowChunkMonitor {
             detect: null,
             chunkSpeedBps: 0,
             peerMedianBps: 0,
-            phase: "network",
+            phase: input.phase ?? "network",
             phaseStartedAt: now,
         };
         this.inFlightTransfers.set(key, transfer);
@@ -275,7 +282,7 @@ export class SlowChunkMonitor {
                 continue;
             }
 
-            const observedMs = now - entry.startedAt;
+            const observedMs = now - Math.max(entry.startedAt, entry.phaseStartedAt);
             if (observedMs < SLOW_CHUNK_MIN_OBSERVE_MS) {
                 entry.slowTickCount = 0;
                 continue;

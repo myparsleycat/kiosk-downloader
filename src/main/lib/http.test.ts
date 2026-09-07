@@ -315,6 +315,188 @@ describe("HTTP transports", () => {
         expect(response.status).toBe(200);
     });
 
+    it.each([false, true])(
+        "bounds control body consumption even when bytes dribble (%s)",
+        async (dribble) => {
+            vi.useFakeTimers();
+            let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+            let request: Request | undefined;
+            const body = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    bodyController = controller;
+                },
+            });
+            const http = new HTTP({} as never);
+            const pending = expect(
+                http.consumeControlResponse(
+                    "https://example.com",
+                    {
+                        timeout: 1_000,
+                        fetch: vi.fn(async (input) => {
+                            request = input as Request;
+                            return new Response(body);
+                        }),
+                    },
+                    (response) => response.text(),
+                ),
+            ).rejects.toBeInstanceOf(TimeoutError);
+            await vi.advanceTimersByTimeAsync(500);
+            if (dribble) bodyController?.enqueue(new TextEncoder().encode("partial"));
+            await vi.advanceTimersByTimeAsync(500);
+            await pending;
+            expect(request?.signal.aborted).toBe(true);
+            expect(vi.getTimerCount()).toBe(0);
+            bodyController?.close();
+        },
+    );
+
+    it("omits query secrets from control deadline errors", async () => {
+        vi.useFakeTimers();
+        const http = new HTTP({} as never);
+        const pending = expect(
+            http.consumeControlResponse(
+                "https://example.com/control?pw=secret#token",
+                { timeout: 1, fetch: vi.fn(() => new Promise<Response>(() => undefined)) },
+                (response) => response.text(),
+            ),
+        ).rejects.toMatchObject({
+            name: "TimeoutError",
+            message: "Request timed out: GET https://example.com/control",
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        await pending;
+    });
+
+    it("uses the default deadline for complete control responses", async () => {
+        vi.useFakeTimers();
+        const http = new HTTP({} as never);
+        const pending = expect(
+            http.consumeControlResponse(
+                "https://example.com",
+                {
+                    fetch: vi.fn(() => new Promise<Response>(() => undefined)),
+                },
+                (response) => response.text(),
+            ),
+        ).rejects.toBeInstanceOf(TimeoutError);
+        await vi.advanceTimersByTimeAsync(100_000);
+        await pending;
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("aborts a slow consumer promptly and removes the caller listener", async () => {
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+        const reason = new Error("paused");
+        const cancel = vi.fn();
+        const consume = vi.fn(() => new Promise<string>(() => undefined));
+        const http = new HTTP({} as never);
+        const pending = expect(
+            http.consumeControlResponse(
+                "https://example.com",
+                {
+                    signal: controller.signal,
+                    fetch: vi.fn(async () => new Response(new ReadableStream({ cancel }))),
+                },
+                consume,
+            ),
+        ).rejects.toBe(reason);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(consume).toHaveBeenCalledOnce();
+        controller.abort(reason);
+        await pending;
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("cancels a late response without invoking its consumer after abort", async () => {
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        const response = Promise.withResolvers<Response>();
+        const cancel = vi.fn();
+        const consume = vi.fn(async () => "unexpected");
+        const http = new HTTP({} as never);
+        const pending = expect(
+            http.consumeControlResponse(
+                "https://example.com",
+                {
+                    signal: controller.signal,
+                    fetch: vi.fn(() => response.promise),
+                },
+                consume,
+            ),
+        ).rejects.toMatchObject({ name: "AbortError" });
+        await vi.advanceTimersByTimeAsync(0);
+        controller.abort();
+        await pending;
+        response.resolve(new Response(new ReadableStream({ cancel })));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(consume).not.toHaveBeenCalled();
+        expect(cancel).toHaveBeenCalledOnce();
+    });
+
+    it("does not start an already aborted control request", async () => {
+        const controller = new AbortController();
+        const reason = new Error("paused");
+        controller.abort(reason);
+        const fetch = vi.fn();
+        const consume = vi.fn();
+        await expect(
+            new HTTP({} as never).consumeControlResponse(
+                "https://example.com",
+                {
+                    signal: controller.signal,
+                    fetch,
+                },
+                consume,
+            ),
+        ).rejects.toBe(reason);
+        expect(fetch).not.toHaveBeenCalled();
+        expect(consume).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+        "cleans unread control bodies and preserves consumer results/errors (%s)",
+        async (fail) => {
+            vi.useFakeTimers();
+            const cancel = vi.fn();
+            const error = new Error("parse failure");
+            const pending = new HTTP({} as never).consumeControlResponse(
+                "https://example.com",
+                {
+                    fetch: vi.fn(async () => new Response(new ReadableStream({ cancel }))),
+                },
+                async () => {
+                    if (fail) throw error;
+                    return { ok: true };
+                },
+            );
+            if (fail) await expect(pending).rejects.toBe(error);
+            else await expect(pending).resolves.toEqual({ ok: true });
+            expect(cancel).toHaveBeenCalledOnce();
+            expect(vi.getTimerCount()).toBe(0);
+        },
+    );
+
+    it("allows a full control response deadline to be disabled", async () => {
+        vi.useFakeTimers();
+        const consumed = Promise.withResolvers<string>();
+        const pending = new HTTP({} as never).consumeControlResponse(
+            "https://example.com",
+            {
+                timeout: false,
+                fetch: vi.fn(async () => new Response()),
+            },
+            () => consumed.promise,
+        );
+        await vi.advanceTimersByTimeAsync(200_000);
+        expect(vi.getTimerCount()).toBe(0);
+        consumed.resolve("done");
+        await expect(pending).resolves.toBe("done");
+    });
+
     it("reports payload upload progress with transferred bytes and percent", async () => {
         const progress: Array<{ percent: number; transferredBytes: number; totalBytes: number }> =
             [];
