@@ -1,31 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { processChunked, trimTrailingNul } from "./util-pure";
-
-const NUL = String.fromCharCode(0);
-
-describe("trimTrailingNul", () => {
-    it("strips a single trailing NUL", () => {
-        expect(trimTrailingNul(`C:\\path\\file${NUL}`)).toBe("C:\\path\\file");
-    });
-
-    it("strips multiple trailing NULs", () => {
-        expect(trimTrailingNul(`C:\\path${NUL}${NUL}${NUL}`)).toBe("C:\\path");
-    });
-
-    it("leaves embedded NULs untouched", () => {
-        expect(trimTrailingNul(`a${NUL}b${NUL}`)).toBe(`a${NUL}b`);
-    });
-
-    it("returns an empty string when the input is all NULs", () => {
-        expect(trimTrailingNul(NUL.repeat(5))).toBe("");
-    });
-
-    it("returns the value unchanged when there is no trailing NUL", () => {
-        expect(trimTrailingNul("plain")).toBe("plain");
-        expect(trimTrailingNul("")).toBe("");
-    });
-});
+import { processChunked } from "./util-pure";
 
 describe("processChunked", () => {
     it("invokes the processor for every item when below the chunk boundary", async () => {

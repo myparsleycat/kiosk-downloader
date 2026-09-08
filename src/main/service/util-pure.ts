@@ -1,13 +1,3 @@
-export function trimTrailingNul(value: string) {
-    let end = value.length;
-
-    while (end > 0 && value.charCodeAt(end - 1) === 0) {
-        end--;
-    }
-
-    return value.slice(0, end);
-}
-
 export async function processChunked<T>(
     items: T[],
     processor: (item: T) => void,

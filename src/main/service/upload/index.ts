@@ -372,7 +372,7 @@ export class UploadService {
         if (!collection?.shareLink) {
             throw new Error("공유 링크가 아직 생성되지 않았습니다.");
         }
-        clipboard.writeText(collection.shareLink);
+        await clipboard.writeText(collection.shareLink);
     }
 
     public async saveShareInfo(collectionId: string) {
@@ -447,7 +447,7 @@ export class UploadService {
             this.repository.getBundle(collectionId)?.passwordPlain ??
             this.repository.getCollection(collectionId)?.passwordPlain;
         if (!password) throw new Error("복사할 비밀번호가 없습니다.");
-        clipboard.writeText(password);
+        await clipboard.writeText(password);
     }
 
     public async replaceFailedCollection(bundleId: string) {

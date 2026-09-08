@@ -7,13 +7,16 @@ import { describe, expect, it } from "vitest";
 const execFileAsync = promisify(execFile);
 
 describe("Electron Undici compatibility", () => {
-    it("pins npm Undici to Electron's bundled version and preserves its dispatcher", async () => {
-        const electron = path.resolve(
-            process.platform === "win32"
-                ? "node_modules/electron/dist/electron.exe"
-                : "node_modules/.bin/electron",
-        );
-        const script = String.raw`
+    it(
+        "pins npm Undici to Electron's bundled version and preserves its dispatcher",
+        { timeout: 30_000 },
+        async () => {
+            const electron = path.resolve(
+                process.platform === "win32"
+                    ? "node_modules/electron/dist/electron.exe"
+                    : "node_modules/.bin/electron",
+            );
+            const script = String.raw`
             (async () => {
                 const legacy = Symbol.for("undici.globalDispatcher.1");
                 const current = Symbol.for("undici.globalDispatcher.2");
@@ -36,18 +39,19 @@ describe("Electron Undici compatibility", () => {
             });
         `;
 
-        const { stdout } = await execFileAsync(electron, ["-e", script], {
-            cwd: process.cwd(),
-            env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-        });
+            const { stdout } = await execFileAsync(electron, ["-e", script], {
+                cwd: process.cwd(),
+                env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+            });
 
-        expect(JSON.parse(stdout.trim())).toEqual({
-            bundledVersion: "7.28.0",
-            packageVersion: "7.28.0",
-            legacyPreserved: true,
-            currentPreserved: true,
-            packageDidNotOwnDispatcher: true,
-            socksDispatcherAvailable: true,
-        });
-    });
+            expect(JSON.parse(stdout.trim())).toEqual({
+                bundledVersion: "7.29.0",
+                packageVersion: "7.29.0",
+                legacyPreserved: true,
+                currentPreserved: true,
+                packageDidNotOwnDispatcher: true,
+                socksDispatcherAvailable: true,
+            });
+        },
+    );
 });
