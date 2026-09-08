@@ -1,6 +1,52 @@
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
-import { processChunked } from "./util-pure";
+import { filePathsFromUriList, processChunked } from "./util-pure";
+
+describe("filePathsFromUriList", () => {
+    it("converts file URIs to filesystem paths", () => {
+        expect(filePathsFromUriList("file:///tmp/a.txt")).toEqual([
+            fileURLToPath("file:///tmp/a.txt"),
+        ]);
+        expect(filePathsFromUriList("file:///C:/Downloads/a.txt")).toEqual([
+            fileURLToPath("file:///C:/Downloads/a.txt"),
+        ]);
+    });
+
+    it("keeps multiple file URIs in list order", () => {
+        expect(filePathsFromUriList("file:///tmp/a.txt\r\nfile:///tmp/b.txt")).toEqual([
+            fileURLToPath("file:///tmp/a.txt"),
+            fileURLToPath("file:///tmp/b.txt"),
+        ]);
+    });
+
+    it("skips comments, blanks, and non-file URIs", () => {
+        expect(
+            filePathsFromUriList(
+                [
+                    "# comment",
+                    "",
+                    "  ",
+                    "http://example.com",
+                    "file:///tmp/a.txt",
+                    "https://example.com",
+                ].join("\n"),
+            ),
+        ).toEqual([fileURLToPath("file:///tmp/a.txt")]);
+    });
+
+    it("skips malformed file URIs", () => {
+        expect(filePathsFromUriList("file://[\nfile:///tmp/a.txt")).toEqual([
+            fileURLToPath("file:///tmp/a.txt"),
+        ]);
+    });
+
+    it("returns an empty array when there are no file URIs", () => {
+        expect(filePathsFromUriList("")).toEqual([]);
+        expect(filePathsFromUriList("# only a comment")).toEqual([]);
+    });
+});
 
 describe("processChunked", () => {
     it("invokes the processor for every item when below the chunk boundary", async () => {

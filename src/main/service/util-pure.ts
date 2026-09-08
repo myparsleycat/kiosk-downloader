@@ -1,3 +1,19 @@
+import { fileURLToPath } from "node:url";
+
+export function filePathsFromUriList(uriList: string) {
+    const paths: string[] = [];
+    for (const line of uriList.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("file://")) continue;
+        try {
+            paths.push(fileURLToPath(trimmed));
+        } catch {
+            // Skip malformed file URIs from the OS clipboard list.
+        }
+    }
+    return paths;
+}
+
 export async function processChunked<T>(
     items: T[],
     processor: (item: T) => void,

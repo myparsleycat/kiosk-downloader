@@ -17,7 +17,7 @@ import type {
     UploadTreeFile,
 } from "@shared/types";
 import { normalizePath } from "@shared/utils";
-import { app, clipboard, Notification } from "electron";
+import { app, Notification } from "electron";
 import fg from "fast-glob";
 import type { Entry } from "fast-glob";
 import fse from "fs-extra";
@@ -32,7 +32,7 @@ import {
     type ExtendedShareSplitFile,
 } from "../extended-share";
 import { toOsProgressTransfer } from "../os-progress-bar";
-import { showSaveDialog } from "../util";
+import { copyStr, showSaveDialog } from "../util";
 import { KioUploadClient } from "./kio-upload-client";
 import { UploadTransferMetrics } from "./metrics";
 import { pieceToPersistedFile } from "./preparation-core";
@@ -372,7 +372,7 @@ export class UploadService {
         if (!collection?.shareLink) {
             throw new Error("공유 링크가 아직 생성되지 않았습니다.");
         }
-        await clipboard.writeText(collection.shareLink);
+        await copyStr(collection.shareLink);
     }
 
     public async saveShareInfo(collectionId: string) {
@@ -447,7 +447,7 @@ export class UploadService {
             this.repository.getBundle(collectionId)?.passwordPlain ??
             this.repository.getCollection(collectionId)?.passwordPlain;
         if (!password) throw new Error("복사할 비밀번호가 없습니다.");
-        await clipboard.writeText(password);
+        await copyStr(password);
     }
 
     public async replaceFailedCollection(bundleId: string) {

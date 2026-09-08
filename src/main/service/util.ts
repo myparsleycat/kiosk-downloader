@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import isDev from "@main/lib/isDev";
 import { isPortable } from "@main/lib/isPortable";
@@ -21,6 +20,7 @@ import { trim } from "es-toolkit";
 import fse from "fs-extra";
 
 import { kd } from "..";
+import { filePathsFromUriList } from "./util-pure";
 export { processChunked } from "./util-pure";
 
 export function getAppStatus(): AppStatus {
@@ -134,17 +134,10 @@ export async function getClipboardFiles(): Promise<string[]> {
     for (const item of items) {
         if (!item.types.includes("text/uri-list")) continue;
         const payload = await item.getType("text/uri-list");
-        if (!(payload instanceof Blob)) continue;
-        const uriList = await payload.text();
-        for (const line of uriList.split(/\r?\n/)) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("file://")) continue;
-            try {
-                paths.push(fileURLToPath(trimmed));
-            } catch {
-                // Skip malformed file URIs from the OS clipboard list.
-            }
+        if (!(payload instanceof Blob)) {
+            throw new TypeError("Expected text/uri-list clipboard payload to be a Blob");
         }
+        paths.push(...filePathsFromUriList(await payload.text()));
     }
     return paths;
 }
