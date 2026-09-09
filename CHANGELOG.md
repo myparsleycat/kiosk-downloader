@@ -1,3 +1,17 @@
+# [1.12.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.11.1...v1.12.0) (2026-09-09)
+
+
+### Bug Fixes
+
+* bound failed-response body reads with an abortable deadline ([fc7f7bc](https://github.com/myparsleycat/kiosk-downloader/commit/fc7f7bc54fd9e874adec5b1c72af0ab9e8977e3c))
+* **download:** finish partial writes before saving progress ([f89eb18](https://github.com/myparsleycat/kiosk-downloader/commit/f89eb18aaaf2a2cf43abeccdd9991f518365a30a))
+* **download:** validate partial files before resuming ([45e6b49](https://github.com/myparsleycat/kiosk-downloader/commit/45e6b49dae9dd41238e6d84d2fb4cedebd41c0a7))
+
+
+### Features
+
+* add bounded HTTP error diagnostics to transfer clients ([ba942b3](https://github.com/myparsleycat/kiosk-downloader/commit/ba942b3f297e745780c7f9332774102cb147c714))
+
 ## [1.11.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.11.0...v1.11.1) (2026-09-07)
 
 
