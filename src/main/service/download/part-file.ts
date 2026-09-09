@@ -178,7 +178,19 @@ export class PartFileWriter {
             throw new Error("Part file is not open.");
         }
 
-        await this.handle.write(buffer, 0, buffer.length, offset);
+        let written = 0;
+        while (written < buffer.length) {
+            const result = await this.handle.write(
+                buffer,
+                written,
+                buffer.length - written,
+                offset + written,
+            );
+            if (result.bytesWritten === 0) {
+                throw new Error(`Part file write made no progress at ${offset + written}.`);
+            }
+            written += result.bytesWritten;
+        }
     }
 
     private async writeDigestInternal(chunkIndex: number, digest: number) {

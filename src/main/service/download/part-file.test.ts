@@ -4,9 +4,20 @@ import path from "node:path";
 import { crc32 } from "node:zlib";
 
 import fse from "fs-extra";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PartFileWriter } from "./part-file";
+
+type PartWriterInternals = {
+    handle: {
+        write: (
+            buffer: Uint8Array,
+            offset: number,
+            length: number,
+            position: number,
+        ) => Promise<{ bytesWritten: number; buffer: Uint8Array }>;
+    };
+};
 
 async function* bytesFrom(chunks: Uint8Array[]): AsyncGenerator<Uint8Array> {
     for (const chunk of chunks) {
@@ -135,6 +146,70 @@ describe("PartFileWriter.writeChunkFromStream resume", () => {
 
         expect(writeProgress).toEqual([]);
         expect(await fse.readFile(partPath)).toEqual(prefix);
+    });
+
+    it("fills short writes before saving a resumable prefix even when a later chunk exists", async () => {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
+        tempDirs.push(dir);
+        const partPath = path.join(dir, "resume.part");
+        const writer = new PartFileWriter(partPath);
+        await writer.open(12, 2);
+        const handle = (writer as unknown as PartWriterInternals).handle;
+        const write = handle.write.bind(handle);
+        const progress: number[] = [];
+        try {
+            await writer.writeChunkFromStream(8, 1, bytesFrom([Buffer.from("tail")]), 4, 4);
+            vi.spyOn(handle, "write").mockImplementationOnce(async () =>
+                write(Buffer.from("abcd"), 0, 2, 0),
+            );
+            async function* interruptedSource() {
+                yield Buffer.from("abcd");
+                throw new Error("connection lost");
+            }
+            await expect(
+                writer.writeChunkFromStream(0, 0, interruptedSource(), 8, 4, {
+                    onWriteProgress: (bytes) => progress.push(bytes),
+                }),
+            ).rejects.toThrow("connection lost");
+            expect(progress).toEqual([4]);
+            expect((await fse.readFile(partPath)).subarray(0, 4)).toEqual(Buffer.from("abcd"));
+            await writer.writeChunkFromStream(
+                0,
+                0,
+                bytesFrom([Buffer.from("efgh")]),
+                8,
+                4,
+                undefined,
+                { alreadyWritten: progress[0] },
+            );
+            expect(await fse.readFile(partPath)).toEqual(Buffer.from("abcdefghtail"));
+        } finally {
+            vi.restoreAllMocks();
+            await writer.close();
+        }
+    });
+
+    it("does not save progress when a short write is followed by a zero-byte write", async () => {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "part-file-"));
+        tempDirs.push(dir);
+        const writer = new PartFileWriter(path.join(dir, "resume.part"));
+        await writer.open(4, 1);
+        const handle = (writer as unknown as PartWriterInternals).handle;
+        const write = handle.write.bind(handle);
+        const payload = Buffer.from("abcd");
+        const onWriteProgress = vi.fn();
+        try {
+            vi.spyOn(handle, "write")
+                .mockImplementationOnce(async () => write(payload, 0, 2, 0))
+                .mockResolvedValueOnce({ bytesWritten: 0, buffer: payload });
+            await expect(
+                writer.writeChunkFromStream(0, 0, bytesFrom([payload]), 4, 4, { onWriteProgress }),
+            ).rejects.toThrow("Part file write made no progress at 2.");
+            expect(onWriteProgress).not.toHaveBeenCalled();
+        } finally {
+            vi.restoreAllMocks();
+            await writer.close();
+        }
     });
 
     it("rejects a resume offset beyond the available part-file prefix", async () => {

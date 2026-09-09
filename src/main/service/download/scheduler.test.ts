@@ -17,6 +17,7 @@ import type {
 import { DownloadScheduler } from "./scheduler";
 
 type SchedulerInternals = {
+    validateCompletedChunksAt: (partPath: string, chunks: DownloadChunkRow[]) => Promise<void>;
     runFile: (
         collectionId: string,
         fileId: string,
@@ -46,6 +47,66 @@ type SchedulerInternals = {
 };
 
 describe("DownloadScheduler", () => {
+    it.each([
+        { name: "missing part", partSize: null, downloadedBytes: 4, reset: true },
+        { name: "truncated prefix", partSize: 11, downloadedBytes: 4, reset: true },
+        { name: "exact prefix", partSize: 12, downloadedBytes: 4, reset: false },
+        { name: "larger part", partSize: 16, downloadedBytes: 4, reset: false },
+        { name: "no saved progress", partSize: null, downloadedBytes: 0, reset: false },
+    ])("validates partial chunks against $name before resuming", async (testCase) => {
+        const directory = await fse.mkdtemp(path.join(tmpdir(), "download-resume-"));
+        const repository = createRepository([], []);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        try {
+            for (const suffix of [".part", ".part.z"]) {
+                const partPath = path.join(directory, `file${suffix}`);
+                if (testCase.partSize !== null) {
+                    await fse.outputFile(partPath, Buffer.alloc(testCase.partSize));
+                }
+                for (const status of ["pending", "error"] as const) {
+                    repository.resetChunkPartial.mockClear();
+                    await (scheduler as unknown as SchedulerInternals).validateCompletedChunksAt(
+                        partPath,
+                        [
+                            {
+                                collectionId: "collection",
+                                fileId: "file",
+                                chunkIndex: 1,
+                                offset: 8,
+                                size: 8,
+                                status,
+                                downloadedBytes: testCase.downloadedBytes,
+                                attempts: 0,
+                                updatedAt: "",
+                                error: null,
+                            },
+                        ],
+                    );
+                    if (testCase.reset) {
+                        expect(repository.resetChunkPartial).toHaveBeenCalledExactlyOnceWith(
+                            "file",
+                            1,
+                        );
+                    } else {
+                        expect(repository.resetChunkPartial).not.toHaveBeenCalled();
+                    }
+                }
+            }
+        } finally {
+            scheduler.destroy();
+            await fse.remove(directory);
+        }
+    });
+
     it("waits for a paused run to drain before immediately resumed file starts again", async () => {
         const collection = createCollection("resume-draining", 0);
         const file = createFile("draining-file", collection.id);
@@ -1114,6 +1175,7 @@ function createRepository(
         }
     });
     const completeFile = vi.fn();
+    const resetChunkPartial = vi.fn();
     const markChunkPending = vi.fn();
     const markChunkPartial = vi.fn();
     const syncWorkuploadDownloadedBytes = vi.fn();
@@ -1162,6 +1224,7 @@ function createRepository(
         listChunks,
         markChunkDownloading,
         resetFileProgress,
+        resetChunkPartial,
         recomputeCollectionStatus: vi.fn((collectionId: string) => {
             const collection = getCollection(collectionId);
             if (!collection || collection.status === "paused" || collection.status === "expired") {
@@ -1205,6 +1268,7 @@ function createRepository(
     };
     return {
         value: repository as never,
+        resetChunkPartial,
         resetRunningChunksForFile,
         completeFile,
         markChunkPartial,
