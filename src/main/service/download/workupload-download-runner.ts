@@ -7,6 +7,7 @@ import type { TransferRequestContext } from "../transfer-request-pool";
 import type { DownloadTransferMetrics } from "./metrics";
 import type { DownloadRepository } from "./repository";
 
+import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
 import { PartFileWriter } from "./part-file";
 import { sleepWithAbort } from "./slow-chunk-monitor";
 import {
@@ -484,9 +485,8 @@ export class WorkuploadDownloadRunner {
 
     private async requireDownloadResponse(response: Response, start: number, fileSize: number) {
         if (response.status !== 200 && response.status !== 206) {
-            await response.body?.cancel().catch(() => undefined);
             throw new WorkuploadResponseError(
-                `Workupload CDN HTTP ${response.status}.`,
+                formatHttpError("Workupload CDN", await snapshotFailedResponse(response)),
                 response.status,
             );
         }

@@ -55,6 +55,27 @@ describe("TransferItApiClient control cancellation", () => {
         await expect(controlClient(request).getDownloadUrl("share", "file")).rejects.toBe(error);
     });
 
+    it("includes API error bodies in HTTP failures", async () => {
+        await expect(
+            controlClient(
+                async () =>
+                    new Response(JSON.stringify({ err: "over quota" }), {
+                        status: 500,
+                        headers: { "content-type": "application/json" },
+                    }),
+            ).getDownloadUrl("share", "file"),
+        ).rejects.toThrow('Transfer API HTTP 500: {"err":"over quota"}');
+    });
+
+    it("keeps the Hashcash 402 control message", async () => {
+        await expect(
+            controlClient(async () => new Response("pay", { status: 402 })).getDownloadUrl(
+                "share",
+                "file",
+            ),
+        ).rejects.toThrow("Transfer API requires Hashcash challenge (HTTP 402).");
+    });
+
     it("still reports genuinely malformed JSON", async () => {
         await expect(
             controlClient(async () => new Response("invalid")).getDownloadUrl("share", "file"),

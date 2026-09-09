@@ -7,9 +7,14 @@ import {
 import type { DirNode, LoadCollectionPayload } from "@shared/types";
 
 import type { KioskDownloader } from "../..";
-import type { PayloadRequestOptions } from "../../lib/http";
 
-import { TimeoutError, delay, isNetworkError } from "../../lib/http";
+import { TimeoutError, delay, isNetworkError, type PayloadRequestOptions } from "../../lib/http";
+import {
+    formatHttpError,
+    snapshotDecodedBody,
+    snapshotFailedResponse,
+    type HttpErrorSnapshot,
+} from "../../lib/http-error";
 import { COLLECTION_EXPIRES_NEVER } from "./transfer-it-crypto";
 
 const ORIGIN = "https://workupload.com";
@@ -30,8 +35,13 @@ export class WorkuploadHttpError extends Error {
     public constructor(
         stage: string,
         public readonly status: number,
+        snapshot?: HttpErrorSnapshot,
     ) {
-        super(`Workupload ${stage} failed with HTTP ${status}.`);
+        super(
+            snapshot
+                ? formatHttpError(`Workupload ${stage} failed with`, snapshot)
+                : `Workupload ${stage} failed with HTTP ${status}.`,
+        );
         this.name = "WorkuploadHttpError";
     }
 }
@@ -695,15 +705,22 @@ function requestOptions(jar: CookieJar, url: string, options: PayloadRequestOpti
 async function readText(response: Response, stage: string) {
     const body = await response.text();
     if (response.status >= 400) {
-        throw new WorkuploadHttpError(stage, response.status);
+        throw new WorkuploadHttpError(
+            stage,
+            response.status,
+            snapshotDecodedBody(response.status, body, undefined, response.headers),
+        );
     }
     return body;
 }
 
 async function readJson(response: Response, stage: string) {
     if (response.status >= 300 && response.status < 400) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new WorkuploadHttpError(stage, response.status);
+        throw new WorkuploadHttpError(
+            stage,
+            response.status,
+            await snapshotFailedResponse(response),
+        );
     }
     const body = await readText(response, stage);
     try {

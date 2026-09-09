@@ -169,6 +169,27 @@ describe("TransferChunkPool", () => {
         );
     });
 
+    it("includes CDN error bodies in unclassified HTTP failures", async () => {
+        const payloadRequest = vi.fn(
+            async () =>
+                new Response("error code: 1020", {
+                    status: 500,
+                    headers: { "content-type": "text/plain", "cf-ray": "ray-cdn" },
+                }),
+        );
+        const { pool, repository } = createHarness(payloadRequest);
+        pool.start(8);
+        const item = registration();
+        item.maxChunkRetries = 0;
+
+        await expect(pool.register(item)).resolves.toBe("failed");
+        expect(repository.markFileStatus).toHaveBeenCalledWith(
+            "file",
+            "error",
+            expect.stringMatching(/Transfer CDN HTTP 500: error code: 1020 cf-ray=ray-cdn/),
+        );
+    });
+
     it("aborts a shared cooldown without leaving queued chunks", async () => {
         vi.useFakeTimers();
         const payloadRequest = vi.fn(async () => new Response(null, { status: 509 }));

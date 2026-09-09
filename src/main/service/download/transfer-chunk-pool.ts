@@ -7,6 +7,7 @@ import type { DownloadRepository } from "./repository";
 import type { FileDownloadOutcome } from "./segment-pool";
 import type { DownloadChunkRow, DownloadCollectionRow, DownloadFileRow } from "./types";
 
+import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
 import { TransferRateLimitError } from "../transfer-request-pool";
 import {
     SLOW_CHUNK_MAX_RECONNECTS,
@@ -66,7 +67,12 @@ type TransferPoolDeps = {
     onProgress: (collectionId: string, fileId: string) => void;
 };
 
-class TransferCdnUrlExpiredError extends Error {}
+class TransferCdnUrlExpiredError extends Error {
+    public constructor(message: string) {
+        super(message);
+        this.name = "TransferCdnUrlExpiredError";
+    }
+}
 
 function compareWorkItems(a: TransferWorkItem, b: TransferWorkItem) {
     if (a.priority !== b.priority) {
@@ -661,18 +667,27 @@ export class TransferChunkPool {
                             timeout: false,
                         });
                         if (response.status === 403 || response.status === 404) {
-                            await response.body?.cancel().catch(() => undefined);
-                            throw new TransferCdnUrlExpiredError();
-                        }
-                        if (response.status === 509) {
-                            await response.body?.cancel().catch(() => undefined);
-                            throw new TransferRateLimitError(
-                                parseTransferRetryAfterMs(response.headers.get("retry-after")),
+                            throw new TransferCdnUrlExpiredError(
+                                formatHttpError(
+                                    "Transfer CDN",
+                                    await snapshotFailedResponse(response),
+                                ),
                             );
                         }
-                        if (response.status !== 206 && response.status !== 200) {
+                        if (response.status === 509) {
+                            const retryAfterMs = parseTransferRetryAfterMs(
+                                response.headers.get("retry-after"),
+                            );
                             await response.body?.cancel().catch(() => undefined);
-                            throw new Error(`Transfer CDN HTTP ${response.status}.`);
+                            throw new TransferRateLimitError(retryAfterMs);
+                        }
+                        if (response.status !== 206 && response.status !== 200) {
+                            throw new Error(
+                                formatHttpError(
+                                    "Transfer CDN",
+                                    await snapshotFailedResponse(response),
+                                ),
+                            );
                         }
                         if (!response.body) {
                             throw new Error("Transfer CDN response has no body.");

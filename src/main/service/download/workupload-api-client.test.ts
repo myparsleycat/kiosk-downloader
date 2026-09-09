@@ -69,6 +69,21 @@ function createClient(
     } as never);
 }
 
+describe("Workupload HTTP errors", () => {
+    it("includes error page text in HTTP failures", async () => {
+        const request = vi.fn(
+            async () =>
+                new Response("<html>cloudflare 1020</html>", {
+                    status: 502,
+                    headers: { "content-type": "text/html" },
+                }),
+        );
+        await expect(
+            createClient(request).loadCollection({ url: "https://workupload.com/file/AbC123" }),
+        ).rejects.toThrow(/Workupload .+ failed with HTTP 502: .*cloudflare 1020/);
+    });
+});
+
 describe("Workupload parsers", () => {
     it.each([
         [
