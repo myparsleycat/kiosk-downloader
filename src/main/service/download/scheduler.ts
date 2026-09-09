@@ -1071,6 +1071,8 @@ export class DownloadScheduler {
             throw error;
         });
         for (const chunk of resumableChunks) {
+            // downloadedBytes tracks fully written contiguous batches within this chunk;
+            // file length only detects a missing or truncated saved prefix.
             const isValid =
                 partStat !== null &&
                 (chunk.status === "completed"
