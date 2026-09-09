@@ -157,6 +157,7 @@ export type CreateUploadRecord = {
     tree: DirNode;
     bundleId?: string;
     ordinal?: number;
+    startPaused?: boolean;
 };
 
 export type SchedulerSettings = {

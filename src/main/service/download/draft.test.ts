@@ -113,6 +113,7 @@ function createService(passwords: string[] = []) {
             get: vi.fn(async (key: string) => {
                 if (key === "general.asciiFilenames") return false;
                 if (key === "general.createCollectionSubfolder") return false;
+                if (key === "transfer.startTransfersPaused") return false;
                 throw new Error(`Unexpected setting: ${key}`);
             }),
             getMany: vi.fn(async () => ({

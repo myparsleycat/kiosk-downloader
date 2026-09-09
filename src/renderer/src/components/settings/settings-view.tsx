@@ -1,54 +1,54 @@
 import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
 } from "@renderer/components/ui/alert-dialog";
 import { Button } from "@renderer/components/ui/button";
 import { Input } from "@renderer/components/ui/input";
 import { Label } from "@renderer/components/ui/label";
 import {
-    Select,
-    SelectContent,
-    SelectGroup,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
 } from "@renderer/components/ui/select";
 import { Switch } from "@renderer/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@renderer/components/ui/tabs";
 import { useUpdaterStore } from "@renderer/stores/updater";
 import {
-    type AppSettings,
-    AUTO_UPDATE_MODES,
-    type AutoUpdateMode,
-    BANDWIDTH_LIMIT_MIBPS_DEFAULT,
-    BANDWIDTH_LIMIT_MIBPS_MAX,
-    BANDWIDTH_LIMIT_MIBPS_MIN,
-    CHUNK_RETRY_DEFAULT,
-    CHUNK_RETRY_MAX,
-    CHUNK_RETRY_MIN,
-    COLLECTION_PASSWORD_LIST_MAX,
-    INFLATE_BUFFER_BYTES_DEFAULT,
-    INFLATE_BUFFER_BYTES_OPTIONS,
-    REQUEST_POOL_SIZE_DEFAULT,
-    REQUEST_POOL_SIZE_MAX,
-    REQUEST_POOL_SIZE_MIN,
-    SETTING_LOG_LEVELS,
-    SETTING_THEMES,
-    type SettingKey,
-    type SettingTheme,
-    STARTUP_RESUME_MODES,
-    type StartupResumeMode,
-    STREAM_WRITE_BATCH_BYTES_DEFAULT,
-    STREAM_WRITE_BATCH_BYTES_OPTIONS,
-    UPLOAD_CHUNK_RETRY_DEFAULT,
-    UPLOAD_CHUNK_RETRY_MAX,
-    UPLOAD_CHUNK_RETRY_MIN,
+  type AppSettings,
+  AUTO_UPDATE_MODES,
+  type AutoUpdateMode,
+  BANDWIDTH_LIMIT_MIBPS_DEFAULT,
+  BANDWIDTH_LIMIT_MIBPS_MAX,
+  BANDWIDTH_LIMIT_MIBPS_MIN,
+  CHUNK_RETRY_DEFAULT,
+  CHUNK_RETRY_MAX,
+  CHUNK_RETRY_MIN,
+  COLLECTION_PASSWORD_LIST_MAX,
+  INFLATE_BUFFER_BYTES_DEFAULT,
+  INFLATE_BUFFER_BYTES_OPTIONS,
+  REQUEST_POOL_SIZE_DEFAULT,
+  REQUEST_POOL_SIZE_MAX,
+  REQUEST_POOL_SIZE_MIN,
+  SETTING_LOG_LEVELS,
+  SETTING_THEMES,
+  type SettingKey,
+  type SettingTheme,
+  STARTUP_RESUME_MODES,
+  type StartupResumeMode,
+  STREAM_WRITE_BATCH_BYTES_DEFAULT,
+  STREAM_WRITE_BATCH_BYTES_OPTIONS,
+  UPLOAD_CHUNK_RETRY_DEFAULT,
+  UPLOAD_CHUNK_RETRY_MAX,
+  UPLOAD_CHUNK_RETRY_MIN,
 } from "@shared/settings";
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
@@ -75,6 +75,7 @@ const SETTING_KEYS = [
   "transfer.inflateBufferBytes",
   "transfer.startupResumeMode",
   "transfer.uploadStartupResumeMode",
+  "transfer.startTransfersPaused",
   "transfer.downloadBandwidthLimitMibps",
   "transfer.uploadBandwidthLimitMibps",
   "network.forceIpv4",
@@ -103,6 +104,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.inflateBufferBytes": INFLATE_BUFFER_BYTES_DEFAULT,
   "transfer.startupResumeMode": "auto",
   "transfer.uploadStartupResumeMode": "auto",
+  "transfer.startTransfersPaused": false,
   "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "network.forceIpv4": true,
@@ -550,6 +552,18 @@ export function SettingsView() {
                       }
                     />
                     <SettingRow
+                      title="추가 시 일시정지"
+                      description="새 전송을 추가하면 바로 시작하지 않고 일시정지 상태로 대기합니다."
+                      control={
+                        <Switch
+                          checked={settings["transfer.startTransfersPaused"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("transfer.startTransfersPaused", value)
+                          }
+                        />
+                      }
+                    />
+                    <SettingRow
                       title="전송 완료 후 시스템 종료"
                       description="업로드·다운로드가 모두 끝나면 기기를 종료합니다."
                       control={
@@ -810,9 +824,7 @@ function Section({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex flex-col border-l border-foreground/20 pl-4">
       {React.Children.toArray(children).map((child, i, arr) => (
-        <React.Fragment key={i}>
-          {child}
-        </React.Fragment>
+        <React.Fragment key={i}>{child}</React.Fragment>
       ))}
     </div>
   );

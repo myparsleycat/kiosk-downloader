@@ -380,6 +380,7 @@ export class DownloadService {
         const createCollectionSubfolder = await this.kd.setting.get(
             "general.createCollectionSubfolder",
         );
+        const startPaused = await this.kd.setting.get("transfer.startTransfersPaused");
         const asciiFilenames = draft.asciiFilenames;
         const loaded = draft.loaded;
         const selectedPaths = new Set(payload.selectedPaths);
@@ -446,9 +447,12 @@ export class DownloadService {
             selectedPaths: payload.selectedPaths,
             asciiFilenames,
             zipPasswords: payload.zipPasswords,
+            startPaused,
         });
         await this.emitUpdate(collectionId);
-        void this.scheduler.schedule();
+        if (!startPaused) {
+            void this.scheduler.schedule();
+        }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         const item = this.getEnrichedItem(collectionId);
         if (!item) {
@@ -750,6 +754,7 @@ export class DownloadService {
         const createCollectionSubfolder = await this.kd.setting.get(
             "general.createCollectionSubfolder",
         );
+        const startPaused = await this.kd.setting.get("transfer.startTransfersPaused");
         const asciiFilenames = draft.asciiFilenames;
         const savePath = shouldCreateCollectionSubfolder(
             logicalTree,
@@ -790,6 +795,7 @@ export class DownloadService {
             manifestJson: JSON.stringify(storedManifest),
             savePath,
             expires: loaded.collection.expires,
+            startPaused,
         });
 
         const selected = new Set(payload.selectedPaths);
@@ -828,6 +834,7 @@ export class DownloadService {
                     asciiFilenames,
                     bundleId,
                     ordinal: sourceIndex,
+                    startPaused,
                 });
                 createdCollections += 1;
             }
@@ -839,7 +846,9 @@ export class DownloadService {
 
         this.createReassemblyCoordinator(bundleId, storedManifest);
         await this.emitUpdate(bundleId);
-        void this.scheduler.schedule();
+        if (!startPaused) {
+            void this.scheduler.schedule();
+        }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         const item = this.getEnrichedItem(bundleId);
         if (!item) {
@@ -1250,6 +1259,7 @@ export class DownloadService {
         const createCollectionSubfolder = await this.kd.setting.get(
             "general.createCollectionSubfolder",
         );
+        const startPaused = await this.kd.setting.get("transfer.startTransfersPaused");
         const asciiFilenames = payload.collection.asciiFilenames;
         const savePath = shouldCreateCollectionSubfolder(
             payload.collection.tree,
@@ -1276,7 +1286,7 @@ export class DownloadService {
                 collectionName: payload.collection.name,
                 shareId: payload.collection.shareId,
             },
-            () => this.repository.insertImportedDownload(payload, savePath),
+            () => this.repository.insertImportedDownload(payload, savePath, startPaused),
         );
 
         await this.emitUpdate(collectionId);

@@ -524,6 +524,109 @@ describe("DownloadRepository.insertImportedDownload", () => {
 
         expect(repo.getCollection(id)).toMatchObject({ status: "queued", error: null });
     });
+
+    it("inserts a non-expired import paused when startPaused is set", async () => {
+        const { repo } = await createRepository();
+
+        const id = repo.insertImportedDownload(
+            createImportPayload({
+                expires: Math.ceil(Date.now() / 1000) + 3600,
+                status: "pending",
+            }),
+            "/tmp",
+            true,
+        );
+
+        expect(repo.getCollection(id)).toMatchObject({ status: "paused", error: null });
+        expect(repo.listFiles(id)).toMatchObject([{ status: "paused", pausedByUser: 0 }]);
+        expect(repo.listRunnableCollections().map((collection) => collection.id)).not.toContain(id);
+
+        repo.resumeCollection(id, false);
+
+        expect(repo.getCollection(id)).toMatchObject({ status: "queued" });
+        expect(repo.listFiles(id)).toMatchObject([{ status: "pending", pausedByUser: 0 }]);
+        expect(repo.listRunnableCollections().map((collection) => collection.id)).toContain(id);
+    });
+});
+
+describe("DownloadRepository insert startPaused", () => {
+    it("inserts a collection paused with its selected files and resumes cleanly", async () => {
+        const { repo } = await createRepository();
+
+        const collectionId = repo.insertDownload({
+            loaded: {
+                provider: "kiosk",
+                cat: "cat",
+                rootId: "root",
+                passwordProtected: false,
+                collection: {
+                    shareId: "share",
+                    name: "Paused",
+                    expires: Math.floor(Date.now() / 1000) + 3600,
+                    segmentSize: 16,
+                    passwordProtected: false,
+                    provider: "kiosk",
+                    tree: {
+                        type: "dir",
+                        id: "root",
+                        name: "",
+                        entries: [
+                            {
+                                kind: "file",
+                                node: { type: "file", id: "a.txt", name: "a.txt", size: 4 },
+                            },
+                            {
+                                kind: "file",
+                                node: { type: "file", id: "b.txt", name: "b.txt", size: 6 },
+                            },
+                        ],
+                    },
+                },
+            },
+            url: "https://kio.ac/c/share",
+            savePath: "/tmp/paused",
+            selectedPaths: ["a.txt"],
+            asciiFilenames: false,
+            startPaused: true,
+        });
+
+        expect(repo.getCollection(collectionId)).toMatchObject({ status: "paused" });
+        expect(repo.listFiles(collectionId)).toMatchObject([
+            { path: "a.txt", status: "paused", pausedByUser: 0 },
+            { path: "b.txt", status: "pending" },
+        ]);
+        expect(repo.listRunnableCollections().map((collection) => collection.id)).not.toContain(
+            collectionId,
+        );
+
+        repo.resumeCollection(collectionId, false);
+
+        expect(repo.getCollection(collectionId)).toMatchObject({ status: "queued" });
+        expect(repo.listFiles(collectionId)).toMatchObject([
+            { path: "a.txt", status: "pending", pausedByUser: 0 },
+            { path: "b.txt", status: "pending" },
+        ]);
+        expect(repo.listRunnableCollections().map((collection) => collection.id)).toContain(
+            collectionId,
+        );
+    });
+
+    it("inserts a bundle paused so it stays out of the runnable queue", async () => {
+        const { repo } = await createRepository();
+
+        repo.insertBundle({
+            id: "paused-bundle",
+            sourceInput: "KDE1.test",
+            name: "Bundle",
+            treeJson: "{}",
+            manifestJson: "{}",
+            savePath: "/tmp",
+            expires: Math.floor(Date.now() / 1000) + 3600,
+            startPaused: true,
+        });
+
+        expect(repo.getBundle("paused-bundle")).toMatchObject({ status: "paused" });
+    });
 });
 
 function seedTransferFile(

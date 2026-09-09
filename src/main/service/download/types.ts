@@ -133,6 +133,7 @@ export type CreateDownloadRecord = {
     zipPasswords?: Record<string, string>;
     bundleId?: string;
     ordinal?: number;
+    startPaused?: boolean;
 };
 
 export type TransferFileSourceMeta = {

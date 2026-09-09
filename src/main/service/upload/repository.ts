@@ -56,6 +56,7 @@ export class UploadRepository {
             id: randomUUID(),
             remoteId: "",
         }));
+        const collectionStatus = record.startPaused ? "paused" : "queued";
 
         this.kd.lib.db.transaction((tx) => {
             tx.run(
@@ -64,7 +65,7 @@ export class UploadRepository {
                   "collection_uuid", "upload_token", "tree_json", "expires", "status",
                   "segment_size",
                   "created_at", "updated_at", "elapsed_ms", "error", "bundle_id", "ordinal", "superseded")
-                 VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'queued', ?, ?, ?, 0, NULL, ?, ?, 0)`,
+                 VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, 0)`,
                 [
                     collectionId,
                     record.options.name.slice(0, 100),
@@ -74,6 +75,7 @@ export class UploadRepository {
                     record.created.uploadToken,
                     JSON.stringify(record.tree),
                     record.options.expires,
+                    collectionStatus,
                     record.segmentSize,
                     timestamp,
                     timestamp,
@@ -83,12 +85,13 @@ export class UploadRepository {
             );
 
             for (const file of fileRows) {
+                const fileStatus = record.startPaused ? "paused" : "pending";
                 tx.run(
                     `INSERT INTO "upload_file"
                      ("id", "collection_id", "remote_id", "path", "name", "size", "fs_path", "source_mtime_ms",
                       "status", "uploaded_bytes", "paused_by_user", "created_at", "updated_at", "error",
                       "logical_path", "source_offset", "logical_size", "logical_sha256")
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL, ?, ?, ?, ?)`,
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, NULL, ?, ?, ?, ?)`,
                     [
                         file.id,
                         collectionId,
@@ -98,6 +101,7 @@ export class UploadRepository {
                         file.size,
                         file.fsPath,
                         file.sourceMtimeMs,
+                        fileStatus,
                         timestamp,
                         timestamp,
                         file.logicalPath ?? file.path,
