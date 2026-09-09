@@ -1057,13 +1057,26 @@ export class DownloadScheduler {
     }
 
     private async validateCompletedChunksAt(partPath: string, chunks: DownloadChunkRow[]) {
-        const completedChunks = chunks.filter((chunk) => chunk.status === "completed");
-        if (completedChunks.length === 0) {
+        const resumableChunks = chunks.filter(
+            (chunk) => chunk.status === "completed" || chunk.downloadedBytes > 0,
+        );
+        if (resumableChunks.length === 0) {
             return;
         }
 
-        for (const chunk of completedChunks) {
-            const isValid = await PartFileWriter.isChunkValid(partPath, chunk);
+        const partStat = await fse.stat(partPath).catch((error: unknown) => {
+            if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+                return null;
+            }
+            throw error;
+        });
+        for (const chunk of resumableChunks) {
+            const isValid =
+                partStat !== null &&
+                (chunk.status === "completed"
+                    ? await PartFileWriter.isChunkValid(partPath, chunk)
+                    : partStat.size >=
+                      chunk.offset + Math.min(chunk.size, Math.floor(chunk.downloadedBytes)));
             if (!isValid) {
                 this.repository.resetChunkPartial(chunk.fileId, chunk.chunkIndex);
             }
