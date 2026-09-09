@@ -49,9 +49,19 @@ export type CborResponse = {
     headers?: Headers;
 };
 
-export async function snapshotFailedResponse(response: Response): Promise<HttpErrorSnapshot> {
+export type HttpErrorBodyReadOptions = {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+};
+
+const DEFAULT_BODY_READ_TIMEOUT_MS = 15_000;
+
+export async function snapshotFailedResponse(
+    response: Response,
+    options: HttpErrorBodyReadOptions = {},
+): Promise<HttpErrorSnapshot> {
     try {
-        const bytes = await readLimitedBody(response, MAX_HTTP_ERROR_READ_BYTES);
+        const bytes = await readLimitedBody(response, MAX_HTTP_ERROR_READ_BYTES, options);
         return snapshotFromBytes(
             response.status,
             response.statusText,
@@ -60,7 +70,7 @@ export async function snapshotFailedResponse(response: Response): Promise<HttpEr
             bytes.byteLength,
         );
     } catch {
-        // A failed body read (dropped connection, abort) must not mask the HTTP status error.
+        // A failed body read (dropped connection, abort, deadline) must not mask the HTTP status error.
         return snapshotFromBytes(
             response.status,
             response.statusText,
@@ -224,7 +234,11 @@ function sanitizeLocation(value: string) {
     }
 }
 
-async function readLimitedBody(response: Response, maxBytes: number) {
+async function readLimitedBody(
+    response: Response,
+    maxBytes: number,
+    options: HttpErrorBodyReadOptions = {},
+) {
     if (!response.body || response.body.locked) {
         return new Uint8Array();
     }
@@ -233,7 +247,7 @@ async function readLimitedBody(response: Response, maxBytes: number) {
     let total = 0;
     try {
         while (total < maxBytes) {
-            const { done, value } = await reader.read();
+            const { done, value } = await readChunkWithDeadline(reader, options);
             if (done) break;
             if (!value || value.byteLength === 0) continue;
             const remaining = maxBytes - total;
@@ -263,6 +277,50 @@ async function readLimitedBody(response: Response, maxBytes: number) {
         offset += chunk.byteLength;
     }
     return out;
+}
+
+// Mirrors the abort/deadline race of the download runner's readBodyChunk: a stalled
+// response body must reject so the caller can fall back to the status-only snapshot.
+function readChunkWithDeadline(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    options: HttpErrorBodyReadOptions,
+) {
+    return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const onAbort = () => {
+            settle(() => reject(options.signal?.reason));
+        };
+        const cleanup = () => {
+            if (timer !== undefined) {
+                clearTimeout(timer);
+            }
+            options.signal?.removeEventListener("abort", onAbort);
+        };
+        const settle = (finish: () => void) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            cleanup();
+            finish();
+        };
+
+        timer = setTimeout(() => {
+            settle(() => reject(new Error("Failed response body read timed out.")));
+        }, options.timeoutMs ?? DEFAULT_BODY_READ_TIMEOUT_MS);
+        if (options.signal) {
+            options.signal.addEventListener("abort", onAbort, { once: true });
+            if (options.signal.aborted) {
+                onAbort();
+                return;
+            }
+        }
+        reader.read().then(
+            (result) => settle(() => resolve(result)),
+            (error) => settle(() => reject(error)),
+        );
+    });
 }
 
 function isTextualContentType(contentType: string | null) {

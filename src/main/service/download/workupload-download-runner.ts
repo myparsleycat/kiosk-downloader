@@ -239,6 +239,7 @@ export class WorkuploadDownloadRunner {
                             response,
                             resumeOffset,
                             file.size,
+                            controller.signal,
                         );
                         rangeSupported = detectedRange;
                         logContext.rangeSupported = detectedRange;
@@ -483,10 +484,18 @@ export class WorkuploadDownloadRunner {
         this.deps.repository.syncWorkuploadDownloadedBytes(fileId);
     }
 
-    private async requireDownloadResponse(response: Response, start: number, fileSize: number) {
+    private async requireDownloadResponse(
+        response: Response,
+        start: number,
+        fileSize: number,
+        signal: AbortSignal,
+    ) {
         if (response.status !== 200 && response.status !== 206) {
             throw new WorkuploadResponseError(
-                formatHttpError("Workupload CDN", await snapshotFailedResponse(response)),
+                formatHttpError(
+                    "Workupload CDN",
+                    await snapshotFailedResponse(response, { signal }),
+                ),
                 response.status,
             );
         }

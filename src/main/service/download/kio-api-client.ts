@@ -454,7 +454,10 @@ export async function* streamSegmentBytes(
 
             if (response.status !== 200 && response.status !== 206) {
                 throw new Error(
-                    formatHttpError(options.label, await snapshotFailedResponse(response)),
+                    formatHttpError(
+                        options.label,
+                        await snapshotFailedResponse(response, { signal }),
+                    ),
                 );
             }
 

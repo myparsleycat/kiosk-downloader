@@ -670,7 +670,7 @@ export class TransferChunkPool {
                             throw new TransferCdnUrlExpiredError(
                                 formatHttpError(
                                     "Transfer CDN",
-                                    await snapshotFailedResponse(response),
+                                    await snapshotFailedResponse(response, { signal }),
                                 ),
                             );
                         }
@@ -685,7 +685,7 @@ export class TransferChunkPool {
                             throw new Error(
                                 formatHttpError(
                                     "Transfer CDN",
-                                    await snapshotFailedResponse(response),
+                                    await snapshotFailedResponse(response, { signal }),
                                 ),
                             );
                         }

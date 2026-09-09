@@ -448,7 +448,9 @@ export class KioUploadClient {
             return;
         }
 
-        throw new Error(formatHttpError("edge PUT 실패:", await snapshotFailedResponse(response)));
+        throw new Error(
+            formatHttpError("edge PUT 실패:", await snapshotFailedResponse(response, { signal })),
+        );
     }
 
     public async completeCollection(uploadToken: string): Promise<void> {
