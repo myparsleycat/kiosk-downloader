@@ -167,11 +167,7 @@ describe("KioUploadClient.uploadSegment", () => {
     }
 
     function edgeResponse(ok: boolean, status = ok ? 200 : 500) {
-        return {
-            ok,
-            status,
-            text: async () => (ok ? "" : "edge-error"),
-        };
+        return new Response(ok ? null : "edge-error", { status });
     }
 
     it("returns length when segment already exists without edge PUT", async () => {

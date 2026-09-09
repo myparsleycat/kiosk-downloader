@@ -176,6 +176,57 @@ describe("KioApiClient control cancellation", () => {
     });
 });
 
+describe("KioApiClient HTTP errors", () => {
+    it("includes decoded error bodies in file/gets failures", async () => {
+        const client = controlClient(async () =>
+            cborResponse(403, { code: "collection:not_found", message: "gone" }),
+        );
+        await expect(client.getSegments("aa".repeat(16), "cat")).rejects.toThrow(
+            'file/gets failed: HTTP 403: {"code":"collection:not_found","message":"gone"}',
+        );
+    });
+
+    it("includes decoded error bodies in collection/get failures", async () => {
+        const shareId = "abcdefghijklmnopqrstuv";
+        const client = controlClient(async () =>
+            cborResponse(500, { code: "internal", message: "boom" }),
+        );
+        await expect(client.loadCollection({ url: `https://kio.ac/c/${shareId}` })).rejects.toThrow(
+            'collection/get failed: HTTP 500: {"code":"internal","message":"boom"}',
+        );
+    });
+
+    it("includes CDN error page text in segment stream failures", async () => {
+        const release = vi.fn();
+        const acquire = vi.fn(async () => release);
+        const { kd } = createKioskDownloader(
+            acquire,
+            Buffer.from("payload"),
+            new Response("<html>error code: 1020</html>", {
+                status: 403,
+                headers: { "content-type": "text/html", "cf-ray": "ray-1" },
+            }),
+        );
+
+        await expect(async () => {
+            for await (const _chunk of streamSegmentBytes(
+                kd,
+                { type: "cdn", data: new Map([["url", "https://cdn.test/file"]]) },
+                0,
+                7,
+                new AbortController().signal,
+                {
+                    label: "Segment",
+                    mode: "full",
+                    collectionId: "collection",
+                },
+            )) {
+            }
+        }).rejects.toThrow(/Segment HTTP 403: .*error code: 1020.*cf-ray=ray-1/);
+        expect(release).toHaveBeenCalledOnce();
+    });
+});
+
 function segmentResponse() {
     return cborResponse(200, {
         files: [{ segments: [{ type: "cdn", data: new Map([["url", "https://cdn.test/file"]]) }] }],
@@ -207,8 +258,12 @@ function cborResponse(status: number, body: unknown) {
     };
 }
 
-function createKioskDownloader(acquire: (context: never) => Promise<() => void>, body: Buffer) {
-    const request = vi.fn(async () => new Response(body.toString()));
+function createKioskDownloader(
+    acquire: (context: never) => Promise<() => void>,
+    body: Buffer,
+    response?: Response,
+) {
+    const request = vi.fn(async () => response ?? new Response(body.toString()));
     const runPayloadStream = vi.fn(async function* (
         context: never,
         task: () => AsyncGenerator<Uint8Array>,

@@ -7,6 +7,7 @@ import type { TransferRequestContext } from "../transfer-request-pool";
 import type { DownloadTransferMetrics } from "./metrics";
 import type { DownloadRepository } from "./repository";
 
+import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
 import { PartFileWriter } from "./part-file";
 import { sleepWithAbort } from "./slow-chunk-monitor";
 import {
@@ -238,6 +239,7 @@ export class WorkuploadDownloadRunner {
                             response,
                             resumeOffset,
                             file.size,
+                            controller.signal,
                         );
                         rangeSupported = detectedRange;
                         logContext.rangeSupported = detectedRange;
@@ -482,11 +484,18 @@ export class WorkuploadDownloadRunner {
         this.deps.repository.syncWorkuploadDownloadedBytes(fileId);
     }
 
-    private async requireDownloadResponse(response: Response, start: number, fileSize: number) {
+    private async requireDownloadResponse(
+        response: Response,
+        start: number,
+        fileSize: number,
+        signal: AbortSignal,
+    ) {
         if (response.status !== 200 && response.status !== 206) {
-            await response.body?.cancel().catch(() => undefined);
             throw new WorkuploadResponseError(
-                `Workupload CDN HTTP ${response.status}.`,
+                formatHttpError(
+                    "Workupload CDN",
+                    await snapshotFailedResponse(response, { signal }),
+                ),
                 response.status,
             );
         }

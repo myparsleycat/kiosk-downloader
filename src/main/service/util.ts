@@ -20,8 +20,8 @@ import { trim } from "es-toolkit";
 import fse from "fs-extra";
 
 import { kd } from "..";
-export { processChunked, trimTrailingNul } from "./util-pure";
-import { trimTrailingNul } from "./util-pure";
+import { filePathsFromUriList } from "./util-pure";
+export { processChunked } from "./util-pure";
 
 export function getAppStatus(): AppStatus {
     return {
@@ -62,8 +62,8 @@ export function closeAllWindows() {
     });
 }
 
-export function copyStr(str: string) {
-    clipboard.writeText(str);
+export async function copyStr(str: string) {
+    await clipboard.writeText(str);
 }
 
 export function openPath(path: string) {
@@ -128,29 +128,18 @@ export function shutdownSystem() {
     }
 }
 
-export function getClipboardFiles(): string[] {
-    const buffer = clipboard.readBuffer("FileNameW");
-    if (buffer && buffer.length > 0) {
-        const path = trimTrailingNul(buffer.toString("ucs2"));
-        if (path) return [path];
+export async function getClipboardFiles(): Promise<string[]> {
+    const items = await clipboard.read();
+    const paths: string[] = [];
+    for (const item of items) {
+        if (!item.types.includes("text/uri-list")) continue;
+        const payload = await item.getType("text/uri-list");
+        if (!(payload instanceof Blob)) {
+            throw new TypeError("Expected text/uri-list clipboard payload to be a Blob");
+        }
+        paths.push(...filePathsFromUriList(await payload.text()));
     }
-
-    const text = clipboard.read("text/uri-list");
-    if (text) {
-        return text
-            .split(/\r?\n/)
-            .filter((line) => line.trim().startsWith("file://"))
-            .map((line) => {
-                const url = new URL(line.trim());
-                let p = decodeURIComponent(url.pathname);
-                if (p.startsWith("/")) {
-                    p = p.slice(1);
-                }
-                return p;
-            });
-    }
-
-    return [];
+    return paths;
 }
 
 export async function getPathMetadata(path: string): Promise<PathMetadata> {

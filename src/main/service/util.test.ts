@@ -1,29 +1,50 @@
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
-import { processChunked, trimTrailingNul } from "./util-pure";
+import { filePathsFromUriList, processChunked } from "./util-pure";
 
-const NUL = String.fromCharCode(0);
-
-describe("trimTrailingNul", () => {
-    it("strips a single trailing NUL", () => {
-        expect(trimTrailingNul(`C:\\path\\file${NUL}`)).toBe("C:\\path\\file");
+describe("filePathsFromUriList", () => {
+    it("converts file URIs to filesystem paths", () => {
+        expect(filePathsFromUriList("file:///tmp/a.txt")).toEqual([
+            fileURLToPath("file:///tmp/a.txt"),
+        ]);
+        expect(filePathsFromUriList("file:///C:/Downloads/a.txt")).toEqual([
+            fileURLToPath("file:///C:/Downloads/a.txt"),
+        ]);
     });
 
-    it("strips multiple trailing NULs", () => {
-        expect(trimTrailingNul(`C:\\path${NUL}${NUL}${NUL}`)).toBe("C:\\path");
+    it("keeps multiple file URIs in list order", () => {
+        expect(filePathsFromUriList("file:///tmp/a.txt\r\nfile:///tmp/b.txt")).toEqual([
+            fileURLToPath("file:///tmp/a.txt"),
+            fileURLToPath("file:///tmp/b.txt"),
+        ]);
     });
 
-    it("leaves embedded NULs untouched", () => {
-        expect(trimTrailingNul(`a${NUL}b${NUL}`)).toBe(`a${NUL}b`);
+    it("skips comments, blanks, and non-file URIs", () => {
+        expect(
+            filePathsFromUriList(
+                [
+                    "# comment",
+                    "",
+                    "  ",
+                    "http://example.com",
+                    "file:///tmp/a.txt",
+                    "https://example.com",
+                ].join("\n"),
+            ),
+        ).toEqual([fileURLToPath("file:///tmp/a.txt")]);
     });
 
-    it("returns an empty string when the input is all NULs", () => {
-        expect(trimTrailingNul(NUL.repeat(5))).toBe("");
+    it("skips malformed file URIs", () => {
+        expect(filePathsFromUriList("file://[\nfile:///tmp/a.txt")).toEqual([
+            fileURLToPath("file:///tmp/a.txt"),
+        ]);
     });
 
-    it("returns the value unchanged when there is no trailing NUL", () => {
-        expect(trimTrailingNul("plain")).toBe("plain");
-        expect(trimTrailingNul("")).toBe("");
+    it("returns an empty array when there are no file URIs", () => {
+        expect(filePathsFromUriList("")).toEqual([]);
+        expect(filePathsFromUriList("# only a comment")).toEqual([]);
     });
 });
 

@@ -15,17 +15,17 @@ import type {
     UploadSourceFile,
 } from "./types";
 
+import {
+    cborHttpError,
+    formatHttpError,
+    snapshotFailedResponse,
+    type CborResponse,
+} from "../../lib/http-error";
 import { UPLOAD_SEGMENT_SIZE } from "./types";
 
 const API_BASE_URL = "https://api.kio.ac";
 
 const UPLOAD_STREAM_CHUNK_SIZE = 64 * 1024;
-
-type CborResponse = {
-    status: number;
-    raw: Buffer;
-    body: unknown;
-};
 
 export class UploadSessionExpiredError extends Error {
     public constructor(message: string) {
@@ -318,10 +318,7 @@ export class KioUploadClient {
         );
 
         if (response.status !== 200 || !response.body) {
-            const errorBody = asRecord(response.body) ?? {};
-            throw new Error(
-                `collection/create 실패: HTTP ${response.status} ${JSON.stringify(errorBody)}`,
-            );
+            throw cborHttpError("collection/create 실패:", response);
         }
 
         const parsed = asRecord(response.body);
@@ -398,9 +395,7 @@ export class KioUploadClient {
             ) {
                 throw new Error(`segment/upload 치명적 오류: ${code} — ${errorMessage}`);
             }
-            throw new Error(
-                `segment/upload 실패: HTTP ${response.status} ${JSON.stringify(errorBody)}`,
-            );
+            throw cborHttpError("segment/upload 실패:", response);
         }
 
         const segResp = asRecord(response.body);
@@ -453,8 +448,9 @@ export class KioUploadClient {
             return;
         }
 
-        const text = await response.text().catch(() => "");
-        throw new Error(`edge PUT 실패: HTTP ${response.status} ${text}`);
+        throw new Error(
+            formatHttpError("edge PUT 실패:", await snapshotFailedResponse(response, { signal })),
+        );
     }
 
     public async completeCollection(uploadToken: string): Promise<void> {
@@ -478,9 +474,7 @@ export class KioUploadClient {
                     "업로드 세션이 만료되었거나 더 이상 존재하지 않습니다.",
                 );
             }
-            throw new Error(
-                `collection/complete 실패: HTTP ${response.status} ${JSON.stringify(errorBody)}`,
-            );
+            throw cborHttpError("collection/complete 실패:", response);
         }
     }
 
@@ -525,6 +519,7 @@ export class KioUploadClient {
                 status: response.status,
                 raw,
                 body: decoded,
+                headers: response.headers,
             };
         });
     }

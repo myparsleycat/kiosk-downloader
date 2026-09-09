@@ -10,6 +10,7 @@ import pLimit from "p-limit";
 import type { KioskDownloader } from "../..";
 import type { DownloadCollectionRow, LoadedTransferCollection } from "./types";
 
+import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
 import { TransferRateLimitError } from "../transfer-request-pool";
 import {
     COLLECTION_EXPIRES_NEVER,
@@ -238,14 +239,16 @@ export class TransferItApiClient {
                         throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
                     }
                     if (response.status === 509) {
-                        await response.body?.cancel().catch(() => undefined);
-                        throw new TransferRateLimitError(
-                            parseTransferRetryAfterMs(response.headers.get("retry-after")),
+                        const retryAfterMs = parseTransferRetryAfterMs(
+                            response.headers.get("retry-after"),
                         );
+                        await response.body?.cancel().catch(() => undefined);
+                        throw new TransferRateLimitError(retryAfterMs);
                     }
                     if (!response.ok) {
-                        await response.body?.cancel().catch(() => undefined);
-                        throw new Error(`Transfer API HTTP ${response.status}.`);
+                        throw new Error(
+                            formatHttpError("Transfer API", await snapshotFailedResponse(response)),
+                        );
                     }
 
                     const raw = await response.text();

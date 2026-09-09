@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import {
     COLLECTION_INVALID_PASSWORD_ERROR,
     COLLECTION_PASSWORD_REQUIRED_ERROR,
@@ -16,6 +18,7 @@ vi.mock("electron", () => ({ shell: { openPath: vi.fn(), showItemInFolder: vi.fn
 vi.mock("../util", () => ({ showOpenDialog: vi.fn(), showSaveDialog: vi.fn() }));
 
 const URL = `https://kio.ac/c/${"a".repeat(22)}`;
+const SAVE_PATH = path.resolve("downloads");
 
 type DownloadServiceInternals = {
     loadCollectionUnlocked: (
@@ -278,7 +281,7 @@ describe("DownloadService prepared draft", () => {
         await expect(
             service.create({
                 draftId: prepared.draftId,
-                savePath: "E:\\Downloads",
+                savePath: SAVE_PATH,
                 selectedPaths: ["a.txt"],
             }),
         ).resolves.toMatchObject({ id: "created" });
@@ -311,7 +314,7 @@ describe("DownloadService prepared draft", () => {
 
         const creating = service.create({
             draftId: prepared.draftId,
-            savePath: "E:\\Downloads",
+            savePath: SAVE_PATH,
             selectedPaths: ["a.txt"],
         });
         await vi.waitFor(() => expect(state.emitUpdate).toHaveBeenCalledTimes(1));
@@ -340,14 +343,14 @@ describe("DownloadService prepared draft", () => {
         await expect(
             service.create({
                 draftId: prepared.draftId,
-                savePath: "E:\\Downloads",
+                savePath: SAVE_PATH,
                 selectedPaths: ["not-in-draft.txt"],
             }),
         ).rejects.toThrow("not part of the prepared draft");
         await expect(
             service.create({
                 draftId: prepared.draftId,
-                savePath: "E:\\Downloads",
+                savePath: SAVE_PATH,
                 selectedPaths: ["a.txt"],
             }),
         ).resolves.toMatchObject({ id: "created" });
@@ -578,7 +581,7 @@ describe("DownloadService prepared draft", () => {
         await expect(
             service.create({
                 draftId: first.draftId,
-                savePath: "E:\\Downloads",
+                savePath: SAVE_PATH,
                 selectedPaths: ["a.txt"],
             }),
         ).resolves.toMatchObject({ id: "created" });

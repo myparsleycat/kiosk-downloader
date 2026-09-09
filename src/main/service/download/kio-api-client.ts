@@ -17,13 +17,14 @@ import type {
     SegmentDescriptor,
 } from "./types";
 
-const API_BASE_URL = "https://api.kio.ac";
+import {
+    cborHttpError,
+    formatHttpError,
+    snapshotFailedResponse,
+    type CborResponse,
+} from "../../lib/http-error";
 
-type CborResponse = {
-    status: number;
-    raw: Buffer;
-    body: unknown;
-};
+const API_BASE_URL = "https://api.kio.ac";
 
 function asBuffer(value: unknown): Buffer {
     if (Buffer.isBuffer(value)) {
@@ -140,7 +141,7 @@ export class KioApiClient {
         const segments = Array.isArray(firstFile?.segments) ? firstFile.segments : [];
 
         if (response.status !== 200 || segments.length === 0) {
-            throw new Error(`file/gets failed: HTTP ${response.status}`);
+            throw cborHttpError("file/gets failed:", response);
         }
 
         return segments.map((segment): SegmentDescriptor => {
@@ -211,7 +212,7 @@ export class KioApiClient {
         }
 
         if (first.status !== 418) {
-            throw new Error(`collection/get failed: HTTP ${first.status}`);
+            throw cborHttpError("collection/get failed:", first);
         }
 
         const meta = asRecord(firstBody?.meta);
@@ -241,7 +242,7 @@ export class KioApiClient {
             if (secondBody?.code === "collection:invalid_protector_config") {
                 throw new Error(COLLECTION_INVALID_PASSWORD_ERROR);
             }
-            throw new Error(`collection/get failed: HTTP ${second.status}`);
+            throw cborHttpError("collection/get failed:", second);
         }
 
         return this.parseCollectionResponse(secondBody, true);
@@ -273,7 +274,7 @@ export class KioApiClient {
             );
             const body = asRecord(response.body);
             if (response.status !== 200 || !body) {
-                throw new Error(`directory/get failed for "${name}": HTTP ${response.status}`);
+                throw cborHttpError(`directory/get failed for "${name}":`, response);
             }
 
             const files = (Array.isArray(body.files) ? body.files : []).map((file) => {
@@ -364,7 +365,12 @@ export class KioApiClient {
                     } catch {
                         decoded = null;
                     }
-                    return { status: response.status, raw, body: decoded };
+                    return {
+                        status: response.status,
+                        raw,
+                        body: decoded,
+                        headers: response.headers,
+                    };
                 },
             );
         });
@@ -447,8 +453,12 @@ export async function* streamSegmentBytes(
             });
 
             if (response.status !== 200 && response.status !== 206) {
-                await response.body?.cancel().catch(() => undefined);
-                throw new Error(`${options.label} HTTP ${response.status}`);
+                throw new Error(
+                    formatHttpError(
+                        options.label,
+                        await snapshotFailedResponse(response, { signal }),
+                    ),
+                );
             }
 
             if (!response.body) {

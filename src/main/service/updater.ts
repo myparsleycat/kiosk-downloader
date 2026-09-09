@@ -18,6 +18,7 @@ import z from "zod";
 
 import type { KioskDownloader } from "..";
 
+import { snapshotFailedResponse } from "../lib/http-error";
 import { openExternal } from "./util";
 
 const require = createRequire(import.meta.url);
@@ -302,12 +303,15 @@ export class Updater {
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
             });
-            const responseText = await response.text();
             if (!response.ok) {
+                const snapshot = await snapshotFailedResponse(response);
                 throw new Error(
-                    `GitHub releases request failed with status ${response.status}: ${responseText}`,
+                    `GitHub releases request failed with status ${snapshot.status}${
+                        snapshot.bodyPreview ? `: ${snapshot.bodyPreview}` : ""
+                    }`,
                 );
             }
+            const responseText = await response.text();
 
             const release = githubReleaseSchema.parse(JSON.parse(responseText));
             const latestVersion = release.tag_name.replace(/^v/i, "");
@@ -565,12 +569,15 @@ export class Updater {
             }),
         });
 
-        const responseText = await response.text();
         if (!response.ok) {
+            const snapshot = await snapshotFailedResponse(response);
             throw new Error(
-                `Release notes translation failed with status ${response.status}: ${responseText}`,
+                `Release notes translation failed with status ${snapshot.status}${
+                    snapshot.bodyPreview ? `: ${snapshot.bodyPreview}` : ""
+                }`,
             );
         }
+        const responseText = await response.text();
 
         const translatedText = this.extractTranslatedText(responseText);
         if (!translatedText || translatedText === originalText) {
