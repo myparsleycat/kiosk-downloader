@@ -3,6 +3,7 @@ import type { DownloadRepository } from "./repository";
 import type { GlobalSegmentPool } from "./segment-pool";
 import type { DownloadChunkRow, DownloadCollectionRow, DownloadFileRow } from "./types";
 
+import { CborHttpError } from "../../lib/http-error";
 import { PartFileWriter } from "./part-file";
 
 type KioskDownloadRunnerDeps = {
@@ -37,15 +38,21 @@ export type KioskDownloadRunInput = {
 
 export class KioskDownloadRunner {
     private readonly collectionTokens = new Map<string, string>();
+    private readonly tokenRefreshes = new Map<
+        string,
+        { signal: AbortSignal; promise: Promise<string> }
+    >();
 
     public constructor(private readonly deps: KioskDownloadRunnerDeps) {}
 
     public clearCollection(collectionId: string) {
         this.collectionTokens.delete(collectionId);
+        this.tokenRefreshes.delete(collectionId);
     }
 
     public destroy() {
         this.collectionTokens.clear();
+        this.tokenRefreshes.clear();
     }
 
     public async runFile(input: KioskDownloadRunInput) {
@@ -113,24 +120,86 @@ export class KioskDownloadRunner {
         signal: AbortSignal,
     ) {
         return await this.deps.runControl(async () => {
-            throwIfAborted(signal);
-            const cachedToken = this.collectionTokens.get(collection.id);
-            const cat = cachedToken ?? (await this.refreshCollectionToken(collection, signal));
-            throwIfAborted(signal);
-            const segments = await this.deps.api.getSegments(file.remoteId, cat, signal);
-            throwIfAborted(signal);
-            return segments;
+            for (let attempt = 0; ; attempt++) {
+                throwIfAborted(signal);
+                const cat = await this.getCollectionToken(collection, signal);
+                throwIfAborted(signal);
+
+                try {
+                    const segments = await this.deps.api.getSegments(file.remoteId, cat, signal);
+                    throwIfAborted(signal);
+                    return segments;
+                } catch (error) {
+                    throwIfAborted(signal);
+                    if (!(error instanceof CborHttpError) || error.status !== 401) throw error;
+                    // A late 401 must not invalidate a newer token another file already obtained.
+                    if (this.collectionTokens.get(collection.id) === cat) {
+                        this.collectionTokens.delete(collection.id);
+                    }
+                    if (attempt > 0) throw error;
+                }
+            }
         });
     }
 
-    private async refreshCollectionToken(collection: DownloadCollectionRow, signal: AbortSignal) {
-        const refreshed = await this.deps.api.refreshCollectionToken(collection, signal);
+    private getCollectionToken(collection: DownloadCollectionRow, signal: AbortSignal) {
+        return (
+            this.collectionTokens.get(collection.id) ??
+            this.refreshCollectionToken(collection, signal)
+        );
+    }
+
+    private async refreshCollectionToken(
+        collection: DownloadCollectionRow,
+        signal: AbortSignal,
+    ): Promise<string> {
         throwIfAborted(signal);
-        this.deps.repository.updateCollectionFreshMeta(collection.id, {
-            expires: refreshed.expires,
-        });
-        this.collectionTokens.set(collection.id, refreshed.cat);
-        return refreshed.cat;
+        const inFlight = this.tokenRefreshes.get(collection.id);
+        if (inFlight && !inFlight.signal.aborted) {
+            let onAbort: () => void = () => undefined;
+            const aborted = new Promise<never>((_resolve, reject) => {
+                onAbort = () =>
+                    reject(new DOMException("The operation was aborted.", "AbortError"));
+                signal.addEventListener("abort", onAbort, { once: true });
+            });
+            try {
+                return await Promise.race([inFlight.promise, aborted]);
+            } catch (error) {
+                throwIfAborted(signal);
+                if (!inFlight.signal.aborted) throw error;
+                // Pausing the file that owns the refresh must not pause its siblings.
+                return await this.refreshCollectionToken(collection, signal);
+            } finally {
+                signal.removeEventListener("abort", onAbort);
+            }
+        }
+
+        const refresh = {
+            signal,
+            promise: this.deps.api.refreshCollectionToken(collection, signal).then((refreshed) => {
+                throwIfAborted(signal);
+                if (this.tokenRefreshes.get(collection.id) !== refresh) {
+                    throw new DOMException(
+                        "The collection token refresh was cleared.",
+                        "AbortError",
+                    );
+                }
+                this.deps.repository.updateCollectionFreshMeta(collection.id, {
+                    expires: refreshed.expires,
+                });
+                this.collectionTokens.set(collection.id, refreshed.cat);
+                return refreshed.cat;
+            }),
+        };
+        this.tokenRefreshes.set(collection.id, refresh);
+
+        try {
+            return await refresh.promise;
+        } finally {
+            if (this.tokenRefreshes.get(collection.id) === refresh) {
+                this.tokenRefreshes.delete(collection.id);
+            }
+        }
     }
 }
 

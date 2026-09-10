@@ -177,6 +177,18 @@ describe("KioApiClient control cancellation", () => {
 });
 
 describe("KioApiClient HTTP errors", () => {
+    it("preserves the status of a rejected CAT for token refresh recovery", async () => {
+        const client = controlClient(async () =>
+            cborResponse(401, { code: "auth:invalid_token", message: "invalid token" }),
+        );
+        await expect(client.getSegments("aa".repeat(16), "invalid-cat")).rejects.toMatchObject({
+            name: "CborHttpError",
+            status: 401,
+            message:
+                'file/gets failed: HTTP 401: {"code":"auth:invalid_token","message":"invalid token"}',
+        });
+    });
+
     it("includes decoded error bodies in file/gets failures", async () => {
         const client = controlClient(async () =>
             cborResponse(403, { code: "collection:not_found", message: "gone" }),
