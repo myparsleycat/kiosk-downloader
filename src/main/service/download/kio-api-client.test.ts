@@ -1,8 +1,15 @@
 import { encode } from "cbor-x";
 import { describe, expect, it, vi } from "vitest";
 
+import type { HttpErrorSnapshot } from "../../lib/http-error";
+
 import { TimeoutError, type ControlRequestOptions } from "../../lib/http";
-import { KioApiClient, streamSegmentBytes } from "./kio-api-client";
+import {
+    isSegmentTokenExpired,
+    KioApiClient,
+    SegmentHttpError,
+    streamSegmentBytes,
+} from "./kio-api-client";
 
 describe("streamSegmentBytes request pool", () => {
     it("holds a Kiosk download permit until the payload body is consumed", async () => {
@@ -220,7 +227,7 @@ describe("KioApiClient HTTP errors", () => {
             }),
         );
 
-        await expect(async () => {
+        const failure = async () => {
             for await (const _chunk of streamSegmentBytes(
                 kd,
                 { type: "cdn", data: new Map([["url", "https://cdn.test/file"]]) },
@@ -234,8 +241,87 @@ describe("KioApiClient HTTP errors", () => {
                 },
             )) {
             }
-        }).rejects.toThrow(/Segment HTTP 403: .*error code: 1020.*cf-ray=ray-1/);
+        };
+        const error = await failure().then(
+            () => null,
+            (caught) => caught,
+        );
+
+        expect(error).toBeInstanceOf(SegmentHttpError);
+        expect(error).toMatchObject({ status: 403 });
+        expect(String((error as Error)?.message)).toMatch(
+            /Segment HTTP 403: .*error code: 1020.*cf-ray=ray-1/,
+        );
+        expect(isSegmentTokenExpired(error)).toBe(false);
         expect(release).toHaveBeenCalledOnce();
+    });
+});
+
+describe("isSegmentTokenExpired", () => {
+    const snapshot = (overrides: Partial<HttpErrorSnapshot> = {}): HttpErrorSnapshot => ({
+        status: 403,
+        statusText: "",
+        contentType: "application/xml",
+        contentLength: null,
+        headers: {},
+        bodyKind: "html",
+        bodyPreview: "",
+        bodyBytes: 0,
+        ...overrides,
+    });
+
+    it("recognizes an explicitly expired credential body on 403", () => {
+        expect(
+            isSegmentTokenExpired(
+                new SegmentHttpError(
+                    "Segment HTTP 403: Request has expired",
+                    403,
+                    snapshot({ bodyPreview: "Request has expired" }),
+                ),
+            ),
+        ).toBe(true);
+    });
+
+    it("recognizes x-amz expiration headers on 403", () => {
+        expect(
+            isSegmentTokenExpired(
+                new SegmentHttpError(
+                    "Segment HTTP 403",
+                    403,
+                    snapshot({ headers: { "x-amz-error-code": "ExpiredToken" } }),
+                ),
+            ),
+        ).toBe(true);
+    });
+
+    it("treats a 401 as an expired credential", () => {
+        expect(
+            isSegmentTokenExpired(
+                new SegmentHttpError("Segment HTTP 401", 401, snapshot({ status: 401 })),
+            ),
+        ).toBe(true);
+    });
+
+    it("rejects non-expiration 403s and other statuses", () => {
+        expect(
+            isSegmentTokenExpired(
+                new SegmentHttpError(
+                    "Segment HTTP 403: error code: 1020",
+                    403,
+                    snapshot({ bodyPreview: "error code: 1020" }),
+                ),
+            ),
+        ).toBe(false);
+        expect(
+            isSegmentTokenExpired(
+                new SegmentHttpError(
+                    "Segment HTTP 404",
+                    404,
+                    snapshot({ status: 404, bodyPreview: "Request has expired" }),
+                ),
+            ),
+        ).toBe(false);
+        expect(isSegmentTokenExpired(new Error("plain"))).toBe(false);
     });
 });
 

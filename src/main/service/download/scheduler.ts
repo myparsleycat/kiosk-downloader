@@ -136,6 +136,8 @@ export class DownloadScheduler {
             api,
             repository: this.repository,
             metrics: this.metrics,
+            refreshSegments: (collection, file, signal) =>
+                this.kioskRunner.getFileSegments(collection, file, signal),
             onChunkSettled: () => {
                 void this.schedule();
             },

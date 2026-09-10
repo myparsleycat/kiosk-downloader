@@ -22,6 +22,7 @@ import {
     formatHttpError,
     snapshotFailedResponse,
     type CborResponse,
+    type HttpErrorSnapshot,
 } from "../../lib/http-error";
 
 const API_BASE_URL = "https://api.kio.ac";
@@ -413,6 +414,30 @@ function resolveSegmentRequest(segment: SegmentDescriptor) {
     return { url, headers };
 }
 
+export class SegmentHttpError extends Error {
+    public constructor(
+        message: string,
+        public readonly status: number,
+        public readonly snapshot: HttpErrorSnapshot,
+    ) {
+        super(message);
+        this.name = "SegmentHttpError";
+    }
+}
+
+export function isSegmentTokenExpired(error: unknown) {
+    if (!(error instanceof SegmentHttpError)) return false;
+    if (error.status === 401) return true;
+    if (error.status !== 403) return false;
+    // CDN 403s are ambiguous (e.g. Cloudflare WAF blocks); only an explicitly
+    // expired credential justifies refetching the segment descriptors.
+    const amzCode = error.snapshot.headers["x-amz-error-code"] ?? "";
+    const amzMessage = error.snapshot.headers["x-amz-error-message"] ?? "";
+    return [error.snapshot.bodyPreview, amzCode, amzMessage].some((text) =>
+        text.toLowerCase().includes("expired"),
+    );
+}
+
 export async function* streamSegmentBytes(
     kd: KioskDownloader,
     segment: SegmentDescriptor,
@@ -453,11 +478,11 @@ export async function* streamSegmentBytes(
             });
 
             if (response.status !== 200 && response.status !== 206) {
-                throw new Error(
-                    formatHttpError(
-                        options.label,
-                        await snapshotFailedResponse(response, { signal }),
-                    ),
+                const snapshot = await snapshotFailedResponse(response, { signal });
+                throw new SegmentHttpError(
+                    formatHttpError(options.label, snapshot),
+                    response.status,
+                    snapshot,
                 );
             }
 
