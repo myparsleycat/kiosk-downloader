@@ -572,12 +572,14 @@ export class GlobalSegmentPool {
                         continue;
                     }
                     if (!refreshedDescriptor) {
-                        refreshedDescriptor = true;
                         try {
                             session.segments = await this.getFreshSegments(
                                 session,
                                 controller.signal,
                             );
+                            // Only a successful refetch may suppress later refreshes; a transient
+                            // refresh failure must keep retrying through the backoff path below.
+                            refreshedDescriptor = true;
                             this.deps.kd.logger.warn(
                                 {
                                     channel: "segment-download",

@@ -300,6 +300,42 @@ describe("GlobalSegmentPool recovery", () => {
         },
     );
 
+    it("retries the descriptor refresh after a transient refresh failure", async () => {
+        vi.useFakeTimers();
+        const { pool, input, payloadRequest, refreshSegments, logger } = createRunningPool();
+        input.maxChunkRetries = 1;
+        const expiredResponse = async () =>
+            new Response("<Error><Message>Request has expired</Message></Error>", {
+                status: 403,
+                headers: { "content-type": "application/xml" },
+            });
+        payloadRequest
+            .mockImplementationOnce(expiredResponse)
+            .mockImplementationOnce(expiredResponse)
+            .mockImplementation(async () => new Response("x"));
+        refreshSegments.mockImplementationOnce(async () => {
+            throw new Error("refresh failed");
+        });
+        pool.resize(1);
+
+        const outcome = pool.register(input);
+        await vi.advanceTimersByTimeAsync(60_000);
+        await expect(outcome).resolves.toBe("completed");
+
+        expect(refreshSegments).toHaveBeenCalledTimes(2);
+        expect(payloadRequest).toHaveBeenCalledTimes(4);
+        expect(payloadRequest.mock.calls.map((call) => call[0])).toEqual([
+            "https://cdn.test/file",
+            "https://cdn.test/file",
+            "https://cdn.test/fresh",
+            "https://cdn.test/fresh",
+        ]);
+        expect(logger.error).toHaveBeenCalledWith(
+            expect.objectContaining({ reason: "segment-credential-refresh-failed" }),
+            "DownloadService:streamSegment",
+        );
+    });
+
     it("fails a chunk without refreshing on a non-expiration CDN 403", async () => {
         const { pool, input, payloadRequest, refreshSegments, repository } = createRunningPool();
         payloadRequest.mockResolvedValue(
