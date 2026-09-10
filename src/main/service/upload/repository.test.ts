@@ -451,3 +451,47 @@ describe("UploadRepository bundle-ordinal uniqueness", () => {
         expect(repo.hasBundleCollectionOrdinal("bundle", 0)).toBe(true);
     });
 });
+
+describe("UploadRepository.insertUpload startPaused", () => {
+    it("inserts the collection and files paused and resumes cleanly", async () => {
+        const db = new DatabaseClient(":memory:");
+        await db.reconcile();
+        const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
+
+        const id = repo.insertUpload({
+            created: {
+                collectionUuid: Buffer.alloc(16, 1),
+                uploadToken: "token",
+                root: { id: Buffer.alloc(16), name: "", files: [], children: [] },
+            },
+            options: {
+                name: "Paused upload",
+                description: "",
+                password: "",
+                expires: Date.now() + 60_000,
+            },
+            files: [
+                {
+                    path: "a.txt",
+                    name: "a.txt",
+                    size: 4,
+                    fsPath: "/tmp/a.txt",
+                    sourceMtimeMs: 0,
+                },
+            ],
+            segmentSize: 16,
+            tree: { type: "dir", id: "root", name: "", entries: [] },
+            startPaused: true,
+        });
+
+        expect(repo.getCollection(id)).toMatchObject({ status: "paused" });
+        expect(repo.listFiles(id)).toMatchObject([{ status: "paused", pausedByUser: 0 }]);
+        expect(repo.listRunnableCollections().map((collection) => collection.id)).not.toContain(id);
+
+        repo.resumeCollection(id, false);
+
+        expect(repo.getCollection(id)).toMatchObject({ status: "queued" });
+        expect(repo.listFiles(id)).toMatchObject([{ status: "pending", pausedByUser: 0 }]);
+        expect(repo.listRunnableCollections().map((collection) => collection.id)).toContain(id);
+    });
+});

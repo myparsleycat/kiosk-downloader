@@ -29,6 +29,7 @@ export interface AppSettings {
     "transfer.uploadMaxChunkRetries": number;
     "transfer.streamWriteBatchBytes": number;
     "transfer.inflateBufferBytes": number;
+    "transfer.startTransfersPaused": boolean;
     "transfer.startupResumeMode": StartupResumeMode;
     "transfer.uploadStartupResumeMode": StartupResumeMode;
     "transfer.downloadBandwidthLimitMibps": number;
@@ -176,6 +177,11 @@ export const APP_SETTINGS = {
         publicKey: "transfer.inflateBufferBytes",
         scope: "transfer",
         storageKey: "transfer.inflateBufferBytes",
+    },
+    "transfer.startTransfersPaused": {
+        publicKey: "transfer.startTransfersPaused",
+        scope: "transfer",
+        storageKey: "transfer.startTransfersPaused",
     },
     "transfer.startupResumeMode": {
         publicKey: "transfer.startupResumeMode",

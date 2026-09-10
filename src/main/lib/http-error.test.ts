@@ -170,6 +170,7 @@ describe("cborHttpError", () => {
             body: { code: "collection:not_found" },
         });
         expect(error).toBeInstanceOf(Error);
+        expect(error.status).toBe(403);
         expect(error.message).toBe('file/gets failed: HTTP 403: {"code":"collection:not_found"}');
     });
 });

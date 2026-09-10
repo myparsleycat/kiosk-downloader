@@ -14,6 +14,7 @@ import type {
     ZipEntrySegmentRange,
 } from "./types";
 
+import { isSegmentTokenExpired } from "./kio-api-client";
 import {
     SLOW_CHUNK_MAX_RECONNECTS,
     SLOW_CHUNK_THRESHOLD_RATIO,
@@ -54,6 +55,9 @@ type SegmentWorkItem = {
 type FileDownloadSession = {
     id: string;
     registration: FileDownloadRegistration;
+    /** Mutable so a credential-expiry recovery can install refreshed descriptors. */
+    segments: SegmentDescriptor[];
+    segmentsRefresh: Promise<SegmentDescriptor[]> | null;
     remainingChunks: number;
     inFlightChunks: number;
     failed: boolean;
@@ -69,6 +73,11 @@ type SegmentPoolDeps = {
     api: KioApiClient;
     repository: DownloadRepository;
     metrics: DownloadTransferMetrics;
+    refreshSegments: (
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        signal: AbortSignal,
+    ) => Promise<SegmentDescriptor[]>;
     onChunkSettled: () => void;
     onProgress: (collectionId: string, fileId: string) => void;
 };
@@ -146,6 +155,8 @@ export class GlobalSegmentPool {
             const session: FileDownloadSession = {
                 id: registration.file.id,
                 registration,
+                segments: registration.segments,
+                segmentsRefresh: null,
                 remainingChunks: registration.chunks.length,
                 inFlightChunks: 0,
                 failed: false,
@@ -315,7 +326,6 @@ export class GlobalSegmentPool {
         const {
             collection,
             file,
-            segments,
             partWriter,
             controller,
             maxChunkRetries,
@@ -341,7 +351,7 @@ export class GlobalSegmentPool {
         }
 
         const segmentIndex = mode === "byte-range" ? range!.segmentIndex : chunk.chunkIndex;
-        const segment = segments[segmentIndex];
+        const segment = session.segments[segmentIndex];
         if (!segment) {
             this.failSession(session, `Missing segment ${segmentIndex}.`, controller);
             return;
@@ -351,6 +361,7 @@ export class GlobalSegmentPool {
         let slowReconnects = 0;
         let needsMarkDownloading = true;
         let committedBytes = Math.max(0, Math.min(chunk.size, chunk.downloadedBytes));
+        let refreshedDescriptor = false;
 
         while (errorAttempt <= maxAttempts) {
             if (session.failed || session.aborted || controller.signal.aborted) {
@@ -369,6 +380,8 @@ export class GlobalSegmentPool {
                     attemptController.abort();
                 }
             };
+            const attemptSegments = session.segments;
+            const attemptSegment = attemptSegments[segmentIndex] ?? segment;
             const transfer = this.slowChunkMonitor.register({
                 phase: "request-wait",
                 fileId: file.id,
@@ -395,7 +408,7 @@ export class GlobalSegmentPool {
                     mode === "byte-range" && range
                         ? this.deps.api.streamSegmentRange(
                               collection.id,
-                              segment,
+                              attemptSegment,
                               {
                                   localStart: range.localStart + resumeOffset,
                                   localEnd: range.localEnd,
@@ -406,7 +419,7 @@ export class GlobalSegmentPool {
                           )
                         : this.deps.api.streamSegment(
                               collection.id,
-                              segment,
+                              attemptSegment,
                               chunk,
                               attemptController.signal,
                               onPhaseChange,
@@ -553,6 +566,55 @@ export class GlobalSegmentPool {
                     );
                 }
 
+                if (isSegmentTokenExpired(error)) {
+                    // A sibling chunk may have refreshed the descriptors while this transfer ran.
+                    if (attemptSegments !== session.segments) {
+                        continue;
+                    }
+                    if (!refreshedDescriptor) {
+                        try {
+                            session.segments = await this.getFreshSegments(
+                                session,
+                                controller.signal,
+                            );
+                            // Only a successful refetch may suppress later refreshes; a transient
+                            // refresh failure must keep retrying through the backoff path below.
+                            refreshedDescriptor = true;
+                            this.deps.kd.logger.warn(
+                                {
+                                    channel: "segment-download",
+                                    provider: "kiosk",
+                                    reason: "segment-credential-refresh",
+                                    collectionId: collection.id,
+                                    fileId: file.id,
+                                    chunkIndex: chunk.chunkIndex,
+                                    offset: chunk.offset,
+                                    segmentType: segment.type,
+                                },
+                                "DownloadService:streamSegment",
+                            );
+                            continue;
+                        } catch (refreshError) {
+                            if (controller.signal.aborted || session.aborted) {
+                                this.deps.repository.markChunkPending(file.id, chunk.chunkIndex);
+                                return;
+                            }
+                            this.deps.kd.logger.error(
+                                {
+                                    channel: "segment-download",
+                                    provider: "kiosk",
+                                    reason: "segment-credential-refresh-failed",
+                                    collectionId: collection.id,
+                                    fileId: file.id,
+                                    chunkIndex: chunk.chunkIndex,
+                                    message: toErrorMessage(refreshError),
+                                },
+                                "DownloadService:streamSegment",
+                            );
+                        }
+                    }
+                }
+
                 const message =
                     abortReason === "slow-chunk"
                         ? "Slow chunk stalled after reconnects"
@@ -614,6 +676,24 @@ export class GlobalSegmentPool {
                 controller.signal.removeEventListener("abort", onSessionAbort);
             }
         }
+    }
+
+    /** Coalesces descriptor refetches so concurrent chunks share one refresh. */
+    private getFreshSegments(session: FileDownloadSession, signal: AbortSignal) {
+        const pending = session.segmentsRefresh;
+        if (pending) {
+            return pending;
+        }
+        const registration = session.registration;
+        const refresh = this.deps
+            .refreshSegments(registration.collection, registration.file, signal)
+            .finally(() => {
+                if (session.segmentsRefresh === refresh) {
+                    session.segmentsRefresh = null;
+                }
+            });
+        session.segmentsRefresh = refresh;
+        return refresh;
     }
 
     private failSession(

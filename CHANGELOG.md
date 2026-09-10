@@ -1,3 +1,17 @@
+# [1.13.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.12.0...v1.13.0) (2026-09-10)
+
+
+### Bug Fixes
+
+* **download:** recover from failed segment descriptor refreshes ([bc64c8b](https://github.com/myparsleycat/kiosk-downloader/commit/bc64c8b6d529fb2eeee7f22359add66e92fb9eb7))
+* **download:** refresh expired collection access tokens ([95d1db4](https://github.com/myparsleycat/kiosk-downloader/commit/95d1db4fe1f8ae0319c8f35bd9466c239c232851))
+* **download:** refresh segment descriptors on expired CDN credentials ([812178d](https://github.com/myparsleycat/kiosk-downloader/commit/812178d618ebf1c92405401d3c77ef783ea9a15b))
+
+
+### Features
+
+* **transfer:** add setting to start new transfers paused ([64cc807](https://github.com/myparsleycat/kiosk-downloader/commit/64cc8077825d72fcfac4e777675ed0e312c93646))
+
 # [1.12.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.11.1...v1.12.0) (2026-09-09)
 
 

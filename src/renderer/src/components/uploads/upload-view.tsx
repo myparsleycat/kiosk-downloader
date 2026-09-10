@@ -340,12 +340,16 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
         throw new Error("업로드를 만들지 못했습니다.");
       }
 
-      if (created.phase === "initializing" && created.status === "paused") {
-        toast.warning("확장 업로드 초기화가 중단되었습니다", {
-          description: created.error
-            ? `${created.error} 업로드 목록에서 시작을 눌러 다시 시도할 수 있습니다.`
-            : "업로드 목록에서 시작을 눌러 남은 초기화를 이어갈 수 있습니다.",
-        });
+      if (created.status === "paused") {
+        if (created.phase === "initializing" && created.error) {
+          toast.warning("확장 업로드 초기화가 중단되었습니다", {
+            description: `${created.error} 업로드 목록에서 시작을 눌러 다시 시도할 수 있습니다.`,
+          });
+        } else {
+          toast.success("업로드가 일시정지 상태로 추가되었습니다", {
+            description: `${name.trim()} · ${files.length}개 파일`,
+          });
+        }
       } else {
         toast.success("업로드가 시작되었습니다", {
           description: `${name.trim()} · ${files.length}개 파일`,

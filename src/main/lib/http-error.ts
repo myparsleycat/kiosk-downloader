@@ -146,12 +146,23 @@ function formatHttpErrorDetail(snapshot: HttpErrorSnapshot) {
     return suffix;
 }
 
+export class CborHttpError extends Error {
+    public constructor(
+        message: string,
+        public readonly status: number,
+    ) {
+        super(message);
+        this.name = "CborHttpError";
+    }
+}
+
 export function cborHttpError(label: string, response: CborResponse) {
-    return new Error(
+    return new CborHttpError(
         formatHttpError(
             label,
             snapshotDecodedBody(response.status, response.body, response.raw, response.headers),
         ),
+        response.status,
     );
 }
 
