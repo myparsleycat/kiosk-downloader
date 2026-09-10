@@ -1,7 +1,7 @@
 import type { KioskDownloader } from "../..";
 import type { SegmentDescriptor } from "./types";
 
-import { streamSegmentBytes } from "./kio-api-client";
+import { isSegmentTokenExpired, streamSegmentBytes } from "./kio-api-client";
 import { mapAbsoluteRangeToSegments } from "./zip-segment-map";
 
 export type ZipRangeReaderOptions = {
@@ -11,15 +11,18 @@ export type ZipRangeReaderOptions = {
     fileSize: number;
     collectionId: string;
     signal?: AbortSignal;
+    /** Refetch expired descriptors; long ZIP extractions outlive signed CDN credentials. */
+    refreshSegments?: (signal: AbortSignal) => Promise<SegmentDescriptor[]>;
 };
 
 export class ZipRangeReader {
     private readonly kd: KioskDownloader;
-    private readonly segments: SegmentDescriptor[];
+    private segments: SegmentDescriptor[];
     private readonly segmentSize: number;
     private readonly fileSize: number;
     private readonly signal?: AbortSignal;
     private readonly collectionId: string;
+    private readonly refreshSegments?: (signal: AbortSignal) => Promise<SegmentDescriptor[]>;
 
     public constructor(options: ZipRangeReaderOptions) {
         this.kd = options.kd;
@@ -28,6 +31,7 @@ export class ZipRangeReader {
         this.fileSize = options.fileSize;
         this.signal = options.signal;
         this.collectionId = options.collectionId;
+        this.refreshSegments = options.refreshSegments;
     }
 
     public get size() {
@@ -35,6 +39,19 @@ export class ZipRangeReader {
     }
 
     public async readUint8Array(absoluteOffset: number, length: number): Promise<Uint8Array> {
+        try {
+            return await this.readMappedRange(absoluteOffset, length);
+        } catch (error) {
+            const signal = this.signal ?? new AbortController().signal;
+            if (!this.refreshSegments || signal.aborted || !isSegmentTokenExpired(error)) {
+                throw error;
+            }
+            this.segments = await this.refreshSegments(signal);
+            return await this.readMappedRange(absoluteOffset, length);
+        }
+    }
+
+    private async readMappedRange(absoluteOffset: number, length: number): Promise<Uint8Array> {
         const ranges = mapAbsoluteRangeToSegments(
             absoluteOffset,
             length,

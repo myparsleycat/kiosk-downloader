@@ -136,6 +136,8 @@ export class DownloadScheduler {
             api,
             repository: this.repository,
             metrics: this.metrics,
+            refreshSegments: (collection, file, signal) =>
+                this.kioskRunner.getFileSegments(collection, file, signal),
             onChunkSettled: () => {
                 void this.schedule();
             },
@@ -882,6 +884,27 @@ export class DownloadScheduler {
                 entryPath: meta.path,
                 zipPassword: meta.password,
                 signal,
+                refreshSegments: async (refreshSignal) => {
+                    const freshSegments = await this.kioskRunner.getFileSegments(
+                        collection,
+                        file,
+                        refreshSignal,
+                    );
+                    this.kd.logger.warn(
+                        {
+                            channel: "segment-download",
+                            provider: "kiosk",
+                            reason: "segment-credential-refresh",
+                            collectionId: collection.id,
+                            fileId: file.id,
+                            filePath: file.path,
+                            entryPath: meta.path,
+                            stage: "zip-entry-download",
+                        },
+                        "DownloadService:runZipEntry",
+                    );
+                    return freshSegments;
+                },
             });
             try {
                 const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
