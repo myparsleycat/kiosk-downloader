@@ -334,6 +334,12 @@ export class Setting {
                 normalize: (value) =>
                     fromOptions(value, INFLATE_BUFFER_BYTES_OPTIONS, INFLATE_BUFFER_BYTES_DEFAULT),
             },
+            "transfer.startTransfersPaused": {
+                definition: APP_SETTINGS["transfer.startTransfersPaused"],
+                getDefault: () => false,
+                fromStored: (value) => parseBooleanSetting(value, false),
+                toStored: (value) => String(value),
+            },
             "transfer.startupResumeMode": {
                 definition: APP_SETTINGS["transfer.startupResumeMode"],
                 getDefault: () => "auto" as const,

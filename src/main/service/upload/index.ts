@@ -199,8 +199,9 @@ export class UploadService {
                 name: payload.options.name,
             },
             async () => {
+                const startPaused = await this.kd.setting.get("transfer.startTransfersPaused");
                 if (payload.mode === "integrated" || payload.mode === "compatible") {
-                    return await this.createBundle(payload, payload.mode);
+                    return await this.createBundle(payload, payload.mode, startPaused);
                 }
                 const files = await this.sanitizeCreateFiles(
                     await this.resolveCreateFiles(payload.tree),
@@ -232,6 +233,7 @@ export class UploadService {
                     })),
                     segmentSize: UPLOAD_SEGMENT_SIZE,
                     tree,
+                    startPaused,
                 });
 
                 this.backfillRemoteIds(collectionId, created.workItems);
@@ -245,7 +247,9 @@ export class UploadService {
                 );
 
                 await this.emitUpdate(collectionId);
-                void this.scheduler.schedule();
+                if (!startPaused) {
+                    void this.scheduler.schedule();
+                }
 
                 const item = this.repository.getItem(collectionId);
                 return item ? this.enrichItem(item) : null;
@@ -614,7 +618,11 @@ export class UploadService {
         return this.kd.lib.fs.sanitizeUploadFiles(files, asciiFilenames);
     }
 
-    private async createBundle(payload: CreateUploadPayload, mode: ExtendedUploadMode) {
+    private async createBundle(
+        payload: CreateUploadPayload,
+        mode: ExtendedUploadMode,
+        startPaused: boolean,
+    ) {
         const resolved = await this.resolveCreateFiles(payload.tree);
         const files = mode === "compatible" ? await this.sanitizeCreateFiles(resolved) : resolved;
         const bundleId = randomUUID();
@@ -641,7 +649,9 @@ export class UploadService {
         });
         this.clearDraftSources();
         await this.emitUpdate(bundleId);
-        await this.initializeBundle(this.repository.getBundle(bundleId)!, persistedPlan);
+        if (!startPaused) {
+            await this.initializeBundle(this.repository.getBundle(bundleId)!, persistedPlan);
+        }
         return this.repository.getItem(bundleId);
     }
 

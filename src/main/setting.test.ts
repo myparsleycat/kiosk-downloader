@@ -41,6 +41,26 @@ describe("request pool settings", () => {
     });
 });
 
+describe("start transfers paused setting", () => {
+    it("defaults to false and round-trips the stored value", async () => {
+        const { setting, stored } = createSetting({});
+
+        await expect(setting.get("transfer.startTransfersPaused")).resolves.toBe(false);
+        expect(stored.get("transfer.startTransfersPaused")).toBe("false");
+
+        await expect(setting.set("transfer.startTransfersPaused", true)).resolves.toBe(true);
+
+        await expect(setting.get("transfer.startTransfersPaused")).resolves.toBe(true);
+        expect(stored.get("transfer.startTransfersPaused")).toBe("true");
+    });
+
+    it("parses a corrupt stored value as false", async () => {
+        const { setting } = createSetting({ "transfer.startTransfersPaused": "bogus" });
+
+        await expect(setting.get("transfer.startTransfersPaused")).resolves.toBe(false);
+    });
+});
+
 function createSetting(initial: Record<string, string>) {
     const stored = new Map(Object.entries(initial));
     const kd = {

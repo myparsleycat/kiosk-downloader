@@ -381,6 +381,7 @@ export class DownloadRepository {
         if (selectedCount === 0) {
             throw new Error("No files selected.");
         }
+        const collectionStatus = record.startPaused ? "paused" : "queued";
 
         this.kd.lib.db.transaction((tx) => {
             tx.run(
@@ -389,7 +390,7 @@ export class DownloadRepository {
                   "segment_size", "expires", "tree_json", "save_path", "status",
                   "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames",
                   "provider", "bundle_id", "ordinal")
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, 0, NULL, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?)`,
                 [
                     collectionId,
                     record.loaded.collection.shareId,
@@ -401,6 +402,7 @@ export class DownloadRepository {
                     record.loaded.collection.expires,
                     JSON.stringify(record.loaded.collection.tree),
                     record.savePath,
+                    collectionStatus,
                     timestamp,
                     timestamp,
                     record.asciiFilenames ? 1 : 0,
@@ -411,12 +413,13 @@ export class DownloadRepository {
             );
 
             for (const file of fileRows) {
+                const fileStatus = record.startPaused && file.selected ? "paused" : "pending";
                 tx.run(
                     `INSERT INTO "download_file"
                      ("id", "collection_id", "remote_id", "path", "name", "size", "selected",
                       "status", "downloaded_bytes", "paused_by_user", "created_at", "updated_at",
                       "error", "source_kind", "zip_entry_json", "source_meta_json")
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?, NULL, ?, ?, ?)`,
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, NULL, ?, ?, ?)`,
                     [
                         file.id,
                         collectionId,
@@ -425,6 +428,7 @@ export class DownloadRepository {
                         file.name,
                         file.size,
                         file.selected ? 1 : 0,
+                        fileStatus,
                         timestamp,
                         timestamp,
                         file.sourceKind,
@@ -466,7 +470,11 @@ export class DownloadRepository {
         };
     }
 
-    public insertImportedDownload(payload: DownloadTransferPayload, savePath: string) {
+    public insertImportedDownload(
+        payload: DownloadTransferPayload,
+        savePath: string,
+        startPaused = false,
+    ) {
         if (!payload.files.some((file) => file.selected)) {
             throw new Error("No files selected.");
         }
@@ -476,7 +484,13 @@ export class DownloadRepository {
         const segmentSize = requireSegmentSize(payload.collection.segmentSize);
         const hasPending = payload.files.some((file) => file.selected && file.status === "pending");
         const expired = hasPending && isCollectionExpired(payload.collection.expires);
-        const status: DownloadStatus = hasPending ? (expired ? "expired" : "queued") : "completed";
+        const status: DownloadStatus = !hasPending
+            ? "completed"
+            : expired
+              ? "expired"
+              : startPaused
+                ? "paused"
+                : "queued";
 
         this.kd.lib.db.transaction((tx) => {
             tx.run(
@@ -510,7 +524,11 @@ export class DownloadRepository {
                 const completedElsewhere =
                     file.selected && file.status === "completed" && file.completedElsewhere;
                 const fileStatus: FileDownloadStatus =
-                    file.selected && file.status === "completed" ? "completed" : "pending";
+                    file.selected && file.status === "completed"
+                        ? "completed"
+                        : startPaused && file.selected
+                          ? "paused"
+                          : "pending";
                 tx.run(
                     `INSERT INTO "download_file"
                      ("id", "collection_id", "remote_id", "path", "name", "size", "selected",
@@ -572,13 +590,14 @@ export class DownloadRepository {
         manifestJson: string;
         savePath: string;
         expires: number;
+        startPaused?: boolean;
     }) {
         const timestamp = nowIso();
         this.kd.lib.db.run(
             `INSERT INTO "download_bundle"
              ("id", "source_input", "password_plain", "name", "tree_json", "manifest_json",
               "save_path", "status", "expires", "created_at", "updated_at", "error")
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, NULL)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
             [
                 record.id,
                 record.sourceInput,
@@ -587,6 +606,7 @@ export class DownloadRepository {
                 record.treeJson,
                 record.manifestJson,
                 record.savePath,
+                record.startPaused ? "paused" : "queued",
                 record.expires,
                 timestamp,
                 timestamp,

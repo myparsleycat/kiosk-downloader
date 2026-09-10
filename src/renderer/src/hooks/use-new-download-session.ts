@@ -304,6 +304,7 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
             let lastId: string | undefined;
             let lastDescription: string | undefined;
             let createdCount = 0;
+            let pausedCount = 0;
             for (const item of startable) {
                 if (item.preparation.status !== "ready") {
                     continue;
@@ -325,6 +326,9 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
                     lastId = created.id;
                     lastDescription = `${item.preparation.collection.name} · ${summarizeSelection(item.selected, itemDisplayTree(item) ?? item.preparation.collection.tree).count}개 파일`;
                     createdCount += 1;
+                    if (created.status === "paused") {
+                        pausedCount += 1;
+                    }
                     removeItem(item.key);
                 } catch (error) {
                     toast.error("다운로드를 시작하지 못했습니다", {
@@ -334,10 +338,10 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
             }
             const remaining = useNewDownloadDraft.getState().items;
             if (createdCount > 0) {
+                const subject = createdCount === 1 ? "다운로드가" : `${createdCount}개 다운로드가`;
+                const result = pausedCount === createdCount ? "일시정지 상태로" : "대기열에";
                 toast.success(
-                    createdCount === 1
-                        ? "다운로드가 대기열에 추가되었습니다"
-                        : `${createdCount}개 다운로드가 대기열에 추가되었습니다`,
+                    `${subject} ${result} 추가되었습니다`,
                     createdCount === 1 && lastDescription
                         ? { description: lastDescription }
                         : undefined,
