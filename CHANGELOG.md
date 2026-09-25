@@ -1,3 +1,15 @@
+## [1.13.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.13.0...v1.13.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **download:** disambiguate duplicate kiosk sibling names ([e6238e0](https://github.com/myparsleycat/kiosk-downloader/commit/e6238e0792cc9207526d01f0255b85585be95b90))
+
+
+### Performance Improvements
+
+* **download:** resume unique name suffix search per base name ([1915fc0](https://github.com/myparsleycat/kiosk-downloader/commit/1915fc0b28b912907fc25bdc244e918df1984657))
+
 # [1.13.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.12.0...v1.13.0) (2026-09-10)
 
 

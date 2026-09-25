@@ -1,9 +1,9 @@
-import path from "node:path";
-
 import type { DirNode, FileNode } from "@shared/types";
 
+import { allocateUniqueName } from "./unique-name";
+
 export function uniquifyWorkuploadTree(tree: DirNode, normalizeName: (name: string) => string) {
-    const used = new Set<string>();
+    const used = new Map<string, number>();
     const files = tree.entries.map((entry) => {
         if (entry.kind !== "file") {
             throw new Error("Workupload collections must contain only flat files.");
@@ -26,22 +26,4 @@ export function uniquifyWorkuploadTree(tree: DirNode, normalizeName: (name: stri
     return {
         tree: { ...tree, name: "", entries },
     };
-}
-
-function allocateUniqueName(name: string, used: Set<string>) {
-    if (!used.has(name.toLowerCase())) {
-        used.add(name.toLowerCase());
-        return name;
-    }
-
-    const extension = path.extname(name);
-    const stem = extension ? name.slice(0, -extension.length) : name;
-    for (let suffix = 2; ; suffix += 1) {
-        const candidate = `${stem} (${suffix})${extension}`;
-        const key = candidate.toLowerCase();
-        if (!used.has(key)) {
-            used.add(key);
-            return candidate;
-        }
-    }
 }
