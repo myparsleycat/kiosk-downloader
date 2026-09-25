@@ -24,6 +24,7 @@ import {
     type CborResponse,
     type HttpErrorSnapshot,
 } from "../../lib/http-error";
+import { allocateUniqueName } from "./unique-name";
 
 const API_BASE_URL = "https://api.kio.ac";
 
@@ -319,10 +320,18 @@ export class KioApiClient {
                 }),
             );
 
+            // Kiosk allows sibling entries with the same name, but local paths and draft
+            // selections are keyed by path, so duplicates must get distinct names.
+            const usedNames = new Set<string>();
             const entries: TreeEntry[] = [
                 ...childDirs.map((node) => ({ kind: "dir" as const, node })),
                 ...files,
-            ];
+            ].map((entry) => {
+                const name = allocateUniqueName(entry.node.name, usedNames, entry.kind !== "dir");
+                return name === entry.node.name
+                    ? entry
+                    : { ...entry, node: { ...entry.node, name } };
+            });
             return {
                 type: "dir",
                 id: id.toString("hex"),
