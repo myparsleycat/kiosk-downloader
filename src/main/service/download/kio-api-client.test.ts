@@ -1,4 +1,5 @@
-import { encode } from "cbor-x";
+import type { DirNode } from "@shared/types";
+import { decode, encode } from "cbor-x";
 import { describe, expect, it, vi } from "vitest";
 
 import type { HttpErrorSnapshot } from "../../lib/http-error";
@@ -180,6 +181,58 @@ describe("KioApiClient control cancellation", () => {
             },
         }));
         await expect(client.getSegments("aa".repeat(16), "cat")).rejects.toBe(error);
+    });
+});
+
+describe("KioApiClient collection tree", () => {
+    it("gives duplicate sibling names distinct names", async () => {
+        const rootId = Buffer.alloc(16, 1);
+        const firstDirId = Buffer.alloc(16, 2);
+        const secondDirId = Buffer.alloc(16, 3);
+        const client = controlClient(async (url, options) => {
+            if (url.endsWith("/collection/get")) {
+                return cborResponse(200, {
+                    token: "cat",
+                    name: "Collection",
+                    root: rootId,
+                    segment_size: 16,
+                    expires: 4_102_444_800,
+                });
+            }
+            const id = Buffer.from(decode(options.body as Buffer).id);
+            if (id.equals(rootId)) {
+                return cborResponse(200, {
+                    children: [
+                        { id: firstDirId, name: "[Conseit]" },
+                        { id: secondDirId, name: "[conseit]" },
+                    ],
+                    files: [
+                        { id: Buffer.alloc(16, 4), name: "a.mp4", size: 1 },
+                        { id: Buffer.alloc(16, 5), name: "A.mp4", size: 2 },
+                    ],
+                });
+            }
+            return cborResponse(200, {
+                children: [],
+                files: [{ id: Buffer.alloc(16, id[0] + 4), name: "clip.mov", size: 3 }],
+            });
+        });
+
+        const loaded = await client.loadCollection({
+            url: "https://kio.ac/c/abcdefghijklmnopqrstuv",
+        });
+
+        expect(loaded.collection.tree.entries.map((entry) => entry.node.name)).toEqual([
+            "[Conseit]",
+            "[conseit] (2)",
+            "a.mp4",
+            "A (2).mp4",
+        ]);
+        expect(
+            loaded.collection.tree.entries
+                .filter((entry) => entry.kind === "dir")
+                .map((entry) => (entry.node as DirNode).entries[0]?.node.name),
+        ).toEqual(["clip.mov", "clip.mov"]);
     });
 });
 
