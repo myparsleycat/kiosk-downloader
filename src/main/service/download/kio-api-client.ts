@@ -322,7 +322,7 @@ export class KioApiClient {
 
             // Kiosk allows sibling entries with the same name, but local paths and draft
             // selections are keyed by path, so duplicates must get distinct names.
-            const usedNames = new Set<string>();
+            const usedNames = new Map<string, number>();
             const entries: TreeEntry[] = [
                 ...childDirs.map((node) => ({ kind: "dir" as const, node })),
                 ...files,

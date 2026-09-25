@@ -3,7 +3,7 @@ import type { DirNode, FileNode } from "@shared/types";
 import { allocateUniqueName } from "./unique-name";
 
 export function uniquifyWorkuploadTree(tree: DirNode, normalizeName: (name: string) => string) {
-    const used = new Set<string>();
+    const used = new Map<string, number>();
     const files = tree.entries.map((entry) => {
         if (entry.kind !== "file") {
             throw new Error("Workupload collections must contain only flat files.");
