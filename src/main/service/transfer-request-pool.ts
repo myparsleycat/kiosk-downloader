@@ -358,8 +358,11 @@ function abortReason(signal: AbortSignal) {
     return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
 
+// Permits are held for a whole payload and never preempted, so the collection holding the fewest
+// must win every freed permit until it catches up; grant recency alone only breaks ties.
 function compareFairness(left: CollectionState, right: CollectionState) {
     return (
+        left.inFlight - right.inFlight ||
         left.lastGranted - right.lastGranted ||
         left.registrationOrder - right.registrationOrder ||
         (left.pending[0]?.order ?? 0) - (right.pending[0]?.order ?? 0)
