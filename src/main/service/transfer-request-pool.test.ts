@@ -67,6 +67,30 @@ describe("TransferScheduler", () => {
         releases.forEach((release) => release());
     });
 
+    it("gives every freed permit to a late collection until its in-flight count catches up", async () => {
+        const scheduler = new TransferScheduler(4);
+        const held = await reserve(scheduler, context("kiosk-download", "a"), 4);
+        const started: string[] = [];
+        const releases: Array<() => void> = [];
+
+        for (const collectionId of ["a", "a", "a", "a", "b", "b", "b", "b"]) {
+            void scheduler.acquire(context("kiosk-download", collectionId)).then((release) => {
+                started.push(collectionId);
+                releases.push(release);
+            });
+        }
+
+        held[0]();
+        await vi.waitFor(() => expect(started).toEqual(["b"]));
+        held[1]();
+        await vi.waitFor(() => expect(started).toEqual(["b", "b"]));
+        held[2]();
+        await vi.waitFor(() => expect(started).toEqual(["b", "b", "a"]));
+
+        held[3]();
+        releases.forEach((release) => release());
+    });
+
     it("enforces the Kiosk upload provider-global hard cap of eight", async () => {
         const scheduler = new TransferScheduler(16);
         const gates = Array.from({ length: 24 }, deferred);

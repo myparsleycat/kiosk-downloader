@@ -14,6 +14,7 @@ import type {
     ZipEntrySegmentRange,
 } from "./types";
 
+import { findFairWorkItemIndex } from "./fair-claim";
 import { isSegmentTokenExpired } from "./kio-api-client";
 import {
     SLOW_CHUNK_MAX_RECONNECTS,
@@ -201,28 +202,10 @@ export class GlobalSegmentPool {
 
     private compareAndClaimNext() {
         while (this.queue.length > 0) {
-            const availableCollectionIds = [
-                ...new Set(
-                    this.queue.flatMap((candidate) => {
-                        const candidateSession = this.sessions.get(candidate.sessionId);
-                        return candidateSession &&
-                            !candidateSession.failed &&
-                            !candidateSession.aborted
-                            ? [candidateSession.collectionId]
-                            : [];
-                    }),
-                ),
-            ];
-            const previousIndex = this.lastClaimedCollectionId
-                ? availableCollectionIds.indexOf(this.lastClaimedCollectionId)
-                : -1;
-            const nextCollectionId =
-                availableCollectionIds[(previousIndex + 1) % availableCollectionIds.length];
-            const nextCollectionIndex = this.queue.findIndex((candidate) => {
-                const candidateSession = this.sessions.get(candidate.sessionId);
-                return candidateSession?.collectionId === nextCollectionId;
-            });
-            const item = this.queue.splice(nextCollectionIndex < 0 ? 0 : nextCollectionIndex, 1)[0];
+            const item = this.queue.splice(
+                findFairWorkItemIndex(this.queue, this.sessions, this.lastClaimedCollectionId),
+                1,
+            )[0];
             const session = this.sessions.get(item.sessionId);
             if (!session || session.failed || session.aborted) {
                 continue;

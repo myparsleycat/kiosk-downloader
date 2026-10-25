@@ -131,6 +131,28 @@ describe("TransferChunkPool", () => {
         expect(repository.markChunkCompleted).toHaveBeenCalledTimes(4);
     });
 
+    it("hands every claim to a late collection until its in-flight count catches up", () => {
+        const { pool } = createHarness(vi.fn());
+        const claim = (pool as unknown as { compareAndClaimNext: () => never }).compareAndClaimNext;
+        const claimCollections = (count: number) =>
+            Array.from(
+                { length: count },
+                () => claim.call(pool) as { session: { collectionId: string } },
+            ).map((entry) => entry.session.collectionId);
+        const register = (collectionId: string) =>
+            void pool.register({
+                ...registration(8),
+                collection: { id: collectionId, shareId: "share" },
+                file: { id: `file-${collectionId}`, remoteId: "remote", downloadedBytes: 0 },
+            } as TransferFileRegistration);
+        register("a");
+        expect(claimCollections(4)).toEqual(["a", "a", "a", "a"]);
+
+        register("b");
+
+        expect(claimCollections(6)).toEqual(["b", "b", "b", "b", "a", "b"]);
+    });
+
     it("releases the permit before refreshing an expired CDN URL", async () => {
         const payloadRequest = vi
             .fn()

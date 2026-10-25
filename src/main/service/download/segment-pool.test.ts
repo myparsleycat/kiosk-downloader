@@ -54,6 +54,29 @@ describe("GlobalSegmentPool", () => {
         ]);
     });
 
+    it("hands every claim to a late collection until its in-flight count catches up", () => {
+        const pool = createPool();
+        const claim = (pool as unknown as { compareAndClaimNext: () => never }).compareAndClaimNext;
+        const claimCollections = (count: number) =>
+            Array.from(
+                { length: count },
+                () => claim.call(pool) as { session: { collectionId: string } },
+            ).map((entry) => entry.session.collectionId);
+        void pool.register(registration("collection-a", "file-a", 8));
+        expect(claimCollections(4)).toEqual(Array(4).fill("collection-a"));
+
+        void pool.register(registration("collection-b", "file-b", 8));
+
+        expect(claimCollections(6)).toEqual([
+            "collection-b",
+            "collection-b",
+            "collection-b",
+            "collection-b",
+            "collection-a",
+            "collection-b",
+        ]);
+    });
+
     it("caps started workers at the configured base plus one extra per extra collection", () => {
         const pool = createPool();
         pool.resize(2);

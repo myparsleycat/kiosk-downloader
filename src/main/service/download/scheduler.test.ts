@@ -654,6 +654,65 @@ describe("DownloadScheduler", () => {
         }
     });
 
+    it("starts a late collection at once and gives freed file slots to the emptier collection", async () => {
+        const collections = [createCollection("collection-a", 0)];
+        const files = Array.from({ length: 5 }, (_, index) =>
+            createFile(`file-a-${index}`, "collection-a"),
+        );
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(undefined, { requestPoolSize: 4 }),
+            {} as never,
+            {} as never,
+            {} as never,
+            createRepository(collections, files).value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const releases = new Map<string, () => void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(async (_collectionId, fileId) => {
+                const file = files.find((item) => item.id === fileId)!;
+                file.status = "downloading";
+                await new Promise<void>((resolve) => releases.set(fileId, resolve));
+                file.status = "completed";
+            });
+        const startedCollections = () => runFile.mock.calls.map(([collectionId]) => collectionId);
+
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(4));
+
+        collections.push(createCollection("collection-b", 1));
+        files.push(
+            ...Array.from({ length: 3 }, (_, index) =>
+                createFile(`file-b-${index}`, "collection-b"),
+            ),
+        );
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(5));
+        expect(startedCollections().at(-1)).toBe("collection-b");
+
+        releases.get("file-a-0")!();
+        releases.get("file-a-1")!();
+        await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(6));
+        await scheduler.schedule();
+
+        expect(startedCollections()).toEqual([
+            "collection-a",
+            "collection-a",
+            "collection-a",
+            "collection-a",
+            "collection-b",
+            "collection-b",
+        ]);
+
+        scheduler.destroy();
+        for (const release of releases.values()) {
+            release();
+        }
+    });
+
     it("starts multiple files within each Workupload archive up to its provider limit", async () => {
         const collections = [createCollection("archive-a", 0), createCollection("archive-b", 1)];
         for (const collection of collections) collection.provider = "workupload";
