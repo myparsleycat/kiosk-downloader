@@ -4,6 +4,7 @@ import path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+import { moveFileOverwrite, statOrNull, writeEmptyFile } from "@main/lib/asar-safe-fs";
 import fse from "fs-extra";
 
 import type { KioskDownloader } from "../..";
@@ -365,8 +366,7 @@ export class BundleReassemblyCoordinator {
                             throw new Error("재조립 파일 해시가 일치하지 않습니다.");
                         }
                     }
-                    await fse.ensureDir(path.dirname(state.finalPath));
-                    await fse.move(state.partPath, state.finalPath, { overwrite: true });
+                    await moveFileOverwrite(state.partPath, state.finalPath);
                     await fse.remove(state.progressPath).catch(() => undefined);
                     state.published = true;
                     published.push(state.finalPath);
@@ -390,7 +390,7 @@ export class BundleReassemblyCoordinator {
                 }
             }
             await fse.ensureDir(path.dirname(entry.finalPath));
-            await fse.outputFile(entry.finalPath, "");
+            await writeEmptyFile(entry.finalPath);
             return;
         }
 
@@ -424,7 +424,7 @@ export class BundleReassemblyCoordinator {
             if (written.size !== entry.length) {
                 throw new Error(`팩 추출 파일 크기가 일치하지 않습니다: ${entry.splitPath}`);
             }
-            await fse.move(tempPath, entry.finalPath, { overwrite: true });
+            await moveFileOverwrite(tempPath, entry.finalPath);
         } catch (error) {
             await fse.remove(tempPath).catch(() => undefined);
             throw error;
@@ -497,7 +497,7 @@ export class BundleReassemblyCoordinator {
     }
 
     private async loadMultiPieceProgress(state: MultiPieceState): Promise<void> {
-        const finalStat = await fse.stat(state.finalPath).catch(() => null);
+        const finalStat = await statOrNull(state.finalPath);
         if (finalStat && finalStat.size === state.size) {
             state.published = true;
             state.nextIndex = state.pieces.length;

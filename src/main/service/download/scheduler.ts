@@ -1,6 +1,7 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
+import { moveFileOverwrite, writeEmptyFile } from "@main/lib/asar-safe-fs";
 import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
 import { minBy } from "es-toolkit";
@@ -1132,7 +1133,7 @@ export class DownloadScheduler {
         throwIfAborted(signal);
 
         if (file.size === 0) {
-            await fse.outputFile(finalPath, "");
+            await writeEmptyFile(finalPath);
         } else {
             const stat = await fse.stat(partPath);
             if (stat.size < file.size) {
@@ -1141,7 +1142,7 @@ export class DownloadScheduler {
                 );
             }
             throwIfAborted(signal);
-            await fse.move(partPath, finalPath, { overwrite: true });
+            await moveFileOverwrite(partPath, finalPath);
         }
 
         if (!signal) {
