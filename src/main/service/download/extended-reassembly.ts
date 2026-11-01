@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
+import { moveFileOverwrite } from "@main/lib/asar-safe-fs";
 import fse from "fs-extra";
 
 export async function reassembleExtendedFile(options: {
@@ -54,8 +55,7 @@ export async function reassembleExtendedFile(options: {
                 throw new Error("재조립 파일 해시가 일치하지 않습니다.");
             }
         }
-        await fse.ensureDir(path.dirname(options.finalPath));
-        await fse.move(options.partPath, options.finalPath, { overwrite: true });
+        await moveFileOverwrite(options.partPath, options.finalPath);
     } catch (error) {
         await fse.remove(options.partPath).catch(() => undefined);
         throw error;

@@ -1,8 +1,10 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
+import { moveFileOverwrite, removeTree, writeEmptyFile } from "@main/lib/asar-safe-fs";
 import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
+import { minBy } from "es-toolkit";
 import fse from "fs-extra";
 import pLimit from "p-limit";
 
@@ -317,9 +319,9 @@ export class DownloadScheduler {
                 await PartFileWriter.removeSidecar(stagingPath);
             }),
         );
-        await fse
-            .remove(path.join(collection.savePath, getBundleTempDirName(collection.id)))
-            .catch(() => undefined);
+        await removeTree(path.join(collection.savePath, getBundleTempDirName(collection.id))).catch(
+            () => undefined,
+        );
     }
 
     private async pumpOnce() {
@@ -329,38 +331,42 @@ export class DownloadScheduler {
         this.segmentPool.resize(settings.requestPoolSize);
         this.transferPool.start(settings.requestPoolSize);
 
-        while (this.fileControllers.size < maxActiveFileSessions) {
-            let startedAny = false;
-            for (const collection of this.orderCollectionsForPreparation(collections)) {
-                if (this.fileControllers.size >= maxActiveFileSessions) {
-                    break;
-                }
-                if (!this.tryStartFile(collection, settings)) {
-                    continue;
-                }
-                this.lastPreparationCollectionId = collection.id;
-                this.ensureCollectionDownloading(collection);
-                startedAny = true;
-            }
-            if (!startedAny) {
+        const exhaustedCollectionIds = new Set<string>();
+        while (true) {
+            const collection = this.pickCollectionForPreparation(
+                collections.filter((candidate) => !exhaustedCollectionIds.has(candidate.id)),
+            );
+            if (!collection) {
                 break;
             }
+            // Running files cannot be preempted, so a collection with nothing running may exceed
+            // the cap instead of waiting for another collection's long files to finish.
+            if (
+                this.fileControllers.size >= maxActiveFileSessions &&
+                this.activeFilesByCollection.has(collection.id)
+            ) {
+                break;
+            }
+            if (!this.tryStartFile(collection, settings)) {
+                exhaustedCollectionIds.add(collection.id);
+                continue;
+            }
+            this.lastPreparationCollectionId = collection.id;
+            this.ensureCollectionDownloading(collection);
         }
 
         await this.kd.service.transfer.refreshPowerSaveBlock();
     }
 
-    private orderCollectionsForPreparation(collections: DownloadCollectionRow[]) {
+    /** Fewest running files first; ties rotate after the last collection that started a file. */
+    private pickCollectionForPreparation(collections: DownloadCollectionRow[]) {
         const previousIndex = collections.findIndex(
             (collection) => collection.id === this.lastPreparationCollectionId,
         );
-        if (previousIndex < 0) {
-            return collections;
-        }
-        return [
-            ...collections.slice(previousIndex + 1),
-            ...collections.slice(0, previousIndex + 1),
-        ];
+        return minBy(
+            [...collections.slice(previousIndex + 1), ...collections.slice(0, previousIndex + 1)],
+            (collection) => this.activeFilesByCollection.get(collection.id)?.size ?? 0,
+        );
     }
 
     private async getSettings(): Promise<SchedulerSettings> {
@@ -1127,7 +1133,7 @@ export class DownloadScheduler {
         throwIfAborted(signal);
 
         if (file.size === 0) {
-            await fse.outputFile(finalPath, "");
+            await writeEmptyFile(finalPath);
         } else {
             const stat = await fse.stat(partPath);
             if (stat.size < file.size) {
@@ -1136,7 +1142,7 @@ export class DownloadScheduler {
                 );
             }
             throwIfAborted(signal);
-            await fse.move(partPath, finalPath, { overwrite: true });
+            await moveFileOverwrite(partPath, finalPath);
         }
 
         if (!signal) {

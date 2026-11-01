@@ -1,5 +1,6 @@
 import {
     COLLECTION_INVALID_PASSWORD_ERROR,
+    COLLECTION_NOT_FOUND_ERROR,
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
 import { shareIdToUuidBytes, tryParseShareUrl } from "@shared/share-url";
@@ -213,6 +214,11 @@ export class KioApiClient {
             return this.parseCollectionResponse(firstBody, false);
         }
 
+        // Expired, deleted and never-created collections get the same response.
+        if (firstBody?.code === "collection:not_found") {
+            throw new Error(COLLECTION_NOT_FOUND_ERROR);
+        }
+
         if (first.status !== 418) {
             throw cborHttpError("collection/get failed:", first);
         }
@@ -243,6 +249,9 @@ export class KioApiClient {
         if (second.status !== 200 || typeof secondBody?.token !== "string") {
             if (secondBody?.code === "collection:invalid_protector_config") {
                 throw new Error(COLLECTION_INVALID_PASSWORD_ERROR);
+            }
+            if (secondBody?.code === "collection:not_found") {
+                throw new Error(COLLECTION_NOT_FOUND_ERROR);
             }
             throw cborHttpError("collection/get failed:", second);
         }

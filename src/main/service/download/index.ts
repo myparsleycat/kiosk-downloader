@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
+import { moveFileOverwrite, pathExists, removeTree, statOrNull } from "@main/lib/asar-safe-fs";
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import { buildDirTreeFromFiles } from "@shared/dir-tree";
 import {
@@ -1065,9 +1066,9 @@ export class DownloadService {
                 await this.scheduler.cleanupPartFiles(collection, files);
             }
             this.repository.deleteBundle(bundle.id);
-            await fse
-                .remove(path.join(bundle.savePath, getBundleTempDirName(bundle.id)))
-                .catch(() => undefined);
+            await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id))).catch(
+                () => undefined,
+            );
             await this.emitRemoved(collectionId);
             await this.kd.service.transfer.refreshPowerSaveBlock();
             return;
@@ -1768,16 +1769,15 @@ export class DownloadService {
                         }),
                     );
                     const finalPath = path.join(bundle.savePath, relativePath);
-                    if (!(await fse.pathExists(sourcePath))) {
-                        const finalStat = await fse.stat(finalPath).catch(() => null);
+                    if (!(await pathExists(sourcePath))) {
+                        const finalStat = await statOrNull(finalPath);
                         if (finalStat?.size === file.size) continue;
                         throw new Error(`완료된 파일을 찾을 수 없습니다: ${file.path}`);
                     }
-                    await fse.ensureDir(path.dirname(finalPath));
-                    await fse.move(sourcePath, finalPath, { overwrite: true });
+                    await moveFileOverwrite(sourcePath, finalPath);
                 }
             }
-            await fse.remove(path.join(bundle.savePath, getBundleTempDirName(bundle.id)));
+            await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id)));
             this.repository.markBundleStatus(bundle.id, "completed");
         } catch (error) {
             this.repository.markBundleStatus(
