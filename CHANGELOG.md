@@ -1,3 +1,14 @@
+## [1.13.2](https://github.com/myparsleycat/kiosk-downloader/compare/v1.13.1...v1.13.2) (2026-11-01)
+
+
+### Bug Fixes
+
+* **download:** balance workers across collections by in-flight count ([525cba8](https://github.com/myparsleycat/kiosk-downloader/commit/525cba88106af7b447d1a054929934408736827f))
+* **download:** handle downloaded files named *.asar ([c034b93](https://github.com/myparsleycat/kiosk-downloader/commit/c034b93b3841dcebb9cfb1c1dc19eca120893172))
+* **download:** remove bundle temp dirs holding asar files ([58298ec](https://github.com/myparsleycat/kiosk-downloader/commit/58298ec14738e9990df2e365840605db3c357329))
+* **download:** show not found error for expired collections ([d3e0a9f](https://github.com/myparsleycat/kiosk-downloader/commit/d3e0a9f2ef887f23688a92c6bd8d38c6f5d8f2a0))
+* **upload:** handle source files named *.asar ([1058332](https://github.com/myparsleycat/kiosk-downloader/commit/1058332fa9f8de05faf72dfbe58f411b39546193))
+
 ## [1.13.1](https://github.com/myparsleycat/kiosk-downloader/compare/v1.13.0...v1.13.1) (2026-09-25)
 
 
