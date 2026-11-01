@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 
-import { moveFileOverwrite, pathExists, statOrNull } from "@main/lib/asar-safe-fs";
+import { moveFileOverwrite, pathExists, removeTree, statOrNull } from "@main/lib/asar-safe-fs";
 import { shouldCreateCollectionSubfolder } from "@shared/collection-path";
 import { buildDirTreeFromFiles } from "@shared/dir-tree";
 import {
@@ -1066,9 +1066,9 @@ export class DownloadService {
                 await this.scheduler.cleanupPartFiles(collection, files);
             }
             this.repository.deleteBundle(bundle.id);
-            await fse
-                .remove(path.join(bundle.savePath, getBundleTempDirName(bundle.id)))
-                .catch(() => undefined);
+            await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id))).catch(
+                () => undefined,
+            );
             await this.emitRemoved(collectionId);
             await this.kd.service.transfer.refreshPowerSaveBlock();
             return;
@@ -1777,7 +1777,7 @@ export class DownloadService {
                     await moveFileOverwrite(sourcePath, finalPath);
                 }
             }
-            await fse.remove(path.join(bundle.savePath, getBundleTempDirName(bundle.id)));
+            await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id)));
             this.repository.markBundleStatus(bundle.id, "completed");
         } catch (error) {
             this.repository.markBundleStatus(

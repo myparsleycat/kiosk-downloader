@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import fse from "fs-extra";
+import originalFs from "original-fs";
 
 /*
  * Electron patches `fs` so that any path with a `*.asar` segment is opened as an archive.
@@ -80,4 +81,12 @@ export async function statOrNull(filePath: string): Promise<fs.Stats | null> {
 
 export async function pathExists(filePath: string) {
     return (await statOrNull(filePath)) !== null;
+}
+
+/**
+ * Recursively removes a directory that may hold `*.asar` files. Patched fs walks into a valid
+ * archive as if it were a directory, so removal would fail with ENOTEMPTY and leave it behind.
+ */
+export async function removeTree(dirPath: string) {
+    await originalFs.promises.rm(dirPath, { recursive: true, force: true });
 }

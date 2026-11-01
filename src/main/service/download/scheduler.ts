@@ -1,7 +1,7 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { moveFileOverwrite, writeEmptyFile } from "@main/lib/asar-safe-fs";
+import { moveFileOverwrite, removeTree, writeEmptyFile } from "@main/lib/asar-safe-fs";
 import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
 import { minBy } from "es-toolkit";
@@ -319,9 +319,9 @@ export class DownloadScheduler {
                 await PartFileWriter.removeSidecar(stagingPath);
             }),
         );
-        await fse
-            .remove(path.join(collection.savePath, getBundleTempDirName(collection.id)))
-            .catch(() => undefined);
+        await removeTree(path.join(collection.savePath, getBundleTempDirName(collection.id))).catch(
+            () => undefined,
+        );
     }
 
     private async pumpOnce() {
