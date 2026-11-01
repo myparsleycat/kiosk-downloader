@@ -24,7 +24,15 @@ export default defineConfig({
                 "@backend": resolve("../backend/src"),
             },
         },
-        plugins: [ipcGeneratorPlugin()],
+        plugins: [
+            ipcGeneratorPlugin(),
+            // Setting build.rollupOptions.external here drops electron-vite's default externals.
+            {
+                name: "external-original-fs",
+                enforce: "pre",
+                resolveId: (id) => (id === "original-fs" ? { id, external: true } : null),
+            },
+        ],
     },
     preload: {
         build: {

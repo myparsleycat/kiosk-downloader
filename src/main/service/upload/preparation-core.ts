@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 
 import {
     createExtendedUploadPieces,
     EXTENDED_UPLOAD_DEFAULT_LIMITS,
     packSizedItems,
 } from "@shared/extended-upload-plan";
+import { createReadStream } from "original-fs";
 
 import type { PreparationProgressHandler } from "./preparation-protocol";
 import type { UploadSourceFile } from "./types";

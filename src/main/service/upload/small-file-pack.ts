@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createWriteStream } from "node:fs";
 import path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import fse from "fs-extra";
+import originalFs from "original-fs";
 
 import type { UploadSourceFile } from "./types";
 
@@ -167,13 +168,13 @@ export async function materializeSmallFilePack(
     await fse.remove(tempPath);
     try {
         for (const [index, entry] of file.packEntries.entries()) {
-            const stat = await fse.stat(entry.fsPath);
+            const stat = await originalFs.promises.stat(entry.fsPath);
             if (stat.size !== entry.size || Math.trunc(stat.mtimeMs) !== entry.sourceMtimeMs) {
                 throw new Error(`업로드 원본 파일이 변경되었습니다: ${entry.path}`);
             }
             const hash = createHash("sha256");
             await pipeline(
-                createReadStream(entry.fsPath),
+                originalFs.createReadStream(entry.fsPath),
                 new Transform({
                     transform(chunk, _encoding, callback) {
                         hash.update(chunk as Buffer);
@@ -185,7 +186,7 @@ export async function materializeSmallFilePack(
             if (entry.contentSha256 && hash.digest("hex") !== entry.contentSha256) {
                 throw new Error(`업로드 원본 파일 내용이 변경되었습니다: ${entry.path}`);
             }
-            const after = await fse.stat(entry.fsPath);
+            const after = await originalFs.promises.stat(entry.fsPath);
             if (after.size !== entry.size || Math.trunc(after.mtimeMs) !== entry.sourceMtimeMs) {
                 throw new Error(`업로드 중 원본 파일이 변경되었습니다: ${entry.path}`);
             }

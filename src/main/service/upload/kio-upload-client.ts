@@ -1,9 +1,9 @@
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
 
 import { uuidBytesToShareId } from "@shared/share-url";
 import type { UploadOptions } from "@shared/types";
 import { decode, encode } from "cbor-x";
+import originalFs from "original-fs";
 import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
@@ -525,8 +525,8 @@ export class KioUploadClient {
     }
 }
 
-async function readSegmentBytes(item: ServerFileMapping): Promise<Buffer> {
-    const stat = await fs.stat(item.fsPath).catch(() => null);
+export async function readSegmentBytes(item: ServerFileMapping): Promise<Buffer> {
+    const stat = await originalFs.promises.stat(item.fsPath).catch(() => null);
     const sourceSize = item.sourceSize ?? item.size;
     if (
         !stat?.isFile() ||
@@ -536,7 +536,7 @@ async function readSegmentBytes(item: ServerFileMapping): Promise<Buffer> {
         throw new UploadSourceChangedError(item.fsPath);
     }
 
-    const handle = await fs.open(item.fsPath, "r");
+    const handle = await originalFs.promises.open(item.fsPath, "r");
     try {
         const afterOpen = await handle.stat();
         if (afterOpen.size !== sourceSize || Math.trunc(afterOpen.mtimeMs) !== item.sourceMtimeMs) {

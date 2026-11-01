@@ -7,6 +7,8 @@ export default defineConfig({
         alias: {
             "@shared": resolve("src/shared"),
             "@main": resolve("src/main"),
+            // original-fs only exists in the Electron runtime.
+            ...(process.versions.electron ? {} : { "original-fs": "node:fs" }),
         },
     },
     test: {
