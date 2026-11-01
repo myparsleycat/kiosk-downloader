@@ -1,3 +1,4 @@
+import { COLLECTION_NOT_FOUND_ERROR } from "@shared/download-errors";
 import type { DirNode } from "@shared/types";
 import { decode, encode } from "cbor-x";
 import { describe, expect, it, vi } from "vitest";
@@ -267,6 +268,24 @@ describe("KioApiClient HTTP errors", () => {
             'collection/get failed: HTTP 500: {"code":"internal","message":"boom"}',
         );
     });
+
+    it.each([undefined, "password"])(
+        "reports a missing collection when the 418 has no protector (password: %s)",
+        async (password) => {
+            const client = controlClient(async () =>
+                cborResponse(418, {
+                    code: "collection:not_found",
+                    message: "collection not found",
+                }),
+            );
+            await expect(
+                client.loadCollection({
+                    url: "https://kio.ac/c/abcdefghijklmnopqrstuv",
+                    password,
+                }),
+            ).rejects.toThrow(COLLECTION_NOT_FOUND_ERROR);
+        },
+    );
 
     it("includes CDN error page text in segment stream failures", async () => {
         const release = vi.fn();

@@ -1,5 +1,7 @@
 export const COLLECTION_INVALID_PASSWORD_ERROR = "Invalid password.";
 export const COLLECTION_PASSWORD_REQUIRED_ERROR = "Collection is password-protected.";
+export const COLLECTION_NOT_FOUND_ERROR =
+    "컬렉션을 찾을 수 없습니다. 만료 또는 삭제되었거나 링크가 잘못되었습니다.";
 export const ZIP_PASSWORD_REQUIRED_ERROR = "ZIP is password-protected.";
 export const ZIP_INVALID_PASSWORD_ERROR = "Invalid ZIP password.";
 export const EXTENDED_SHARE_PASSWORD_REQUIRED_ERROR =
