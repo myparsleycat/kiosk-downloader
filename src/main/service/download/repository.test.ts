@@ -80,7 +80,7 @@ async function createRepository() {
 }
 
 describe("DownloadRepository.restoreStartupState", () => {
-    it("recovers interrupted work while preserving user-paused files", async () => {
+    async function seedInterruptedDownload() {
         const { db, repo } = await createRepository();
         const timestamp = new Date().toISOString();
         db.run(
@@ -132,6 +132,11 @@ describe("DownloadRepository.restoreStartupState", () => {
             [timestamp, "error"],
         );
 
+        return { db, repo };
+    }
+
+    it("recovers interrupted work while preserving user-paused files", async () => {
+        const { db, repo } = await seedInterruptedDownload();
         repo.restoreStartupState();
 
         expect(
@@ -152,6 +157,31 @@ describe("DownloadRepository.restoreStartupState", () => {
                 `SELECT "status", "error" FROM "download_chunk" WHERE "file_id" = 'active'`,
             ),
         ).toEqual({ status: "pending", error: null });
+    });
+
+    it("pauses interrupted work in manual mode so a later schedule does not start it", async () => {
+        const { db, repo } = await seedInterruptedDownload();
+        repo.restoreStartupState("manual");
+
+        expect(
+            db.get<{ status: string }>(
+                `SELECT "status" FROM "download_collection" WHERE "id" = 'collection'`,
+            ),
+        ).toEqual({ status: "paused" });
+        expect(
+            db.all<{ id: string; status: string }>(
+                `SELECT "id", "status" FROM "download_file" ORDER BY "id"`,
+            ),
+        ).toEqual([
+            { id: "active", status: "paused" },
+            { id: "paused", status: "downloading" },
+        ]);
+        expect(
+            db.get<{ status: string }>(
+                `SELECT "status" FROM "download_chunk" WHERE "file_id" = 'active'`,
+            ),
+        ).toEqual({ status: "pending" });
+        expect(repo.listRunnableCollections()).toEqual([]);
     });
 });
 

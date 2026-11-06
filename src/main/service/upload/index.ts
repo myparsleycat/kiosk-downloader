@@ -545,7 +545,7 @@ export class UploadService {
 
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.uploadStartupResumeMode");
-        this.repository.restoreStartupState();
+        this.repository.restoreStartupState(mode);
         await this.scheduler.restoreFromRepository();
         for (const bundle of this.repository.listBundles()) {
             const collections = this.repository.listBundleCollections(bundle.id);

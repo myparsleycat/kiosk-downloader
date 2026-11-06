@@ -177,7 +177,7 @@ export class DownloadService {
 
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.startupResumeMode");
-        this.repository.restoreStartupState();
+        this.repository.restoreStartupState(mode);
         await this.resetNonResumableWorkuploadStartupState();
         this.repository.syncExpiredCollections();
         await this.emitUpdate();
