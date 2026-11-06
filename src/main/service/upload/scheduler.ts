@@ -482,6 +482,9 @@ export class UploadScheduler {
         collection.activeFileIds.add(chunk.localFileId);
         collection.inFlight += 1;
         file.inFlightSequences.add(chunk.sequence);
+        // Set only on early returns that leave the chunk unfinished. Thrown errors must not
+        // re-queue, or a persistent failure (e.g. a DB write) would spin workers in a tight loop.
+        let requeue = false;
         try {
             const settings = await this.getSettings();
             const row: UploadChunkRow = {
@@ -502,6 +505,7 @@ export class UploadScheduler {
             while (attempt <= settings.maxChunkRetries + 1) {
                 if (!this.isCurrentChunk(file, collection, chunk)) {
                     this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
+                    requeue = true;
                     return;
                 }
                 const persistedFile = this.repository.getFile(chunk.localFileId);
@@ -518,10 +522,10 @@ export class UploadScheduler {
                 const onAbort = () => attemptController.abort();
                 file.controller.signal.addEventListener("abort", onAbort, { once: true });
                 let stalled = false;
-                let stallTimer = setTimeout(() => {
-                    stalled = true;
-                    attemptController.abort();
-                }, STALL_TIMEOUT_MS);
+                // Armed only while the payload transfers: waiting for control-plane or request-pool
+                // slots is not a stall (it routinely exceeds STALL_TIMEOUT_MS with several active
+                // uploads), and the control request is bounded by its own HTTP timeout.
+                let stallTimer: ReturnType<typeof setTimeout> | undefined;
                 const resetStallTimer = () => {
                     clearTimeout(stallTimer);
                     stallTimer = setTimeout(() => {
@@ -551,12 +555,16 @@ export class UploadScheduler {
                                     providerId: "kiosk-upload",
                                     signal: attemptController.signal,
                                 },
-                                task,
+                                () => {
+                                    resetStallTimer();
+                                    return task();
+                                },
                             ),
                     );
                     clearTimeout(stallTimer);
                     file.controller.signal.removeEventListener("abort", onAbort);
                     if (file.failed || collection.failed || file.generation !== chunk.generation) {
+                        requeue = true;
                         return;
                     }
                     if (result.outcome === "exists") {
@@ -578,6 +586,7 @@ export class UploadScheduler {
                     this.metrics.clearChunk(chunk.localFileId, chunk.sequence);
                     if (!this.isCurrentChunk(file, collection, chunk)) {
                         this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
+                        requeue = true;
                         return;
                     }
                     if (error instanceof UploadSessionExpiredError) {
@@ -612,8 +621,12 @@ export class UploadScheduler {
                         );
                         continue;
                     }
-                    const message = toErrorMessage(error);
-                    if (isAbortError(error) || file.controller.signal.aborted) {
+                    // A stall past MAX_SLOW_RECONNECTS also surfaces as an AbortError, but it
+                    // must consume a retry attempt instead of dropping the chunk.
+                    const message = stalled
+                        ? `업로드 청크가 ${STALL_TIMEOUT_MS / 1000}초 동안 진행되지 않았습니다.`
+                        : toErrorMessage(error);
+                    if (file.controller.signal.aborted || (isAbortError(error) && !stalled)) {
                         this.repository.markChunkPending(chunk.localFileId, chunk.sequence);
                         return;
                     }
@@ -650,6 +663,14 @@ export class UploadScheduler {
                 collection.activeFileIds.delete(chunk.localFileId);
             }
             collection.inFlight -= 1;
+            // A resume during this attempt bumps the generation and re-enqueues the file while
+            // skipping in-flight sequences, so a stranded chunk must be queued again here or the
+            // collection waits forever. enqueueFile ignores paused or failed files, and an
+            // aborted controller means the scheduler is shutting down.
+            if (requeue && !file.controller.signal.aborted) {
+                this.enqueueFile(chunk.localFileId);
+                this.wakeWaiters();
+            }
             await this.afterChunkSettled(chunk.collectionId, chunk.localFileId);
         }
     }
