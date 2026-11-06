@@ -195,7 +195,7 @@ export class DownloadService {
         }
         await this.emitUpdate();
         if (mode === "auto") {
-            void this.scheduler.schedule();
+            this.scheduler.requestSchedule();
         }
     }
 
@@ -204,7 +204,7 @@ export class DownloadService {
     }
 
     public refreshRequestScheduling() {
-        void this.scheduler.schedule();
+        this.scheduler.requestSchedule();
     }
 
     private async resetNonResumableWorkuploadStartupState() {
@@ -454,7 +454,7 @@ export class DownloadService {
         });
         await this.emitUpdate(collectionId);
         if (!startPaused) {
-            void this.scheduler.schedule();
+            this.scheduler.requestSchedule();
         }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         const item = this.getEnrichedItem(collectionId);
@@ -850,7 +850,7 @@ export class DownloadService {
         this.createReassemblyCoordinator(bundleId, storedManifest);
         await this.emitUpdate(bundleId);
         if (!startPaused) {
-            void this.scheduler.schedule();
+            this.scheduler.requestSchedule();
         }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         const item = this.getEnrichedItem(bundleId);
@@ -1295,7 +1295,7 @@ export class DownloadService {
         await this.emitUpdate(collectionId);
         const imported = this.repository.getCollection(collectionId);
         if (imported?.status === "queued") {
-            void this.scheduler.schedule();
+            this.scheduler.requestSchedule();
         }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         return this.getEnrichedItem(collectionId);

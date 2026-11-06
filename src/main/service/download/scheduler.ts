@@ -2,6 +2,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { moveFileOverwrite, removeTree, writeEmptyFile } from "@main/lib/asar-safe-fs";
+import { logCaughtError } from "@main/lib/logged-error";
 import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
 import { minBy } from "es-toolkit";
@@ -65,10 +66,12 @@ async function* readableStreamToAsyncIterable(
     stream: ReadableStream<Uint8Array>,
 ): AsyncGenerator<Uint8Array> {
     const reader = stream.getReader();
+    let finished = false;
     try {
         while (true) {
             const { done, value } = await reader.read();
             if (done) {
+                finished = true;
                 return;
             }
             if (value && value.length > 0) {
@@ -76,6 +79,11 @@ async function* readableStreamToAsyncIterable(
             }
         }
     } finally {
+        // When the consumer stops early (e.g. a disk write fails), cancel the stream so the
+        // producer's pending write rejects instead of blocking forever on backpressure.
+        if (!finished) {
+            await reader.cancel().catch(() => undefined);
+        }
         reader.releaseLock();
     }
 }
@@ -141,7 +149,7 @@ export class DownloadScheduler {
             refreshSegments: (collection, file, signal) =>
                 this.kioskRunner.getFileSegments(collection, file, signal),
             onChunkSettled: () => {
-                void this.schedule();
+                this.requestSchedule();
             },
             onProgress: (collectionId, fileId) => {
                 this.progressBatcher.mark(collectionId, fileId);
@@ -153,7 +161,7 @@ export class DownloadScheduler {
             repository: this.repository,
             metrics: this.metrics,
             onChunkSettled: () => {
-                void this.schedule();
+                this.requestSchedule();
             },
             onProgress: (collectionId, fileId) => {
                 this.progressBatcher.mark(collectionId, fileId);
@@ -244,6 +252,13 @@ export class DownloadScheduler {
         }
     }
 
+    /** Fire-and-forget schedule(); a failed pump is logged instead of becoming unhandled. */
+    public requestSchedule() {
+        this.schedule().catch((error: unknown) => {
+            logCaughtError(this.kd.logger, "DownloadScheduler:schedule", {}, error);
+        });
+    }
+
     public pauseCollection(collectionId: string) {
         this.manualCollections.delete(collectionId);
         for (const fileId of this.activeFilesByCollection.get(collectionId) ?? []) {
@@ -261,7 +276,7 @@ export class DownloadScheduler {
 
     public resumeCollection(collectionId: string) {
         this.manualCollections.add(collectionId);
-        void this.schedule();
+        this.requestSchedule();
     }
 
     public pauseFile(fileId: string) {
@@ -274,7 +289,7 @@ export class DownloadScheduler {
 
     public resumeFile(fileId: string) {
         this.manualFiles.add(fileId);
-        void this.schedule();
+        this.requestSchedule();
     }
 
     public removeCollection(collectionId: string) {
@@ -485,61 +500,73 @@ export class DownloadScheduler {
     }
 
     private async afterFileSettled(collectionId: string, fileId: string) {
-        const file = this.repository.getFile(fileId);
-        if (
-            !file ||
-            file.status === "completed" ||
-            file.status === "paused" ||
-            file.status === "error"
-        ) {
-            this.manualFiles.delete(fileId);
-        }
+        // Runs detached from startFile, so any failure here must be logged and must not skip the
+        // trailing schedule(), or remaining pending files sit idle until an unrelated event.
+        try {
+            const file = this.repository.getFile(fileId);
+            if (
+                !file ||
+                file.status === "completed" ||
+                file.status === "paused" ||
+                file.status === "error"
+            ) {
+                this.manualFiles.delete(fileId);
+            }
 
-        const collection = this.repository.getCollection(collectionId);
-        if (
-            !collection ||
-            collection.status === "completed" ||
-            collection.status === "paused" ||
-            collection.status === "error" ||
-            collection.status === "expired"
-        ) {
-            this.manualCollections.delete(collectionId);
-            this.clearProviderState(collectionId);
-        }
+            const collection = this.repository.getCollection(collectionId);
+            if (
+                !collection ||
+                collection.status === "completed" ||
+                collection.status === "paused" ||
+                collection.status === "error" ||
+                collection.status === "expired"
+            ) {
+                this.manualCollections.delete(collectionId);
+                this.clearProviderState(collectionId);
+            }
 
-        this.repository.recomputeCollectionStatus(collectionId);
-        const updatedCollection = this.repository.getCollection(collectionId);
-        const wasTerminal =
-            collection?.status === "completed" ||
-            collection?.status === "error" ||
-            collection?.status === "expired" ||
-            collection?.status === "paused";
-        if (
-            updatedCollection &&
-            (updatedCollection.status === "completed" ||
-                updatedCollection.status === "error" ||
-                updatedCollection.status === "expired" ||
-                updatedCollection.status === "paused")
-        ) {
-            this.stopCollectionTimer(collectionId);
-            this.progressBatcher.deactivate(collectionId);
-            if (!wasTerminal) {
-                await this.emitUpdate(collectionId);
-                if (updatedCollection.status === "completed") {
-                    await this.kd.service.transfer.maybeShutdownAfterTransfer();
+            this.repository.recomputeCollectionStatus(collectionId);
+            const updatedCollection = this.repository.getCollection(collectionId);
+            const wasTerminal =
+                collection?.status === "completed" ||
+                collection?.status === "error" ||
+                collection?.status === "expired" ||
+                collection?.status === "paused";
+            if (
+                updatedCollection &&
+                (updatedCollection.status === "completed" ||
+                    updatedCollection.status === "error" ||
+                    updatedCollection.status === "expired" ||
+                    updatedCollection.status === "paused")
+            ) {
+                this.stopCollectionTimer(collectionId);
+                this.progressBatcher.deactivate(collectionId);
+                if (!wasTerminal) {
+                    await this.emitUpdate(collectionId);
+                    if (updatedCollection.status === "completed") {
+                        await this.kd.service.transfer.maybeShutdownAfterTransfer();
+                    }
+                }
+            } else {
+                this.progressBatcher.mark(collectionId, fileId);
+                if (
+                    updatedCollection?.status === "queued" &&
+                    this.activeCollections.has(collectionId)
+                ) {
+                    this.repository.markCollectionStatus(collectionId, "downloading");
                 }
             }
-        } else {
-            this.progressBatcher.mark(collectionId, fileId);
-            if (
-                updatedCollection?.status === "queued" &&
-                this.activeCollections.has(collectionId)
-            ) {
-                this.repository.markCollectionStatus(collectionId, "downloading");
-            }
+            await this.kd.service.transfer.refreshPowerSaveBlock();
+        } catch (error) {
+            logCaughtError(
+                this.kd.logger,
+                "DownloadScheduler:afterFileSettled",
+                { collectionId, fileId },
+                error,
+            );
+        } finally {
+            this.requestSchedule();
         }
-        await this.kd.service.transfer.refreshPowerSaveBlock();
-        void this.schedule();
     }
 
     private async runFile(
@@ -680,7 +707,7 @@ export class DownloadScheduler {
         }
 
         if (!supportsZipEntryPoolDownload(meta)) {
-            void this.schedule();
+            this.requestSchedule();
             await this.runZipEntryWithZipJs(collection, file, meta, settings, controller);
             return;
         }
@@ -833,7 +860,19 @@ export class DownloadScheduler {
                 this.repository.markFileStatus(file.id, "error", message);
                 this.progressBatcher.mark(collection.id, file.id);
             }
-            this.kd.logger.error(error, "DownloadService:runZipEntry");
+            logCaughtError(
+                this.kd.logger,
+                "DownloadScheduler:runZipEntry",
+                {
+                    collectionId: collection.id,
+                    fileId: file.id,
+                    path: file.path,
+                    entryPath: meta.path,
+                    compressionMethod: meta.compressionMethod,
+                    partPath,
+                },
+                error,
+            );
         } finally {
             await partWriter?.close();
             if (removeStaging) {
@@ -913,29 +952,50 @@ export class DownloadScheduler {
                 },
             });
             try {
-                const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-                const getDataPromise = opened.entry.getData(writable, {
-                    password: meta.password,
-                    signal,
-                });
-                const bytes = await partWriter.writeChunkFromStream(
-                    0,
-                    0,
-                    readableStreamToAsyncIterable(readable),
-                    meta.uncompressedSize,
-                    settings.streamWriteBatchBytes,
-                    {
-                        onTransferProgress: (transferredBytes) => {
-                            this.metrics.setChunkTransferProgress(file.id, 0, transferredBytes);
-                            this.progressBatcher.mark(collection.id, file.id);
-                        },
-                        onWriteProgress: (writtenBytes) => {
-                            this.metrics.setChunkWriteProgress(file.id, 0, writtenBytes);
-                            this.progressBatcher.mark(collection.id, file.id);
-                        },
+                // zip.js writes into one end while the part writer drains the other; if either
+                // side fails, the other must be errored too or it waits forever on the stream.
+                let streamController: TransformStreamDefaultController<Uint8Array> | undefined;
+                const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>({
+                    start: (controller) => {
+                        streamController = controller;
                     },
-                );
-                await getDataPromise;
+                });
+                const entryFailure = opened.entry
+                    .getData(writable, { password: meta.password, signal })
+                    .then(
+                        () => null,
+                        (error: unknown) => {
+                            streamController?.error(error);
+                            return { error };
+                        },
+                    );
+                const bytes = await partWriter
+                    .writeChunkFromStream(
+                        0,
+                        0,
+                        readableStreamToAsyncIterable(readable),
+                        meta.uncompressedSize,
+                        settings.streamWriteBatchBytes,
+                        {
+                            onTransferProgress: (transferredBytes) => {
+                                this.metrics.setChunkTransferProgress(file.id, 0, transferredBytes);
+                                this.progressBatcher.mark(collection.id, file.id);
+                            },
+                            onWriteProgress: (writtenBytes) => {
+                                this.metrics.setChunkWriteProgress(file.id, 0, writtenBytes);
+                                this.progressBatcher.mark(collection.id, file.id);
+                            },
+                        },
+                    )
+                    .catch(async (error: unknown) => {
+                        streamController?.error(error);
+                        await entryFailure;
+                        throw error;
+                    });
+                const failure = await entryFailure;
+                if (failure) {
+                    throw failure.error;
+                }
 
                 if (signal.aborted) {
                     this.repository.markChunkPending(file.id, 0);
@@ -965,7 +1025,18 @@ export class DownloadScheduler {
             this.repository.markChunkError(chunk, message);
             this.repository.markFileStatus(file.id, "error", message);
             this.progressBatcher.mark(collection.id, file.id);
-            this.kd.logger.error(error, "DownloadService:runZipEntry");
+            logCaughtError(
+                this.kd.logger,
+                "DownloadScheduler:runZipEntryWithZipJs",
+                {
+                    collectionId: collection.id,
+                    fileId: file.id,
+                    path: file.path,
+                    entryPath: meta.path,
+                    partPath,
+                },
+                error,
+            );
         } finally {
             await partWriter.close();
             this.metrics.clearFile(file.id);
