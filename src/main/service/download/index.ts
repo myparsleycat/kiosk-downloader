@@ -35,9 +35,10 @@ import {
     type ResumePayload,
     type ZipNode,
 } from "@shared/types";
+import { toErrorMessage } from "@shared/utils";
 import { findZipNodeById, isZipExtractMode, listZipNodes, setZipEntries } from "@shared/zip-tree";
 import { shell } from "electron";
-import fg from "fast-glob";
+import { groupBy } from "es-toolkit";
 import fse from "fs-extra";
 import pLimit from "p-limit";
 
@@ -127,6 +128,7 @@ export class DownloadService {
     private readonly prepareLimit = pLimit(DOWNLOAD_PREPARE_CONCURRENCY);
     private prepareEpoch = 0;
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
+    private readonly bundleFinalizations = new Map<string, Promise<void>>();
     private unsubscribeRequestPoolUsage?: () => void;
     private revision = 0;
 
@@ -1320,34 +1322,56 @@ export class DownloadService {
              FROM "download_collection"`,
         );
 
+        // Save paths are often shared folders like ~/Downloads (possibly shared by several
+        // collections), so only remove exact paths derived from finished files, and never one
+        // that an unfinished file in any collection still writes to.
+        const activePartPaths = new Set<string>();
+        const candidates: Array<{ collectionId: string; fileId: string; target: string }> = [];
         for (const collection of collections) {
-            if (!(await fse.pathExists(collection.savePath))) {
-                continue;
-            }
-
-            const expectedPartPaths = new Set(
-                this.repository
-                    .listFiles(collection.id)
-                    .filter((file) => file.selected === 1 && file.status !== "completed")
-                    .flatMap((file) => {
-                        const partPath = this.getPartPath(collection, file);
-                        return [partPath, getStagingPartPath(partPath)];
-                    }),
-            );
-
-            const partFiles = await fg(["**/*.part", "**/*.part.z"], {
-                cwd: collection.savePath,
-                absolute: true,
-                onlyFiles: true,
-            });
-
-            for (const partPath of partFiles) {
-                if (expectedPartPaths.has(partPath)) {
-                    continue;
+            for (const file of this.repository.listFiles(collection.id)) {
+                const partPath = this.getPartPath(collection, file);
+                const finished = file.selected !== 1 || file.status === "completed";
+                for (const target of [partPath, getStagingPartPath(partPath)]) {
+                    if (finished)
+                        candidates.push({ collectionId: collection.id, fileId: file.id, target });
+                    else activePartPaths.add(target);
                 }
+            }
+        }
 
-                await fse.remove(partPath).catch(() => undefined);
-                await PartFileWriter.removeSidecar(partPath);
+        // One readdir per directory instead of a stat per file keeps large histories from
+        // delaying startup; this runs before the main window is created.
+        const candidatesByDir = groupBy(
+            candidates.filter((candidate) => !activePartPaths.has(candidate.target)),
+            (candidate) => path.dirname(candidate.target),
+        );
+        for (const [dir, dirCandidates] of Object.entries(candidatesByDir)) {
+            const entries = await fse.readdir(dir).catch((error: NodeJS.ErrnoException) => {
+                if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+                    logCaughtError(
+                        this.kd.logger,
+                        "DownloadService:cleanupOrphanPartFiles",
+                        { dir },
+                        error,
+                    );
+                }
+                return [];
+            });
+            if (entries.length === 0) continue;
+            const present = new Set(entries);
+            for (const candidate of dirCandidates) {
+                if (!present.has(path.basename(candidate.target))) continue;
+                try {
+                    await fse.remove(candidate.target);
+                    await PartFileWriter.removeSidecar(candidate.target);
+                } catch (error) {
+                    logCaughtError(
+                        this.kd.logger,
+                        "DownloadService:cleanupOrphanPartFiles",
+                        candidate,
+                        error,
+                    );
+                }
             }
         }
     }
@@ -1665,11 +1689,24 @@ export class DownloadService {
             });
     }
 
-    private async finalizeDownloadBundle(bundleId: string) {
+    private finalizeDownloadBundle(bundleId: string) {
+        // Startup restore, collection completion and resume can all trigger finalize; running
+        // twice concurrently would write the same reassembled .part files.
+        const inFlight = this.bundleFinalizations.get(bundleId);
+        if (inFlight) return inFlight;
+        const finalization = this.runBundleFinalization(bundleId).finally(() => {
+            this.bundleFinalizations.delete(bundleId);
+        });
+        this.bundleFinalizations.set(bundleId, finalization);
+        return finalization;
+    }
+
+    private async runBundleFinalization(bundleId: string) {
         const bundle = this.repository.getBundle(bundleId);
         if (!bundle || bundle.status === "completed") return;
         const collections = this.repository.listBundleCollections(bundle.id);
-        const manifest = JSON.parse(bundle.manifestJson) as StoredExtendedManifest;
+        const manifest = this.parseStoredManifest(bundle.id, bundle.manifestJson);
+        if (!manifest) return;
         const collectionByOrdinal = new Map(
             collections.map((collection) => [collection.ordinal, collection]),
         );
@@ -1693,6 +1730,11 @@ export class DownloadService {
             // are not deleted mid-append.
             if (coordinator) {
                 await coordinator.whenIdle();
+                // whenIdle() swallows flush failures, so an unpublished managed file means
+                // incremental reassembly failed and the remaining pieces must be kept.
+                if (!coordinator.isComplete()) {
+                    throw new Error("분할 파일 재조립이 완료되지 않았습니다.");
+                }
             }
 
             for (const splitFile of manifest.splitFiles) {
@@ -1780,11 +1822,19 @@ export class DownloadService {
             await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id)));
             this.repository.markBundleStatus(bundle.id, "completed");
         } catch (error) {
-            this.repository.markBundleStatus(
-                bundle.id,
-                "error",
-                error instanceof Error ? error.message : String(error),
+            logCaughtError(
+                this.kd.logger,
+                "DownloadService:finalizeDownloadBundle",
+                {
+                    action: "bundle-finalize",
+                    bundleId: bundle.id,
+                    bundleName: bundle.name,
+                    savePath: bundle.savePath,
+                    managedSplitPaths: managedSplitPaths.size,
+                },
+                error,
             );
+            this.repository.markBundleStatus(bundle.id, "error", toErrorMessage(error));
         }
     }
 
