@@ -134,6 +134,7 @@ type NewDownloadDraftActions = {
     setUrl: (url: string) => void;
     setSavePath: (savePath: string) => void;
     setCreateCollectionSubfolder: (createCollectionSubfolder: boolean) => void;
+    setAsciiFilenames: (asciiFilenames: boolean) => void;
     replaceItems: (urls: string[]) => void;
     setItemPassword: (key: string, password: string) => void;
     setItemPreparation: (key: string, preparation: DownloadPreparationState) => void;
@@ -171,6 +172,8 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
     setSavePath: (savePath) => set({ savePath }),
 
     setCreateCollectionSubfolder: (createCollectionSubfolder) => set({ createCollectionSubfolder }),
+
+    setAsciiFilenames: (asciiFilenames) => set({ asciiFilenames }),
 
     replaceItems: (urls) =>
         set({
@@ -284,6 +287,7 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
         set({
             url: "",
             items: [],
+            settingsHydrated: false,
         }),
 
     hydrateSettings: async () => {
