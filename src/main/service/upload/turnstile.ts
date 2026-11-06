@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
     BrowserWindow,
     session,
@@ -248,7 +250,12 @@ export class TurnstileSolver {
     private activeWindow: BrowserWindow | null = null;
     private activeSession: Session | null = null;
     private sessionParent: BrowserWindow | null | undefined = undefined;
-    private sessionActive = false;
+    /** Open beginSession() calls; several bundles may initialize at once and share the window. */
+    private sessionDepth = 0;
+    // One in-memory partition for the solver's lifetime: a fresh partition per window was never
+    // released. Storage is cleared before each new window to keep the clean-session behavior.
+    private readonly partition = `turnstile-${randomUUID()}`;
+    private partitionConfigured = false;
     private chromeUserAgent = this.buildChromeUserAgent();
     private solveChain: Promise<unknown> = Promise.resolve();
 
@@ -258,11 +265,12 @@ export class TurnstileSolver {
     // endSession() must run in a finally so the window always closes.
     public beginSession(parentWindow?: BrowserWindow | null) {
         this.sessionParent = parentWindow;
-        this.sessionActive = true;
+        this.sessionDepth += 1;
     }
 
     public endSession() {
-        this.sessionActive = false;
+        this.sessionDepth = Math.max(0, this.sessionDepth - 1);
+        if (this.sessionDepth > 0) return;
         this.sessionParent = undefined;
         const window = this.activeWindow;
         this.activeWindow = null;
@@ -273,11 +281,17 @@ export class TurnstileSolver {
     // Open (or reuse) a modal child window on the kio.ac origin, render/reset a
     // Turnstile widget, and wait for the solved token. Applies best-effort stealth
     // so Electron looks closer to stock Chrome; network-level TLS fingerprint still differs.
+    // Aborting `signal` skips a queued solve or closes the window of a running one, which then
+    // rejects with the window-closed error.
     public async solve(
         parentWindow?: BrowserWindow | null,
         progress?: { current: number; total: number },
+        signal?: AbortSignal,
     ): Promise<string> {
-        const run = () => this.solveOnce(parentWindow, progress);
+        const run = () => {
+            signal?.throwIfAborted();
+            return this.solveOnce(parentWindow, progress, signal);
+        };
         const next = this.solveChain.then(run, run);
         this.solveChain = next.catch(() => {});
         return next as Promise<string>;
@@ -286,18 +300,22 @@ export class TurnstileSolver {
     private async solveOnce(
         parentWindow?: BrowserWindow | null,
         progress?: { current: number; total: number },
+        signal?: AbortSignal,
     ): Promise<string> {
         const parent = parentWindow ?? this.sessionParent;
         const { window, reused } = await this.ensureWindow(parent, progress);
+        const onAbort = () => void this.destroyWindow(window);
+        signal?.addEventListener("abort", onAbort, { once: true });
 
         try {
+            signal?.throwIfAborted();
             if (reused) {
                 await this.refreshChallenge(window, progress);
             } else {
                 await this.setProgressLabel(window, progress);
             }
             const token = await this.waitForToken(window);
-            if (this.sessionActive) {
+            if (this.sessionDepth > 0) {
                 await this.setProgressLabel(window, progress, "처리 중…");
             }
             return token;
@@ -305,14 +323,15 @@ export class TurnstileSolver {
             await this.destroyWindow(window);
             throw error;
         } finally {
-            if (!this.sessionActive) {
+            signal?.removeEventListener("abort", onAbort);
+            if (this.sessionDepth === 0) {
                 await this.destroyWindow(window);
             }
         }
     }
 
     public destroy() {
-        this.sessionActive = false;
+        this.sessionDepth = 0;
         this.sessionParent = undefined;
         const window = this.activeWindow;
         this.activeWindow = null;
@@ -333,9 +352,12 @@ export class TurnstileSolver {
         }
 
         const ua = this.chromeUserAgent;
-        const partition = `turnstile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const ses = session.fromPartition(partition, { cache: false });
-        this.configureSession(ses, ua);
+        const ses = session.fromPartition(this.partition, { cache: false });
+        if (!this.partitionConfigured) {
+            this.configureSession(ses, ua);
+            this.partitionConfigured = true;
+        }
+        await ses.clearStorageData();
 
         const window = new BrowserWindow(this.buildWindowOptions(parentWindow, ses, progress));
         this.activeWindow = window;
@@ -354,8 +376,14 @@ export class TurnstileSolver {
             void window.webContents.executeJavaScript(STEALTH_SCRIPT, true).catch(() => {});
         });
 
-        await window.loadURL(UPLOAD_URL, { userAgent: ua });
-        await window.webContents.executeJavaScript(RENDER_WIDGET_SCRIPT, true);
+        try {
+            await window.loadURL(UPLOAD_URL, { userAgent: ua });
+            await window.webContents.executeJavaScript(RENDER_WIDGET_SCRIPT, true);
+        } catch (error) {
+            // Otherwise the half-loaded window stays open and the next solve reuses it.
+            await this.destroyWindow(window);
+            throw error;
+        }
         return { window, reused: false };
     }
 

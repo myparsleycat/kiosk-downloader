@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 
+import { logCaughtError } from "@main/lib/logged-error";
 import { toErrorMessage } from "@shared/utils";
 
 import type { KioskDownloader } from "../..";
@@ -767,6 +768,17 @@ export class UploadScheduler {
             await this.emitUpdate(collectionId);
             await this.kd.service.transfer.maybeShutdownAfterTransfer();
         } catch (error) {
+            logCaughtError(
+                this.kd.logger,
+                "UploadScheduler:finalizeCollection",
+                {
+                    action: "complete-collection",
+                    collectionId,
+                    bundleId: collection.bundleId,
+                    name: collection.name,
+                },
+                error,
+            );
             state.completing = false;
             const status = error instanceof UploadSessionExpiredError ? "expired" : "error";
             this.repository.markCollectionStatus(collectionId, status, toErrorMessage(error));
@@ -789,6 +801,10 @@ export class UploadScheduler {
             return;
         }
         collection.failed = true;
+        this.kd.logger.error(
+            { collectionId, fileId: failedFileId, status, message },
+            "UploadScheduler:failCollection",
+        );
         this.progressBatcher.deactivate(collectionId);
         this.removeQueuedCollection(collectionId);
         for (const fileId of collection.fileIds) {
