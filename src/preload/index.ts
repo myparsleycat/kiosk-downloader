@@ -1,6 +1,5 @@
 // oxlint-disable typescript/no-explicit-any
 
-import { electronAPI } from "@electron-toolkit/preload";
 import type { IpcSendChannel } from "@shared/ipc-keys.gen";
 import { IPC_EVENT_CHANNELS, IPC_HANDLER_CHANNELS, IPC_SEND_CHANNELS } from "@shared/ipc-keys.gen";
 import type { ExpandPathsResult, IpcEvents, IpcHandlers } from "@shared/types";
@@ -20,6 +19,7 @@ function resolveDroppedPaths(files: File[]): string[] {
 }
 
 const api = {
+    platform: process.platform,
     invoke: <K extends keyof IpcHandlers>(channel: K, ...args: Parameters<IpcHandlers[K]>) => {
         if (!ipcHandlerChannelSet.has(channel)) {
             throw new Error(`Unauthorized IPC channel: ${channel}`);
@@ -66,14 +66,11 @@ const api = {
 
 if (process.contextIsolated) {
     try {
-        contextBridge.exposeInMainWorld("electron", electronAPI);
         contextBridge.exposeInMainWorld("api", api);
     } catch (error) {
         console.error(error);
     }
 } else {
-    // @ts-expect-error
-    window.electron = electronAPI;
     // @ts-expect-error
     window.api = api;
 }

@@ -1,20 +1,7 @@
 import type { DownloadService } from "@main/service/download";
 import type { Updater } from "@main/service/updater";
 import type { UploadService } from "@main/service/upload";
-import type {
-    copyStr,
-    getAppStatus,
-    getClipboardFiles,
-    getPathMetadata,
-    mkdir,
-    openCmd,
-    openExternal,
-    openPath,
-    showModal,
-    showOpenDialog,
-    showSaveDialog,
-    trash,
-} from "@main/service/util";
+import type { getAppStatus, openExternal, showOpenDialog } from "@main/service/util";
 
 import type { AppSettings, SettingKey } from "./settings";
 import type { ExpandPathsResult, TitleBarOverlaySyncOptions } from "./types";
@@ -64,17 +51,8 @@ export type IpcHandlers = {
     "upload:resume": UploadService["resumeUpload"];
     "upload:resumeFile": UploadService["resumeFile"];
     "upload:solveTurnstile": UploadService["solveTurnstile"];
-    "util:copyStr": typeof copyStr;
-    "util:fs:metadata": typeof getPathMetadata;
-    "util:fs:mkdir": typeof mkdir;
-    "util:fs:trash": typeof trash;
     "util:getAppStatus": typeof getAppStatus;
-    "util:getClipboardFiles": typeof getClipboardFiles;
-    "util:openCmd": typeof openCmd;
     "util:openExternal": typeof openExternal;
-    "util:openPath": typeof openPath;
-    "util:showModal": typeof showModal;
     "util:showOpenDialog": typeof showOpenDialog;
-    "util:showSaveDialog": typeof showSaveDialog;
     "window:syncTitleBarOverlay": (options: TitleBarOverlaySyncOptions) => void;
 };

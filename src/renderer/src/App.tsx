@@ -47,7 +47,7 @@ export function RootProvider({ children }: { children: React.ReactNode }) {
 
 type TabValue = "downloads" | "new" | "uploads" | "new-upload" | "settings";
 
-const isDarwin = window.electron.process.platform === "darwin";
+const isDarwin = window.api.platform === "darwin";
 
 function MainComponent() {
   const [tab, setTab] = React.useState<TabValue>("downloads");

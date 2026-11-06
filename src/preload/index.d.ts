@@ -1,13 +1,11 @@
-import { ElectronAPI } from "@electron-toolkit/preload";
-
 import type { ExpandPathsResult, IpcEvents, IpcHandlers } from "../shared/types";
 
 import { IpcSendChannel } from "../shared/ipc-keys.gen";
 
 declare global {
     interface Window {
-        electron: ElectronAPI;
         api: {
+            platform: string;
             invoke<T extends keyof IpcHandlers>(
                 channel: T,
                 ...args: Parameters<IpcHandlers[T]>
