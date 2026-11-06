@@ -1,5 +1,6 @@
 import { BulkTransferButtons } from "@renderer/components/transfer/bulk-transfer-buttons";
 import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-pool-usage";
+import { TransferErrorDialog } from "@renderer/components/transfer/transfer-error-dialog";
 import { FileTree, type FileTreeError } from "@renderer/components/tree/file-tree";
 import {
   AlertDialog,
@@ -18,14 +19,6 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@renderer/components/ui/context-menu";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@renderer/components/ui/dialog";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { useRemoveTransfer } from "@renderer/hooks/use-remove-transfer";
 import { isBulkPausable, isBulkStartable, runBulkItemActions } from "@renderer/lib/bulk-transfer";
@@ -318,7 +311,8 @@ export function UploadList({
         />
       </div>
       {dialog}
-      <UploadErrorDialog
+      <TransferErrorDialog
+        title="업로드 오류 상세"
         errors={errorDetails}
         onOpenChange={(open) => {
           if (!open) setErrorDetails(null);
@@ -701,36 +695,6 @@ function getUploadErrors(item: UploadItem): FileTreeError[] {
   }
 
   return errors;
-}
-
-function UploadErrorDialog({
-  errors,
-  onOpenChange,
-}: {
-  errors: FileTreeError[] | null;
-  onOpenChange: (open: boolean) => void;
-}) {
-  return (
-    <Dialog open={errors !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>업로드 오류 상세</DialogTitle>
-          <DialogDescription>{errors?.length ?? 0}개 오류가 발생했습니다.</DialogDescription>
-        </DialogHeader>
-        <div className="max-h-80 space-y-3 overflow-y-auto rounded-md border bg-muted/30 p-3">
-          {errors?.map((error) => (
-            <div key={`${error.path}:${error.message}`} className="space-y-1 text-xs">
-              <p className="font-medium break-all">{error.path}</p>
-              <pre className="text-destructive whitespace-pre-wrap break-words font-mono">
-                {error.message}
-              </pre>
-            </div>
-          ))}
-        </div>
-        <DialogFooter showCloseButton />
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 function toTreeProgress(progress: UploadItem["progress"]): Record<string, FileProgress> {
