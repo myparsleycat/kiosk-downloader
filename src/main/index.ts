@@ -1,8 +1,9 @@
 import path from "node:path";
 
 import { electronApp, optimizer } from "@electron-toolkit/utils";
+import { toErrorMessage } from "@shared/utils";
 import AutoLaunch from "auto-launch";
-import { app } from "electron";
+import { app, dialog } from "electron";
 
 import { IS_ELECTRON } from "./const";
 import { IPC } from "./ipc";
@@ -120,18 +121,24 @@ export class KioskDownloader {
         }
     }
 
+    /** Last init step reached, reported when startup fails. */
+    public initStage = "idle";
+
     public async init() {
         if (this.initialized) return;
 
         // Reconcile before services because some constructors may read persisted app state.
+        this.initStage = "db-reconcile";
         await this.lib.db.reconcile();
+        this.initStage = "transfer-settings";
         await this.service.transfer.applyBandwidthLimitsFromSettings();
         await this.service.transfer.applyRequestPoolSettings();
 
+        this.initStage = "startup-cleanup";
         this.service.download.registerStartupTasks();
         await this.service.startupCleanup.runAll();
 
-        // init lang
+        this.initStage = "language";
         const lang = await this.lib.db.settings.getValue("language");
         if (!lang) {
             const locale = app.getLocale();
@@ -141,7 +148,7 @@ export class KioskDownloader {
             else await this.lib.db.settings.upsert("language", "en");
         }
 
-        // make tray
+        this.initStage = "tray";
         this.lib.tray.createTray();
 
         this.initialized = true;
@@ -151,16 +158,27 @@ export class KioskDownloader {
 
         this.http.setForceIpv4(await this.setting.get("network.forceIpv4"));
 
+        this.initStage = "main-window";
         await this.window.main.createMainWindow();
         this.service.updater.initialize();
+        this.initStage = "download-restore";
         await this.service.download.restoreStartupState();
+        this.initStage = "upload-restore";
         await this.service.upload.restoreStartupState();
+        this.initStage = "done";
         void this.syncAutoLaunchSetting();
         void this.service.updater.showPendingDialogsIfNeeded();
     }
 }
 
 export const kd = new KioskDownloader();
+
+process.on("unhandledRejection", (reason) => {
+    kd.logger.error({ err: reason }, "App:unhandledRejection");
+});
+process.on("uncaughtException", (error) => {
+    kd.logger.error(error, "App:uncaughtException");
+});
 
 void app.whenReady().then(() => {
     const gotTheLock = app.requestSingleInstanceLock();
@@ -198,7 +216,14 @@ void app.whenReady().then(() => {
         optimizer.watchWindowShortcuts(window);
     });
 
-    void kd.init();
+    void kd.init().catch((error: unknown) => {
+        kd.logger.fatal({ stage: kd.initStage, err: error }, "App:init");
+        dialog.showErrorBox(
+            "Kiosk Downloader를 시작하지 못했습니다",
+            `단계: ${kd.initStage}\n${toErrorMessage(error)}`,
+        );
+        app.quit();
+    });
 });
 
 app.on("window-all-closed", async () => {

@@ -8,7 +8,10 @@ export function logCaughtError(
     context: Record<string, unknown>,
     error: unknown,
 ) {
-    logger.error({ ...sanitizeLogContext(context), message: toErrorMessage(error) }, where);
+    logger.error(
+        { ...sanitizeLogContext(context), message: toErrorMessage(error), err: error },
+        where,
+    );
 }
 
 export async function withLoggedError<T>(

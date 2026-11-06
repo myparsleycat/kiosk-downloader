@@ -33,6 +33,7 @@ describe("withLoggedError", () => {
                 url: "https://example.com/share/abc123",
                 shareId: "abc123",
                 message: "request failed",
+                err: error,
             },
             "DownloadService:loadCollection",
         );
@@ -49,7 +50,7 @@ describe("withLoggedError", () => {
         ).rejects.toThrow("failed");
 
         expect(logError).toHaveBeenCalledWith(
-            { url: "[invalid URL]", count: 3, message: "failed" },
+            { url: "[invalid URL]", count: 3, message: "failed", err: expect.any(Error) },
             "test",
         );
     });
@@ -59,6 +60,7 @@ describe("logCaughtError", () => {
     it("sanitizes URL context when logging an already-caught error", () => {
         const logError = vi.fn();
         const logger = { error: logError } as unknown as Logger;
+        const error = new Error("remote down");
 
         logCaughtError(
             logger,
@@ -68,7 +70,7 @@ describe("logCaughtError", () => {
                 stage: "load",
                 url: "https://user:secret@example.com/share/abc123?token=sensitive#fragment",
             },
-            new Error("remote down"),
+            error,
         );
 
         expect(logError).toHaveBeenCalledWith(
@@ -77,6 +79,7 @@ describe("logCaughtError", () => {
                 stage: "load",
                 url: "https://example.com/share/abc123",
                 message: "remote down",
+                err: error,
             },
             "DownloadService:prepare",
         );

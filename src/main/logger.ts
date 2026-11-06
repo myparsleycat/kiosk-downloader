@@ -94,11 +94,7 @@ export class Logger {
         return priorities[level] >= priorities[this.currentLevel];
     }
 
-    private async writeFallback(
-        level: LogLevel,
-        logContent: string,
-        object?: unknown,
-    ): Promise<void> {
+    private async writeFallback(level: LogLevel, entry: LogEntry): Promise<void> {
         if (!this.dest || !this.shouldWrite(level)) {
             return;
         }
@@ -106,11 +102,8 @@ export class Logger {
         const line = JSON.stringify({
             level,
             time: new Date().toISOString(),
-            msg: logContent,
-            err:
-                object instanceof Error
-                    ? { name: object.name, message: object.message, stack: object.stack }
-                    : undefined,
+            ...entry.fields,
+            msg: entry.msg,
         });
 
         await fse.appendFile(this.dest, `${line}\n`, "utf8");
@@ -142,42 +135,19 @@ export class Logger {
             return;
         }
 
+        // Build the entry synchronously so callers that mutate their context object afterwards
+        // (e.g. advancing a `stage` field) do not change what gets logged.
+        const entry = toLogEntry(object, where);
         void (async () => {
             try {
-                const objectContent =
-                    typeof object === "undefined"
-                        ? ""
-                        : typeof object === "string" || typeof object === "number"
-                          ? String(object)
-                          : JSON.stringify(object);
-                const logContent = `${where ? `[${where}] ` : ""}${objectContent}`;
-
                 await this.ensureInitialized();
 
                 if (!this.logger) {
-                    await this.writeFallback(level, logContent, object);
+                    await this.writeFallback(level, entry);
                     return;
                 }
 
-                if (level === "info") {
-                    this.logger.info(logContent);
-                } else if (level === "debug") {
-                    this.logger.debug(logContent);
-                } else if (level === "error") {
-                    this.logger.error(logContent);
-
-                    if (object instanceof Error) {
-                        this.logger.error(object);
-                    }
-                } else if (level === "warn") {
-                    this.logger.warn(logContent);
-                } else if (level === "trace") {
-                    this.logger.trace(logContent);
-                } else if (level === "fatal") {
-                    this.logger.fatal(logContent);
-                } else {
-                    this.logger.info(logContent);
-                }
+                this.logger[level](entry.fields ?? {}, entry.msg);
             } catch (e) {
                 console.error(e);
             }
@@ -210,3 +180,54 @@ export class Logger {
 }
 
 export default Logger;
+
+interface LogEntry {
+    fields?: Record<string, unknown>;
+    msg: string;
+}
+
+/**
+ * Converts a log argument into pino merge fields plus a message. Errors (top-level or nested
+ * one level in a context object) keep their name, message, stack and cause, and anything that
+ * cannot be JSON-serialized (cycles, BigInt) degrades to a string instead of dropping the line.
+ */
+export function toLogEntry(object: unknown, where?: string): LogEntry {
+    const prefix = where ? `[${where}]` : "";
+    if (object === undefined || object === null) return { msg: prefix };
+    if (
+        typeof object === "string" ||
+        typeof object === "number" ||
+        typeof object === "boolean" ||
+        typeof object === "bigint"
+    ) {
+        return { msg: prefix ? `${prefix} ${String(object)}` : String(object) };
+    }
+    if (typeof object !== "object") return { msg: prefix };
+    if (object instanceof Error) {
+        return { fields: { err: pino.stdSerializers.err(object) }, msg: prefix || object.message };
+    }
+    const fields = Array.isArray(object)
+        ? { value: object }
+        : Object.fromEntries(
+              Object.entries(object).map(([key, value]) => [
+                  key,
+                  value instanceof Error ? pino.stdSerializers.err(value) : value,
+              ]),
+          );
+    return { fields: toJsonSafe(fields), msg: prefix };
+}
+
+function toJsonSafe(fields: Record<string, unknown>): Record<string, unknown> {
+    try {
+        return JSON.parse(
+            JSON.stringify(fields, (_key, value: unknown) =>
+                typeof value === "bigint" ? value.toString() : value,
+            ),
+        ) as Record<string, unknown>;
+    } catch (error) {
+        return {
+            unserializable: Object.keys(fields).join(","),
+            serializeError: error instanceof Error ? error.message : String(error),
+        };
+    }
+}

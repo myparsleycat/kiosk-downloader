@@ -394,6 +394,7 @@ describe("DownloadService prepared draft", () => {
                 stage: "load",
                 url: `https://kio.ac/c/${"a".repeat(22)}`,
                 message: "remote down",
+                err: expect.any(Error),
             },
             "DownloadService:prepare",
         );
