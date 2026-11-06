@@ -1097,6 +1097,11 @@ export class DownloadService {
                         this.reassemblyCoordinators.delete(bundle.id);
                     }
                     const collections = this.repository.listBundleCollections(bundle.id);
+                    // Park every collection first: settling runs of one collection trigger
+                    // schedule(), which would otherwise start files of a sibling still queued.
+                    for (const collection of collections) {
+                        this.repository.markCollectionStatus(collection.id, "paused");
+                    }
                     for (const collection of collections) {
                         await this.scheduler.removeCollection(collection.id);
                     }

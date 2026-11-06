@@ -207,14 +207,18 @@ export function UpdateAlertDialog() {
             onClick={() => {
               setShouldPromptForUpdate(false);
               if (isManual) {
-                void window.api
-                  .invoke("updater:openDownloadPage")
-                  .then(() => window.api.invoke("updater:dismissUpdateDialog"))
-                  .catch((error) =>
+                void window.api.invoke("updater:openDownloadPage").then(
+                  () =>
+                    window.api.invoke("updater:dismissUpdateDialog").catch((error) =>
+                      toast.error("업데이트 알림 상태를 저장하지 못했습니다", {
+                        description: error instanceof Error ? error.message : String(error),
+                      }),
+                    ),
+                  (error) =>
                     toast.error("다운로드 페이지를 열지 못했습니다", {
                       description: error instanceof Error ? error.message : String(error),
                     }),
-                  );
+                );
                 return;
               }
               // No dismiss on install so the main process keeps prompting and the user can retry.

@@ -53,6 +53,23 @@ describe("UploadService bundle initialization", () => {
             }
         },
     );
+
+    it("restarts initialization when resume follows a pause that is still cancelling", async () => {
+        const { service, repository, solve, bundle, plan } = createFixture();
+
+        void internals(service).initializeBundle(bundle, plan);
+        await vi.waitFor(() => expect(solve).toHaveBeenCalledTimes(1));
+        const pausing = service.pauseUpload(bundle.id);
+        const resuming = service.resumeUpload(bundle.id);
+        await pausing;
+
+        await vi.waitFor(() => expect(solve).toHaveBeenCalledTimes(2));
+        expect(repository.markBundleStatus).toHaveBeenCalledExactlyOnceWith(bundle.id, "paused");
+        expect(repository.markBundleStatus.mock.invocationCallOrder[0]).toBeLessThan(
+            solve.mock.invocationCallOrder[1] ?? 0,
+        );
+        void resuming;
+    });
 });
 
 function createFixture() {
@@ -67,7 +84,13 @@ function createFixture() {
         },
     } as unknown as KioskDownloader;
     const service = new UploadService(kd);
-    const bundle = { id: "bundle-1", name: "Bundle", physicalCount: 2 } as UploadBundleRow;
+    const bundle = {
+        id: "bundle-1",
+        name: "Bundle",
+        physicalCount: 2,
+        initializedCount: 0,
+        planJson: JSON.stringify({ collections: [{ files: [] }, { files: [] }] }),
+    } as UploadBundleRow;
     const plan = { collections: [{ files: [] }, { files: [] }] } as unknown as PersistedBundlePlan;
     const repository = {
         getBundle: vi.fn(() => bundle),

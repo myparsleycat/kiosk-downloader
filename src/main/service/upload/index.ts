@@ -76,6 +76,7 @@ export class UploadService {
     private readonly notifiedFailures = new Set<string>();
     private readonly bundleInitializations = new Map<string, Promise<unknown>>();
     private readonly bundleInitControllers = new Map<string, AbortController>();
+    private readonly bundlePauses = new Map<string, Promise<void>>();
     /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
     private readonly draftSources = new Map<string, UploadSourceFile>();
     private unsubscribeRequestPoolUsage?: () => void;
@@ -271,15 +272,15 @@ export class UploadService {
             async () => {
                 const bundle = this.repository.getBundle(collectionId);
                 if (bundle) {
-                    await this.cancelBundleInitialization(bundle.id);
-                    for (const collection of this.repository.listBundleCollections(bundle.id)) {
-                        if (collection.status === "completed") continue;
-                        await this.scheduler.pauseCollection(collection.id);
-                        this.repository.pauseCollection(collection.id);
+                    const pausing = this.pauseBundle(bundle.id);
+                    this.bundlePauses.set(bundle.id, pausing);
+                    try {
+                        await pausing;
+                    } finally {
+                        if (this.bundlePauses.get(bundle.id) === pausing) {
+                            this.bundlePauses.delete(bundle.id);
+                        }
                     }
-                    this.repository.markBundleStatus(bundle.id, "paused");
-                    await this.emitUpdate(bundle.id);
-                    await this.kd.service.transfer.refreshPowerSaveBlock();
                     return;
                 }
                 await this.scheduler.pauseCollection(collectionId);
@@ -296,16 +297,22 @@ export class UploadService {
             "UploadService:resumeUpload",
             { action: "resume", collectionId, force: Boolean(options.force) },
             async () => {
+                // A resume right after pause would otherwise rejoin the initialization that pause
+                // is cancelling, and pause would then write 'paused' over it.
+                // A failed pause was already logged by pauseUpload; resume proceeds regardless.
+                await this.bundlePauses.get(collectionId)?.catch(() => undefined);
                 const bundle = this.repository.getBundle(collectionId);
                 if (bundle) {
-                    if (bundle.initializedCount < bundle.physicalCount) {
-                        await this.initializeBundle(bundle);
-                        return;
-                    }
+                    // Collections created before a pause during initialization are paused too;
+                    // they stay unrunnable until initialization completes.
                     for (const collection of this.repository.listBundleCollections(bundle.id)) {
                         if (collection.status !== "paused") continue;
                         this.repository.resumeCollection(collection.id, Boolean(options.force));
                         await this.scheduler.resumeCollection(collection.id);
+                    }
+                    if (bundle.initializedCount < bundle.physicalCount) {
+                        await this.initializeBundle(bundle);
+                        return;
                     }
                     this.repository.queueBundle(bundle.id);
                     await this.emitUpdate(bundle.id);
@@ -745,6 +752,18 @@ export class UploadService {
         });
         this.bundleInitializations.set(bundle.id, task);
         return task;
+    }
+
+    private async pauseBundle(bundleId: string) {
+        await this.cancelBundleInitialization(bundleId);
+        for (const collection of this.repository.listBundleCollections(bundleId)) {
+            if (collection.status === "completed") continue;
+            await this.scheduler.pauseCollection(collection.id);
+            this.repository.pauseCollection(collection.id);
+        }
+        this.repository.markBundleStatus(bundleId, "paused");
+        await this.emitUpdate(bundleId);
+        await this.kd.service.transfer.refreshPowerSaveBlock();
     }
 
     /** Stops an in-flight initialization at its next checkpoint and waits for it to unwind. */

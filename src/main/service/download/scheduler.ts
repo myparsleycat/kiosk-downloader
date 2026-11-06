@@ -98,8 +98,12 @@ export class DownloadScheduler {
     private readonly activeCollections = new Set<string>();
     private readonly activeFilesByCollection = new Map<string, Set<string>>();
     private readonly fileControllers = new Map<string, AbortController>();
-    /** Each started file's run, including its afterFileSettled bookkeeping. */
-    private readonly fileRuns = new Map<string, Promise<void>>();
+    /**
+     * Every started file run, including its afterFileSettled bookkeeping. Tracked apart from
+     * activeFilesByCollection, which a file leaves before that bookkeeping finishes, and not keyed
+     * by file because a resumed file can start a new run while the old one is still settling.
+     */
+    private readonly fileRuns = new Set<{ collectionId: string; run: Promise<void> }>();
     private readonly manualCollections = new Set<string>();
     private readonly manualFiles = new Set<string>();
     private readonly progressBatcher: TransferProgressBatcher;
@@ -301,16 +305,16 @@ export class DownloadScheduler {
     public async removeCollection(collectionId: string) {
         // Parked as paused so schedule() does not restart its files while the runs drain.
         this.repository.markCollectionStatus(collectionId, "paused");
-        const runs: Promise<void>[] = [];
         for (const fileId of this.activeFilesByCollection.get(collectionId) ?? []) {
             this.segmentPool.cancelSession(fileId);
             this.transferPool.cancelSession(fileId);
             this.fileControllers.get(fileId)?.abort();
             this.metrics.clearFile(fileId);
             this.clearFileStartTracking(fileId);
-            const run = this.fileRuns.get(fileId);
-            if (run) runs.push(run);
         }
+        const runs = [...this.fileRuns]
+            .filter((entry) => entry.collectionId === collectionId)
+            .map((entry) => entry.run);
         for (const fileId of this.manualFiles) {
             if (this.repository.getFile(fileId)?.collectionId === collectionId) {
                 this.manualFiles.delete(fileId);
@@ -517,9 +521,9 @@ export class DownloadScheduler {
             }
             return this.afterFileSettled(collection.id, file.id);
         });
-        this.fileRuns.set(
-            file.id,
-            run
+        const entry = {
+            collectionId: collection.id,
+            run: run
                 .catch((error: unknown) => {
                     logCaughtError(
                         this.kd.logger,
@@ -529,9 +533,10 @@ export class DownloadScheduler {
                     );
                 })
                 .finally(() => {
-                    this.fileRuns.delete(file.id);
+                    this.fileRuns.delete(entry);
                 }),
-        );
+        };
+        this.fileRuns.add(entry);
     }
 
     private async afterFileSettled(collectionId: string, fileId: string) {

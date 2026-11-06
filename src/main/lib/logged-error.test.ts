@@ -33,7 +33,7 @@ describe("withLoggedError", () => {
                 url: "https://example.com/share/abc123",
                 shareId: "abc123",
                 message: "request failed",
-                err: error,
+                stack: error.stack,
             },
             "DownloadService:loadCollection",
         );
@@ -50,7 +50,7 @@ describe("withLoggedError", () => {
         ).rejects.toThrow("failed");
 
         expect(logError).toHaveBeenCalledWith(
-            { url: "[invalid URL]", count: 3, message: "failed", err: expect.any(Error) },
+            { url: "[invalid URL]", count: 3, message: "failed", stack: expect.any(String) },
             "test",
         );
     });
@@ -79,7 +79,7 @@ describe("logCaughtError", () => {
                 stage: "load",
                 url: "https://example.com/share/abc123",
                 message: "remote down",
-                err: error,
+                stack: error.stack,
             },
             "DownloadService:prepare",
         );

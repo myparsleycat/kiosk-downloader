@@ -12,6 +12,7 @@ import { DatabaseClient } from "./lib/db/client";
 import { FS } from "./lib/fs";
 import { HTTP } from "./lib/http";
 import { isPortable } from "./lib/isPortable";
+import { logCaughtError } from "./lib/logged-error";
 import { Tray } from "./lib/tray";
 import { Utils } from "./lib/utils";
 import { Logger } from "./logger";
@@ -121,51 +122,67 @@ export class KioskDownloader {
         }
     }
 
-    /** Last init step reached, reported when startup fails. */
-    public initStage = "idle";
-
     public async init() {
         if (this.initialized) return;
 
-        // Reconcile before services because some constructors may read persisted app state.
-        this.initStage = "db-reconcile";
-        await this.lib.db.reconcile();
-        this.initStage = "transfer-settings";
-        await this.service.transfer.applyBandwidthLimitsFromSettings();
-        await this.service.transfer.applyRequestPoolSettings();
+        let stage = "db-reconcile";
+        try {
+            // Reconcile before services because some constructors may read persisted app state.
+            await this.lib.db.reconcile();
+            stage = "transfer-settings";
+            await this.service.transfer.applyBandwidthLimitsFromSettings();
+            await this.service.transfer.applyRequestPoolSettings();
 
-        this.initStage = "startup-cleanup";
-        this.service.download.registerStartupTasks();
-        await this.service.startupCleanup.runAll();
+            stage = "startup-cleanup";
+            this.service.download.registerStartupTasks();
+            await this.service.startupCleanup.runAll();
 
-        this.initStage = "language";
-        const lang = await this.lib.db.settings.getValue("language");
-        if (!lang) {
-            const locale = app.getLocale();
-            if (locale.startsWith("en")) await this.lib.db.settings.upsert("language", "en");
-            else if (locale === "ko") await this.lib.db.settings.upsert("language", "ko");
-            else if (locale.startsWith("zh")) await this.lib.db.settings.upsert("language", "zh");
-            else await this.lib.db.settings.upsert("language", "en");
+            stage = "language";
+            const lang = await this.lib.db.settings.getValue("language");
+            if (!lang) {
+                const locale = app.getLocale();
+                if (locale.startsWith("en")) await this.lib.db.settings.upsert("language", "en");
+                else if (locale === "ko") await this.lib.db.settings.upsert("language", "ko");
+                else if (locale.startsWith("zh"))
+                    await this.lib.db.settings.upsert("language", "zh");
+                else await this.lib.db.settings.upsert("language", "en");
+            }
+
+            stage = "tray";
+            this.lib.tray.createTray();
+
+            this.initialized = true;
+
+            const logLevel = await this.setting.get("general.logLevel");
+            this.logger.setLevel(logLevel);
+
+            this.http.setForceIpv4(await this.setting.get("network.forceIpv4"));
+
+            stage = "main-window";
+            await this.window.main.createMainWindow();
+            this.service.updater.initialize();
+        } catch (error) {
+            this.logger.fatal({ stage, err: error }, "App:init");
+            dialog.showErrorBox(
+                "Kiosk Downloader를 시작하지 못했습니다",
+                `단계: ${stage}\n${toErrorMessage(error)}`,
+            );
+            app.quit();
+            return;
         }
 
-        this.initStage = "tray";
-        this.lib.tray.createTray();
-
-        this.initialized = true;
-
-        const logLevel = await this.setting.get("general.logLevel");
-        this.logger.setLevel(logLevel);
-
-        this.http.setForceIpv4(await this.setting.get("network.forceIpv4"));
-
-        this.initStage = "main-window";
-        await this.window.main.createMainWindow();
-        this.service.updater.initialize();
-        this.initStage = "download-restore";
-        await this.service.download.restoreStartupState();
-        this.initStage = "upload-restore";
-        await this.service.upload.restoreStartupState();
-        this.initStage = "done";
+        // A bad persisted row must not keep the app from opening: the window is already up, so
+        // log the failure and let the user remove the offending item from the UI.
+        for (const [restoreStage, restore] of [
+            ["download-restore", () => this.service.download.restoreStartupState()],
+            ["upload-restore", () => this.service.upload.restoreStartupState()],
+        ] as const) {
+            try {
+                await restore();
+            } catch (error) {
+                logCaughtError(this.logger, "App:init", { stage: restoreStage }, error);
+            }
+        }
         void this.syncAutoLaunchSetting();
         void this.service.updater.showPendingDialogsIfNeeded();
     }
@@ -175,9 +192,6 @@ export const kd = new KioskDownloader();
 
 process.on("unhandledRejection", (reason) => {
     kd.logger.error({ err: reason }, "App:unhandledRejection");
-});
-process.on("uncaughtException", (error) => {
-    kd.logger.error(error, "App:uncaughtException");
 });
 
 void app.whenReady().then(() => {
@@ -216,14 +230,7 @@ void app.whenReady().then(() => {
         optimizer.watchWindowShortcuts(window);
     });
 
-    void kd.init().catch((error: unknown) => {
-        kd.logger.fatal({ stage: kd.initStage, err: error }, "App:init");
-        dialog.showErrorBox(
-            "Kiosk Downloader를 시작하지 못했습니다",
-            `단계: ${kd.initStage}\n${toErrorMessage(error)}`,
-        );
-        app.quit();
-    });
+    void kd.init();
 });
 
 app.on("window-all-closed", async () => {

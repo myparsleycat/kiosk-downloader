@@ -135,6 +135,10 @@ export class Logger {
             return;
         }
 
+        if (!this.shouldWrite(level)) {
+            return;
+        }
+
         // Build the entry synchronously so callers that mutate their context object afterwards
         // (e.g. advancing a `stage` field) do not change what gets logged.
         const entry = toLogEntry(object, where);
