@@ -177,6 +177,50 @@ describe("DownloadScheduler", () => {
         }
     });
 
+    it("resolves removeCollection only after the aborted run has settled", async () => {
+        const collection = createCollection("removing", 0);
+        const file = createFile("removing-file", collection.id);
+        const repository = createRepository([collection], [file]);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const runSettled = Promise.withResolvers<void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(async () => {
+                file.status = "downloading";
+                await runSettled.promise;
+                file.status = "pending";
+            });
+
+        try {
+            await scheduler.schedule();
+            let removed = false;
+            const removal = scheduler.removeCollection(collection.id).then(() => {
+                removed = true;
+            });
+            expect(runFile.mock.calls[0]?.[3].signal.aborted).toBe(true);
+            expect(collection.status).toBe("paused");
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(removed).toBe(false);
+
+            runSettled.resolve();
+            await removal;
+            expect(scheduler.hasActiveTransfers()).toBe(false);
+            expect(runFile).toHaveBeenCalledTimes(1);
+        } finally {
+            runSettled.resolve();
+            scheduler.destroy();
+        }
+    });
+
     it("logs an afterFileSettled failure and still starts the remaining files", async () => {
         const collection = createCollection("settle-failure", 0);
         const files = ["a", "b", "c"].map((id) => createFile(`settle-${id}`, collection.id));

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { moveFileOverwrite, removeTree, writeEmptyFile } from "@main/lib/asar-safe-fs";
+import { moveFileOverwrite, writeEmptyFile } from "@main/lib/asar-safe-fs";
 import { logCaughtError } from "@main/lib/logged-error";
 import type { FileDownloadStatus } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
@@ -26,7 +26,7 @@ import type { WorkuploadApiClient } from "./workupload-api-client";
 
 import { TransferProgressBatcher } from "../transfer-progress-batcher";
 import { KioskDownloadRunner } from "./kiosk-download-runner";
-import { getBundleTempDirName, getStagingPartPath, PartFileWriter } from "./part-file";
+import { getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
 import { TransferChunkPool } from "./transfer-chunk-pool";
 import { TransferItDownloadRunner } from "./transfer-it-download-runner";
@@ -98,6 +98,8 @@ export class DownloadScheduler {
     private readonly activeCollections = new Set<string>();
     private readonly activeFilesByCollection = new Map<string, Set<string>>();
     private readonly fileControllers = new Map<string, AbortController>();
+    /** Each started file's run, including its afterFileSettled bookkeeping. */
+    private readonly fileRuns = new Map<string, Promise<void>>();
     private readonly manualCollections = new Set<string>();
     private readonly manualFiles = new Set<string>();
     private readonly progressBatcher: TransferProgressBatcher;
@@ -292,13 +294,27 @@ export class DownloadScheduler {
         this.requestSchedule();
     }
 
-    public removeCollection(collectionId: string) {
+    /**
+     * Aborts the collection's running files and resolves once their runs have settled, so the
+     * caller can delete rows and part files without an aborted run recreating them afterwards.
+     */
+    public async removeCollection(collectionId: string) {
+        // Parked as paused so schedule() does not restart its files while the runs drain.
+        this.repository.markCollectionStatus(collectionId, "paused");
+        const runs: Promise<void>[] = [];
         for (const fileId of this.activeFilesByCollection.get(collectionId) ?? []) {
             this.segmentPool.cancelSession(fileId);
             this.transferPool.cancelSession(fileId);
             this.fileControllers.get(fileId)?.abort();
             this.metrics.clearFile(fileId);
             this.clearFileStartTracking(fileId);
+            const run = this.fileRuns.get(fileId);
+            if (run) runs.push(run);
+        }
+        for (const fileId of this.manualFiles) {
+            if (this.repository.getFile(fileId)?.collectionId === collectionId) {
+                this.manualFiles.delete(fileId);
+            }
         }
         this.deactivateCollectionTransfer(collectionId);
         this.manualCollections.delete(collectionId);
@@ -306,6 +322,7 @@ export class DownloadScheduler {
         this.clearCollectionStartTracking(collectionId);
         this.stopCollectionTimer(collectionId);
         this.progressBatcher.deactivate(collectionId);
+        await Promise.allSettled(runs);
     }
 
     public destroy() {
@@ -324,19 +341,22 @@ export class DownloadScheduler {
     }
 
     public async cleanupPartFiles(collection: DownloadCollectionRow, files: DownloadFileRow[]) {
-        await Promise.all(
-            files.map(async (file) => {
-                const partPath = this.getPartPath(collection, file);
-                const stagingPath = getStagingPartPath(partPath);
-                await fse.remove(partPath).catch(() => undefined);
-                await PartFileWriter.removeSidecar(partPath);
-                await fse.remove(stagingPath).catch(() => undefined);
-                await PartFileWriter.removeSidecar(stagingPath);
-            }),
-        );
-        await removeTree(path.join(collection.savePath, getBundleTempDirName(collection.id))).catch(
-            () => undefined,
-        );
+        for (const file of files) {
+            const partPath = this.getPartPath(collection, file);
+            for (const target of [partPath, getStagingPartPath(partPath)]) {
+                try {
+                    await fse.remove(target);
+                } catch (error) {
+                    logCaughtError(
+                        this.kd.logger,
+                        "DownloadScheduler:cleanupPartFiles",
+                        { collectionId: collection.id, fileId: file.id, target },
+                        error,
+                    );
+                }
+                await PartFileWriter.removeSidecar(target);
+            }
+        }
     }
 
     private async pumpOnce() {
@@ -477,7 +497,7 @@ export class DownloadScheduler {
         activeFiles.add(file.id);
         this.activeFilesByCollection.set(collection.id, activeFiles);
 
-        void this.runFile(collection.id, file.id, settings, controller).finally(() => {
+        const run = this.runFile(collection.id, file.id, settings, controller).finally(() => {
             this.fileControllers.delete(file.id);
             this.clearFileStartTracking(file.id);
             const files = this.activeFilesByCollection.get(collection.id);
@@ -495,8 +515,23 @@ export class DownloadScheduler {
                     this.stopCollectionTimer(collection.id);
                 }
             }
-            void this.afterFileSettled(collection.id, file.id);
+            return this.afterFileSettled(collection.id, file.id);
         });
+        this.fileRuns.set(
+            file.id,
+            run
+                .catch((error: unknown) => {
+                    logCaughtError(
+                        this.kd.logger,
+                        "DownloadScheduler:startFile",
+                        { collectionId: collection.id, fileId: file.id },
+                        error,
+                    );
+                })
+                .finally(() => {
+                    this.fileRuns.delete(file.id);
+                }),
+        );
     }
 
     private async afterFileSettled(collectionId: string, fileId: string) {

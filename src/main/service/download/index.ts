@@ -1062,12 +1062,17 @@ export class DownloadService {
                 await coordinator.teardown();
                 this.reassemblyCoordinators.delete(bundle.id);
             }
-            for (const collection of this.repository.listBundleCollections(bundle.id)) {
-                const files = this.repository.listFiles(collection.id);
-                this.scheduler.removeCollection(collection.id);
+            const collections = this.repository.listBundleCollections(bundle.id);
+            for (const collection of collections) {
+                await this.scheduler.removeCollection(collection.id);
+            }
+            const filesByCollection = collections.map(
+                (collection) => [collection, this.repository.listFiles(collection.id)] as const,
+            );
+            this.repository.deleteBundle(bundle.id);
+            for (const [collection, files] of filesByCollection) {
                 await this.scheduler.cleanupPartFiles(collection, files);
             }
-            this.repository.deleteBundle(bundle.id);
             await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id))).catch(
                 () => undefined,
             );
@@ -1076,8 +1081,8 @@ export class DownloadService {
             return;
         }
         const collection = this.repository.getCollection(collectionId);
+        await this.scheduler.removeCollection(collectionId);
         const files = collection ? this.repository.listFiles(collectionId) : [];
-        this.scheduler.removeCollection(collectionId);
         this.repository.deleteCollection(collectionId);
         if (collection) {
             await this.scheduler.cleanupPartFiles(collection, files);

@@ -16,6 +16,7 @@ vi.mock("../util", () => ({ showOpenDialog: vi.fn(), showSaveDialog: vi.fn() }))
 
 type ServiceInternals = {
     repository: Record<string, unknown>;
+    scheduler: Record<string, unknown>;
     reassemblyCoordinators: Map<string, unknown>;
     cleanupOrphanPartFiles: () => Promise<void>;
     finalizeDownloadBundle: (bundleId: string) => Promise<void>;
@@ -127,6 +128,37 @@ describe("DownloadService startup recovery", () => {
     });
 });
 
+describe("DownloadService.remove", () => {
+    it("deletes rows and part files only after the collection's runs have settled", async () => {
+        const { service } = createService();
+        const collection = collectionRow({ savePath: tempDir, status: "downloading" });
+        const files = [fileRow({ id: "file-1", path: "a.bin", status: "downloading" })];
+        const runsSettled = Promise.withResolvers<void>();
+        const deleteCollection = vi.fn();
+        const cleanupPartFiles = vi.fn(async () => undefined);
+        internals(service).repository = {
+            getBundle: vi.fn(() => null),
+            getCollection: vi.fn(() => collection),
+            listFiles: vi.fn(() => files),
+            deleteCollection,
+        };
+        internals(service).scheduler = {
+            removeCollection: vi.fn(() => runsSettled.promise),
+            cleanupPartFiles,
+        };
+
+        const removal = service.remove(collection.id);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(deleteCollection).not.toHaveBeenCalled();
+        expect(cleanupPartFiles).not.toHaveBeenCalled();
+
+        runsSettled.resolve();
+        await removal;
+        expect(deleteCollection).toHaveBeenCalledWith(collection.id);
+        expect(cleanupPartFiles).toHaveBeenCalledWith(collection, files);
+    });
+});
+
 function createService() {
     const db = { all: vi.fn() };
     const kd = {
@@ -140,6 +172,8 @@ function createService() {
         service: {
             transfer: {
                 onRequestPoolUsageChange: vi.fn(() => () => undefined),
+                syncMainWindowProgressBar: vi.fn(),
+                refreshPowerSaveBlock: vi.fn(async () => undefined),
             },
         },
     } as unknown as KioskDownloader;
