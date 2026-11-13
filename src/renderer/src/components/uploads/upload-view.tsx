@@ -88,7 +88,13 @@ function removeDraftSources(paths: string[]) {
   void window.api.invoke("upload:removeDraftSources", paths);
 }
 
-export function UploadView({ onCreated }: { onCreated: (uploadId: string) => void }) {
+export function UploadView({
+  active,
+  onCreated,
+}: {
+  active: boolean;
+  onCreated: (uploadId: string) => void;
+}) {
   const files = useUploadDraft((s) => s.files);
   const name = useUploadDraft((s) => s.name);
   const description = useUploadDraft((s) => s.description);
@@ -368,8 +374,10 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
 
   return (
     <div className="flex h-full">
+      {/* This view stays mounted while its tab is hidden, but dialogs portal out of it, so gate
+          them on `active` to keep them from showing over another tab. */}
       <Dialog
-        open={modeDialogOpen}
+        open={active && modeDialogOpen}
         onOpenChange={(open) => {
           if (!open) resolveMode(null);
         }}
@@ -430,7 +438,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
       </Dialog>
 
       <AlertDialog
-        open={oversizeDialogOpen}
+        open={active && oversizeDialogOpen}
         onOpenChange={(open) => {
           if (open) return;
           resolveOversize("cancel");
@@ -503,7 +511,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
             <Field>
               <FieldLabel>만료일</FieldLabel>
               <div className="flex gap-2">
-                <Popover open={expiryOpen} onOpenChange={setExpiryOpen}>
+                <Popover open={active && expiryOpen} onOpenChange={setExpiryOpen}>
                   <PopoverTrigger
                     render={
                       <Button variant="outline" className="flex-1 justify-between font-normal">
@@ -685,7 +693,7 @@ export function UploadView({ onCreated }: { onCreated: (uploadId: string) => voi
       </div>
 
       <RenameDialog
-        target={renameTarget}
+        target={active ? renameTarget : null}
         error={renameError}
         onOpenChange={(open) => {
           if (!open) {

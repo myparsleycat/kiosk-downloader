@@ -28,15 +28,6 @@ export interface TitleBarOverlaySyncOptions {
     symbolColor: string;
 }
 
-export interface PathMetadata {
-    isDirectory: boolean;
-    isFile: boolean;
-    size: number;
-    mtime: Date;
-    ctime: Date;
-    birthtime: Date;
-}
-
 export interface ZipEntryMeta {
     path: string;
     offset: number;

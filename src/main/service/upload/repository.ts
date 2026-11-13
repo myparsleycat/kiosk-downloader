@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { StartupResumeMode } from "@shared/settings";
 import type {
     DirNode,
     TransferProgressSummary,
@@ -29,10 +30,38 @@ function parseTree(value: string): DirNode {
 export class UploadRepository {
     public constructor(private readonly kd: KioskDownloader) {}
 
-    public restoreStartupState() {
+    public restoreStartupState(mode: StartupResumeMode = "auto") {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(`DELETE FROM "upload_chunk" WHERE "status" = 'uploading'`);
+            if (mode === "manual") {
+                // Leaving runnable work 'queued' would let the next schedule() (e.g. creating an
+                // unrelated upload) start it, so pause everything the way pauseCollection does.
+                tx.run(
+                    `UPDATE "upload_file"
+                     SET "status" = 'paused', "updated_at" = ?, "error" = NULL
+                     WHERE "status" IN ('pending', 'uploading')
+                       AND "paused_by_user" = 0
+                       AND "collection_id" IN (
+                           SELECT "id" FROM "upload_collection"
+                           WHERE "status" IN ('queued', 'uploading')
+                       )`,
+                    [timestamp],
+                );
+                tx.run(
+                    `UPDATE "upload_collection"
+                     SET "status" = 'paused', "updated_at" = ?, "error" = NULL
+                     WHERE "status" IN ('queued', 'uploading')`,
+                    [timestamp],
+                );
+                tx.run(
+                    `UPDATE "upload_bundle"
+                     SET "status" = 'paused', "updated_at" = ?, "error" = NULL
+                     WHERE "status" IN ('queued', 'uploading')`,
+                    [timestamp],
+                );
+                return;
+            }
             tx.run(
                 `UPDATE "upload_file"
                  SET "status" = 'pending', "updated_at" = ?, "error" = NULL

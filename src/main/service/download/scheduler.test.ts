@@ -12,11 +12,27 @@ import type {
     DownloadCollectionRow,
     DownloadFileRow,
     SchedulerSettings,
+    ZipEntryStoredMeta,
 } from "./types";
 
+import { PartFileWriter } from "./part-file";
 import { DownloadScheduler } from "./scheduler";
+import { openZipFileEntry } from "./zip-index";
+
+vi.mock("./zip-index", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("./zip-index")>()),
+    openZipFileEntry: vi.fn(),
+}));
 
 type SchedulerInternals = {
+    kioskRunner: { getFileSegments: (...args: unknown[]) => Promise<unknown[]> };
+    runZipEntryWithZipJs: (
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        meta: ZipEntryStoredMeta,
+        settings: SchedulerSettings,
+        controller: AbortController,
+    ) => Promise<void>;
     validateCompletedChunksAt: (partPath: string, chunks: DownloadChunkRow[]) => Promise<void>;
     runFile: (
         collectionId: string,
@@ -158,6 +174,178 @@ describe("DownloadScheduler", () => {
             secondRun.resolve();
             await vi.waitFor(() => expect(scheduler.hasActiveTransfers()).toBe(false));
             scheduler.destroy();
+        }
+    });
+
+    it("resolves removeCollection only after the aborted run has settled", async () => {
+        const collection = createCollection("removing", 0);
+        const file = createFile("removing-file", collection.id);
+        const repository = createRepository([collection], [file]);
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const runSettled = Promise.withResolvers<void>();
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(async () => {
+                file.status = "downloading";
+                await runSettled.promise;
+                file.status = "pending";
+            });
+
+        try {
+            await scheduler.schedule();
+            let removed = false;
+            const removal = scheduler.removeCollection(collection.id).then(() => {
+                removed = true;
+            });
+            expect(runFile.mock.calls[0]?.[3].signal.aborted).toBe(true);
+            expect(collection.status).toBe("paused");
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(removed).toBe(false);
+
+            runSettled.resolve();
+            await removal;
+            expect(scheduler.hasActiveTransfers()).toBe(false);
+            expect(runFile).toHaveBeenCalledTimes(1);
+        } finally {
+            runSettled.resolve();
+            scheduler.destroy();
+        }
+    });
+
+    it("logs an afterFileSettled failure and still starts the remaining files", async () => {
+        const collection = createCollection("settle-failure", 0);
+        const files = ["a", "b", "c"].map((id) => createFile(`settle-${id}`, collection.id));
+        const repository = createRepository([collection], files);
+        const recompute = (
+            repository.value as { recomputeCollectionStatus: ReturnType<typeof vi.fn> }
+        ).recomputeCollectionStatus;
+        recompute.mockImplementation(() => {
+            throw new Error("database is locked");
+        });
+        const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+        const scheduler = new DownloadScheduler(
+            createKioskDownloader(logger, { requestPoolSize: 2 }),
+            {} as never,
+            {} as never,
+            {} as never,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+        const runFile = vi
+            .spyOn(scheduler as unknown as SchedulerInternals, "runFile")
+            .mockImplementation(async (_collectionId, fileId) => {
+                const file = files.find((candidate) => candidate.id === fileId);
+                if (file) file.status = "completed";
+            });
+
+        try {
+            await scheduler.schedule();
+            await vi.waitFor(() => expect(runFile).toHaveBeenCalledTimes(3));
+            expect(logger.error).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    collectionId: collection.id,
+                    message: "database is locked",
+                }),
+                "DownloadScheduler:afterFileSettled",
+            );
+        } finally {
+            await vi.waitFor(() => expect(scheduler.hasActiveTransfers()).toBe(false));
+            scheduler.destroy();
+        }
+    });
+
+    it("fails a zip.js entry whose reader rejects without closing the stream", async () => {
+        const { scheduler, repository, collection, file, cleanup } = await createZipJsFixture();
+        vi.mocked(openZipFileEntry).mockResolvedValueOnce({
+            entry: {
+                getData: async (writable: WritableStream<Uint8Array>) => {
+                    const writer = writable.getWriter();
+                    await writer.write(Buffer.from("partial"));
+                    throw new Error("Invalid password");
+                },
+            },
+            zipReader: { close: vi.fn(async () => undefined) },
+        } as never);
+
+        try {
+            await (scheduler as unknown as SchedulerInternals).runZipEntryWithZipJs(
+                collection,
+                file,
+                createZipMeta(file),
+                createSchedulerSettings(0),
+                new AbortController(),
+            );
+            expect(repository.markFileStatus).toHaveBeenCalledWith(
+                file.id,
+                "error",
+                "Invalid password",
+            );
+        } finally {
+            await cleanup();
+        }
+    });
+
+    it("settles zip.js without an unhandled rejection when the part write fails", async () => {
+        const { scheduler, repository, collection, file, cleanup } = await createZipJsFixture();
+        const getDataSettled = Promise.withResolvers<void>();
+        vi.mocked(openZipFileEntry).mockResolvedValueOnce({
+            entry: {
+                getData: async (writable: WritableStream<Uint8Array>) => {
+                    const writer = writable.getWriter();
+                    try {
+                        while (true) {
+                            await writer.write(Buffer.alloc(16));
+                        }
+                    } finally {
+                        getDataSettled.resolve();
+                    }
+                },
+            },
+            zipReader: { close: vi.fn(async () => undefined) },
+        } as never);
+        const writeSpy = vi
+            .spyOn(PartFileWriter.prototype, "writeChunkFromStream")
+            .mockImplementation(async (_offset, _chunkIndex, source) => {
+                for await (const _chunk of source) {
+                    throw new Error("ENOSPC: no space left on device");
+                }
+                return 0;
+            });
+        const unhandledRejection = vi.fn();
+        process.on("unhandledRejection", unhandledRejection);
+
+        try {
+            await (scheduler as unknown as SchedulerInternals).runZipEntryWithZipJs(
+                collection,
+                file,
+                createZipMeta(file),
+                createSchedulerSettings(0),
+                new AbortController(),
+            );
+            await getDataSettled.promise;
+            await new Promise<void>((resolve) => setImmediate(resolve));
+
+            expect(unhandledRejection).not.toHaveBeenCalled();
+            expect(repository.markFileStatus).toHaveBeenCalledWith(
+                file.id,
+                "error",
+                "ENOSPC: no space left on device",
+            );
+        } finally {
+            process.off("unhandledRejection", unhandledRejection);
+            writeSpy.mockRestore();
+            await cleanup();
         }
     });
 
@@ -1322,6 +1510,7 @@ function createRepository(
         markChunkPartial,
         markChunkPending,
         markChunkCompleted: vi.fn(),
+        markChunkError: vi.fn(),
         addFileDownloadedBytes: vi.fn(),
         syncWorkuploadDownloadedBytes,
     };
@@ -1387,6 +1576,61 @@ function createMetrics() {
         setChunkTransferProgress: vi.fn(),
         setChunkWriteProgress: vi.fn(),
     } as never;
+}
+
+async function createZipJsFixture() {
+    const directory = await fse.mkdtemp(path.join(tmpdir(), "download-zipjs-"));
+    const collection = { ...createCollection("zipjs", 0), savePath: directory };
+    const file = { ...createFile("zipjs-file", collection.id), sourceKind: "zip_entry" as const };
+    const chunk: DownloadChunkRow = {
+        collectionId: collection.id,
+        fileId: file.id,
+        chunkIndex: 0,
+        offset: 0,
+        size: file.size,
+        status: "pending",
+        downloadedBytes: 0,
+        attempts: 0,
+        updatedAt: "",
+        error: null,
+    };
+    const repository = createRepository([collection], [file], [chunk]);
+    const scheduler = new DownloadScheduler(
+        createKioskDownloader(),
+        {} as never,
+        {} as never,
+        {} as never,
+        repository.value,
+        createMetrics(),
+        vi.fn(async () => undefined),
+        vi.fn(async () => undefined),
+    );
+    vi.spyOn(
+        (scheduler as unknown as SchedulerInternals).kioskRunner,
+        "getFileSegments",
+    ).mockResolvedValue([]);
+    return {
+        scheduler,
+        repository: repository.value as { markFileStatus: ReturnType<typeof vi.fn> },
+        collection,
+        file,
+        cleanup: async () => {
+            scheduler.destroy();
+            await fse.remove(directory);
+        },
+    };
+}
+
+function createZipMeta(file: DownloadFileRow): ZipEntryStoredMeta {
+    return {
+        path: file.path,
+        offset: 0,
+        compressedSize: file.size,
+        uncompressedSize: file.size,
+        compressionMethod: 99,
+        encrypted: true,
+        archiveSize: file.size * 2,
+    };
 }
 
 function createSchedulerSettings(maxChunkRetries: number): SchedulerSettings {

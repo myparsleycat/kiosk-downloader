@@ -105,6 +105,171 @@ describe("UploadScheduler", () => {
         scheduler.destroy();
     });
 
+    it("does not treat waiting for a request-pool slot as a stall", async () => {
+        vi.useFakeTimers();
+        const file = createFile("file-1", remoteId(1));
+        const repository = createRepository([file]);
+        const run = vi.fn(async (request: { signal: AbortSignal }, task: () => Promise<void>) => {
+            await abortableDelay(20_000, request.signal);
+            return task();
+        });
+        const uploadSegment = vi.fn(
+            async (
+                chunk: ServerFileMapping,
+                _token: string,
+                _signal: AbortSignal,
+                _onProgress?: (bytes: number) => void,
+                runPayload?: (task: () => Promise<void>) => Promise<void>,
+            ) => {
+                await runPayload?.(async () => undefined);
+                return { length: chunk.length, outcome: "uploaded" as const };
+            },
+        );
+        const api = createApi(uploadSegment);
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(run),
+            api.value,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        scheduler.registerWorkItems(
+            COLLECTION_ID,
+            [{ id: file.id, remoteId: file.remoteId }],
+            [createChunk(file, 0)],
+        );
+        await scheduler.schedule();
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        await vi.waitFor(() => expect(api.completeCollection).toHaveBeenCalledTimes(1));
+        expect(uploadSegment).toHaveBeenCalledTimes(1);
+
+        scheduler.destroy();
+    });
+
+    it("does not treat a slow control request before the payload as a stall", async () => {
+        vi.useFakeTimers();
+        const file = createFile("file-1", remoteId(1));
+        const repository = createRepository([file]);
+        const uploadSegment = vi.fn(
+            async (
+                chunk: ServerFileMapping,
+                _token: string,
+                signal: AbortSignal,
+                _onProgress?: (bytes: number) => void,
+                runPayload?: (task: () => Promise<void>) => Promise<void>,
+            ) => {
+                await abortableDelay(20_000, signal);
+                await runPayload?.(async () => undefined);
+                return { length: chunk.length, outcome: "uploaded" as const };
+            },
+        );
+        const api = createApi(uploadSegment);
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(),
+            api.value,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        scheduler.registerWorkItems(
+            COLLECTION_ID,
+            [{ id: file.id, remoteId: file.remoteId }],
+            [createChunk(file, 0)],
+        );
+        await scheduler.schedule();
+        await vi.advanceTimersByTimeAsync(20_000);
+
+        await vi.waitFor(() => expect(api.completeCollection).toHaveBeenCalledTimes(1));
+        expect(uploadSegment).toHaveBeenCalledTimes(1);
+
+        scheduler.destroy();
+    });
+
+    it("keeps retrying a chunk that stalls past the reconnect limit", async () => {
+        vi.useFakeTimers();
+        const file = createFile("file-1", remoteId(1));
+        const repository = createRepository([file]);
+        const uploadSegment = vi.fn(
+            async (
+                chunk: ServerFileMapping,
+                _token: string,
+                signal: AbortSignal,
+                _onProgress?: (bytes: number) => void,
+                runPayload?: (task: () => Promise<void>) => Promise<void>,
+            ) => {
+                const stalls = uploadSegment.mock.calls.length <= 3;
+                await runPayload?.(async () => {
+                    if (stalls) await abortableDelay(Number.POSITIVE_INFINITY, signal);
+                });
+                return { length: chunk.length, outcome: "uploaded" as const };
+            },
+        );
+        const api = createApi(uploadSegment);
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(),
+            api.value,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        scheduler.registerWorkItems(
+            COLLECTION_ID,
+            [{ id: file.id, remoteId: file.remoteId }],
+            [createChunk(file, 0)],
+        );
+        await scheduler.schedule();
+        for (let step = 0; step < 4; step += 1) {
+            await vi.advanceTimersByTimeAsync(15_000);
+        }
+
+        await vi.waitFor(() => expect(api.completeCollection).toHaveBeenCalledTimes(1));
+        expect(uploadSegment).toHaveBeenCalledTimes(4);
+
+        scheduler.destroy();
+    });
+
+    it("re-queues a chunk whose in-flight attempt was superseded by a resume", async () => {
+        const file = createFile("file-1", remoteId(1));
+        const repository = createRepository([file]);
+        const firstAttempt = deferred();
+        const uploadSegment = vi.fn(async (chunk: ServerFileMapping) => {
+            if (uploadSegment.mock.calls.length === 1) await firstAttempt.promise;
+            return { length: chunk.length, outcome: "uploaded" as const };
+        });
+        const api = createApi(uploadSegment);
+        const scheduler = new UploadScheduler(
+            createKioskDownloader(),
+            api.value,
+            repository.value,
+            createMetrics(),
+            vi.fn(async () => undefined),
+            vi.fn(async () => undefined),
+        );
+
+        scheduler.registerWorkItems(
+            COLLECTION_ID,
+            [{ id: file.id, remoteId: file.remoteId }],
+            [createChunk(file, 0)],
+        );
+        await scheduler.schedule();
+        await vi.waitFor(() => expect(uploadSegment).toHaveBeenCalledTimes(1));
+
+        await scheduler.resumeFile(file.id);
+        firstAttempt.resolve();
+
+        await vi.waitFor(() => expect(api.completeCollection).toHaveBeenCalledTimes(1));
+        expect(uploadSegment).toHaveBeenCalledTimes(2);
+
+        scheduler.destroy();
+    });
+
     it("completes each single-chunk file once and emits only one terminal snapshot", async () => {
         const fileCount = 1_000;
         const files = Array.from({ length: fileCount }, (_, index) =>
@@ -638,6 +803,20 @@ function deferred() {
         resolve = promiseResolve;
     });
     return { promise, resolve };
+}
+
+function abortableDelay(ms: number, signal: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        const timer = Number.isFinite(ms) ? setTimeout(resolve, ms) : undefined;
+        signal.addEventListener(
+            "abort",
+            () => {
+                clearTimeout(timer);
+                reject(new DOMException("The operation was aborted.", "AbortError"));
+            },
+            { once: true },
+        );
+    });
 }
 
 async function waitForMicrotasks(predicate: () => boolean) {

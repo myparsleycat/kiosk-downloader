@@ -7,7 +7,7 @@ import { DatabaseClient } from "../../lib/db/client";
 import { UploadRepository } from "./repository";
 
 describe("UploadRepository.restoreStartupState", () => {
-    it("recovers interrupted work while preserving user-paused files", async () => {
+    async function seedInterruptedUpload() {
         const db = new DatabaseClient(":memory:");
         await db.reconcile();
         const repo = new UploadRepository({ lib: { db } } as KioskDownloader);
@@ -55,6 +55,11 @@ describe("UploadRepository.restoreStartupState", () => {
             [timestamp, "error"],
         );
 
+        return { db, repo };
+    }
+
+    it("recovers interrupted work while preserving user-paused files", async () => {
+        const { db, repo } = await seedInterruptedUpload();
         repo.restoreStartupState();
 
         expect(
@@ -73,6 +78,26 @@ describe("UploadRepository.restoreStartupState", () => {
         expect(db.get<{ count: number }>(`SELECT COUNT(*) AS "count" FROM "upload_chunk"`)).toEqual(
             { count: 0 },
         );
+    });
+
+    it("pauses interrupted work in manual mode so a later schedule does not start it", async () => {
+        const { db, repo } = await seedInterruptedUpload();
+        repo.restoreStartupState("manual");
+
+        expect(
+            db.get<{ status: string }>(
+                `SELECT "status" FROM "upload_collection" WHERE "id" = 'collection'`,
+            ),
+        ).toEqual({ status: "paused" });
+        expect(
+            db.all<{ id: string; status: string }>(
+                `SELECT "id", "status" FROM "upload_file" ORDER BY "id"`,
+            ),
+        ).toEqual([
+            { id: "active", status: "paused" },
+            { id: "paused", status: "uploading" },
+        ]);
+        expect(repo.listRunnableCollections()).toEqual([]);
     });
 });
 

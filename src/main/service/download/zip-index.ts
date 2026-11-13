@@ -181,7 +181,10 @@ export async function openZipFileEntry(options: {
     entryPath: string;
     zipPassword?: string;
     signal?: AbortSignal;
-    refreshSegments?: (signal: AbortSignal) => Promise<SegmentDescriptor[]>;
+    refreshSegments?: (
+        staleSegments: SegmentDescriptor[],
+        signal: AbortSignal,
+    ) => Promise<SegmentDescriptor[]>;
 }): Promise<{ entry: FileEntry; zipReader: ZipReader<null>; rangeReader: ZipRangeReader }> {
     const rangeReader = new ZipRangeReader({
         kd: options.kd,

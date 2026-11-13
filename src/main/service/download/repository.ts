@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { StartupResumeMode } from "@shared/settings";
 import type {
     Collection,
     DirNode,
@@ -329,7 +330,7 @@ export class DownloadRepository {
         return true;
     }
 
-    public restoreStartupState() {
+    public restoreStartupState(mode: StartupResumeMode = "auto") {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(
@@ -338,18 +339,47 @@ export class DownloadRepository {
                  WHERE "status" = 'downloading'`,
                 [timestamp],
             );
-            tx.run(
-                `UPDATE "download_file"
-                 SET "status" = 'pending', "updated_at" = ?, "error" = NULL
-                 WHERE "status" IN ('downloading', 'inflating') AND "paused_by_user" = 0`,
-                [timestamp],
-            );
-            tx.run(
-                `UPDATE "download_collection"
-                 SET "status" = 'queued', "updated_at" = ?, "error" = NULL
-                 WHERE "status" IN ('downloading', 'inflating')`,
-                [timestamp],
-            );
+            if (mode === "manual") {
+                // Leaving runnable work 'queued' would let the next schedule() (e.g. adding an
+                // unrelated download) start it, so pause everything the way pauseCollection does.
+                tx.run(
+                    `UPDATE "download_file"
+                     SET "status" = 'paused', "updated_at" = ?, "error" = NULL
+                     WHERE "selected" = 1
+                       AND "status" IN ('pending', 'downloading', 'inflating')
+                       AND "paused_by_user" = 0
+                       AND "collection_id" IN (
+                           SELECT "id" FROM "download_collection"
+                           WHERE "status" IN ('queued', 'downloading', 'inflating')
+                       )`,
+                    [timestamp],
+                );
+                tx.run(
+                    `UPDATE "download_collection"
+                     SET "status" = 'paused', "updated_at" = ?, "error" = NULL
+                     WHERE "status" IN ('queued', 'downloading', 'inflating')`,
+                    [timestamp],
+                );
+                tx.run(
+                    `UPDATE "download_bundle"
+                     SET "status" = 'paused', "updated_at" = ?, "error" = NULL
+                     WHERE "status" IN ('queued', 'downloading', 'inflating')`,
+                    [timestamp],
+                );
+            } else {
+                tx.run(
+                    `UPDATE "download_file"
+                     SET "status" = 'pending', "updated_at" = ?, "error" = NULL
+                     WHERE "status" IN ('downloading', 'inflating') AND "paused_by_user" = 0`,
+                    [timestamp],
+                );
+                tx.run(
+                    `UPDATE "download_collection"
+                     SET "status" = 'queued', "updated_at" = ?, "error" = NULL
+                     WHERE "status" IN ('downloading', 'inflating')`,
+                    [timestamp],
+                );
+            }
             tx.run(
                 `UPDATE "download_file"
                  SET "downloaded_bytes" = COALESCE((

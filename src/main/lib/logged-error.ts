@@ -8,7 +8,16 @@ export function logCaughtError(
     context: Record<string, unknown>,
     error: unknown,
 ) {
-    logger.error({ ...sanitizeLogContext(context), message: toErrorMessage(error) }, where);
+    logger.error(
+        {
+            ...sanitizeLogContext(context),
+            message: toErrorMessage(error),
+            // Only the stack is added: other enumerable fields and `cause` can carry request URLs
+            // with credentials or tokens that sanitizeLogContext never sees.
+            stack: error instanceof Error ? error.stack : undefined,
+        },
+        where,
+    );
 }
 
 export async function withLoggedError<T>(

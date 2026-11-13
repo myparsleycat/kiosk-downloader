@@ -21,6 +21,11 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
     const url = useNewDownloadDraft((state) => state.url);
     const items = useNewDownloadDraft((state) => state.items);
     const setUrl = useNewDownloadDraft((state) => state.setUrl);
+    const setSavePath = useNewDownloadDraft((state) => state.setSavePath);
+    const setCreateCollectionSubfolder = useNewDownloadDraft(
+        (state) => state.setCreateCollectionSubfolder,
+    );
+    const setAsciiFilenames = useNewDownloadDraft((state) => state.setAsciiFilenames);
     const replaceItems = useNewDownloadDraft((state) => state.replaceItems);
     const setItemPreparation = useNewDownloadDraft((state) => state.setItemPreparation);
     const setItemSelected = useNewDownloadDraft((state) => state.setItemSelected);
@@ -57,6 +62,29 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
             resetDraft();
         },
         [resetDraft],
+    );
+
+    React.useEffect(
+        () =>
+            window.api.on("setting:update", ({ key, value }) => {
+                if (key === "general.createCollectionSubfolder" && typeof value === "boolean") {
+                    setCreateCollectionSubfolder(value);
+                    return;
+                }
+                if (key === "general.asciiFilenames" && typeof value === "boolean") {
+                    setAsciiFilenames(value);
+                    return;
+                }
+                // Never replace a path the user may be reviewing for drafts already in progress.
+                if (
+                    key === "general.lastDownloadPath" &&
+                    typeof value === "string" &&
+                    useNewDownloadDraft.getState().items.length === 0
+                ) {
+                    setSavePath(value);
+                }
+            }),
+        [setAsciiFilenames, setCreateCollectionSubfolder, setSavePath],
     );
 
     React.useEffect(
@@ -349,12 +377,15 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
             }
             if (remaining.length === 0 && lastId) {
                 resetDraft();
+                // The view stays mounted, so rehydrate now instead of on the next load, which
+                // would overwrite a save path the user edits in the meantime.
+                void hydrateSettings();
                 onCreated(lastId);
             }
         } finally {
             setStarting(false);
         }
-    }, [onCreated, removeItem, resetDraft, starting]);
+    }, [hydrateSettings, onCreated, removeItem, resetDraft, starting]);
 
     const handleRemoveItem = React.useCallback(
         (item: NewDownloadItem) => {

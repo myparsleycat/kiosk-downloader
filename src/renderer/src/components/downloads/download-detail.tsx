@@ -1,8 +1,10 @@
 import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-pool-usage";
+import { TransferErrorDialog } from "@renderer/components/transfer/transfer-error-dialog";
 import {
   FILE_TREE_RIGHT_COLS,
   FileTree,
   FileTreeLeadColumn,
+  type FileTreeError,
   fileTreeGridTemplateColumns,
 } from "@renderer/components/tree/file-tree";
 import { Button } from "@renderer/components/ui/button";
@@ -43,6 +45,7 @@ export function DownloadDetail({
   const [pendingAction, setPendingAction] = React.useState<string | null>(null);
   const [sortField, setSortField] = React.useState<SortField>("name");
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
+  const [errorDetails, setErrorDetails] = React.useState<FileTreeError[] | null>(null);
   const { runWithStopConfirmation, dialog: stopDialog } = useConfirmDownloadStop();
   const tree = item?.collection.tree;
 
@@ -259,6 +262,12 @@ export function DownloadDetail({
             </p>
           )}
         </div>
+
+        {status === "error" && item.error && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {item.error}
+          </div>
+        )}
       </div>
 
       <ProgressSortHeader field={sortField} dir={sortDir} onSort={handleSortClick} />
@@ -295,6 +304,7 @@ export function DownloadDetail({
                 "다운로드 큐에 추가했습니다",
               )
             }
+            onError={setErrorDetails}
           />
         </div>
       </ScrollArea>
@@ -306,6 +316,13 @@ export function DownloadDetail({
         </div>
       </div>
       {stopDialog}
+      <TransferErrorDialog
+        title="다운로드 오류 상세"
+        errors={errorDetails}
+        onOpenChange={(open) => {
+          if (!open) setErrorDetails(null);
+        }}
+      />
     </div>
   );
 }

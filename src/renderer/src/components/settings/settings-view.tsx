@@ -52,6 +52,7 @@ import {
 } from "@shared/settings";
 import type { AppStatus } from "@shared/types";
 import { formatSize } from "@shared/utils";
+import { clamp } from "es-toolkit";
 import { CpuIcon, FolderOpenIcon, PlusIcon, PowerIcon, XIcon, ZapIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -248,6 +249,15 @@ export function SettingsView() {
       toast.error("설정을 저장하지 못했습니다", {
         description: error instanceof Error ? error.message : String(error),
       });
+      // Undo the optimistic update with whatever the main process actually kept.
+      await window.api
+        .invoke("setting:getMany", [key] as const)
+        .then((values) => setSettings((prev) => ({ ...prev, [key]: values[key] })))
+        .catch((reloadError) => {
+          toast.error("설정을 다시 불러오지 못했습니다", {
+            description: reloadError instanceof Error ? reloadError.message : String(reloadError),
+          });
+        });
     }
   };
 
@@ -990,6 +1000,24 @@ function NumberSetting({
   min?: number;
   max?: number;
 }) {
+  const [text, setText] = React.useState(String(value));
+  const [syncedValue, setSyncedValue] = React.useState(value);
+  if (syncedValue !== value) {
+    setSyncedValue(value);
+    setText(String(value));
+  }
+
+  const commit = () => {
+    const parsed = Number.parseInt(text, 10);
+    if (!Number.isFinite(parsed)) {
+      setText(String(value));
+      return;
+    }
+    const next = clamp(parsed, min, max ?? Infinity);
+    setText(String(next));
+    if (next !== value) onChange(next);
+  };
+
   return (
     <Input
       type="number"
@@ -997,11 +1025,12 @@ function NumberSetting({
       max={max}
       step={1}
       className="w-20 text-right tabular-nums"
-      value={value}
-      onChange={(event) => {
-        const next = Number.parseInt(event.target.value, 10);
-        if (Number.isFinite(next)) {
-          onChange(Math.min(max ?? Infinity, Math.max(min, next)));
+      value={text}
+      onChange={(event) => setText(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.currentTarget.blur();
         }
       }}
     />

@@ -13,6 +13,7 @@ import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { useUpdaterStore } from "@renderer/stores/updater";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 const RELEASE_NOTE_LINK_PATTERN = /\[(https?:\/\/[^\]\s]+)\]/g;
 const RELEASE_NOTE_LINK_BOUNDARIES = ["* ", "- ", "• ", ": ", "의 ", "by ", "from "];
@@ -135,7 +136,6 @@ export function UpdateAlertDialog() {
   const appVersion = useUpdaterStore((state) => state.appVersion);
   const setShouldPromptForUpdate = useUpdaterStore((state) => state.setShouldPromptForUpdate);
   const isDismissingRef = useRef(false);
-  const skipNextDismissRef = useRef(false);
   const [showOriginalReleaseNotes, setShowOriginalReleaseNotes] = useState(false);
   const versionRangeText =
     appVersion && releaseVersion ? ` (${appVersion} → ${releaseVersion})` : "";
@@ -157,11 +157,6 @@ export function UpdateAlertDialog() {
     }
 
     setShouldPromptForUpdate(false);
-
-    if (skipNextDismissRef.current) {
-      skipNextDismissRef.current = false;
-      return;
-    }
 
     if (isDismissingRef.current) {
       return;
@@ -210,13 +205,28 @@ export function UpdateAlertDialog() {
           <AlertDialogCancel>나중에</AlertDialogCancel>
           <AlertDialogAction
             onClick={() => {
-              skipNextDismissRef.current = true;
               setShouldPromptForUpdate(false);
               if (isManual) {
-                void window.api.invoke("updater:openDownloadPage");
+                void window.api.invoke("updater:openDownloadPage").then(
+                  () =>
+                    window.api.invoke("updater:dismissUpdateDialog").catch((error) =>
+                      toast.error("업데이트 알림 상태를 저장하지 못했습니다", {
+                        description: error instanceof Error ? error.message : String(error),
+                      }),
+                    ),
+                  (error) =>
+                    toast.error("다운로드 페이지를 열지 못했습니다", {
+                      description: error instanceof Error ? error.message : String(error),
+                    }),
+                );
                 return;
               }
-              void window.api.invoke("updater:installUpdate");
+              // No dismiss on install so the main process keeps prompting and the user can retry.
+              void window.api.invoke("updater:installUpdate").catch((error) =>
+                toast.error("업데이트를 설치하지 못했습니다", {
+                  description: error instanceof Error ? error.message : String(error),
+                }),
+              );
             }}
           >
             {isManual ? "다운로드 페이지 열기" : "업데이트"}

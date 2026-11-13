@@ -35,9 +35,10 @@ import {
     type ResumePayload,
     type ZipNode,
 } from "@shared/types";
+import { toErrorMessage } from "@shared/utils";
 import { findZipNodeById, isZipExtractMode, listZipNodes, setZipEntries } from "@shared/zip-tree";
 import { shell } from "electron";
-import fg from "fast-glob";
+import { groupBy } from "es-toolkit";
 import fse from "fs-extra";
 import pLimit from "p-limit";
 
@@ -127,6 +128,7 @@ export class DownloadService {
     private readonly prepareLimit = pLimit(DOWNLOAD_PREPARE_CONCURRENCY);
     private prepareEpoch = 0;
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
+    private readonly bundleFinalizations = new Map<string, Promise<void>>();
     private unsubscribeRequestPoolUsage?: () => void;
     private revision = 0;
 
@@ -175,7 +177,7 @@ export class DownloadService {
 
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.startupResumeMode");
-        this.repository.restoreStartupState();
+        this.repository.restoreStartupState(mode);
         await this.resetNonResumableWorkuploadStartupState();
         this.repository.syncExpiredCollections();
         await this.emitUpdate();
@@ -193,7 +195,7 @@ export class DownloadService {
         }
         await this.emitUpdate();
         if (mode === "auto") {
-            void this.scheduler.schedule();
+            this.scheduler.requestSchedule();
         }
     }
 
@@ -202,7 +204,7 @@ export class DownloadService {
     }
 
     public refreshRequestScheduling() {
-        void this.scheduler.schedule();
+        this.scheduler.requestSchedule();
     }
 
     private async resetNonResumableWorkuploadStartupState() {
@@ -370,97 +372,112 @@ export class DownloadService {
     }
 
     public async create(payload: CreateDownloadPayload) {
-        const draft = this.requirePreparedDraft(payload.draftId);
-        if ("manifest" in draft.loaded) {
-            return await this.createExtendedDownload(payload, draft);
-        }
-        const basePath = payload.savePath.trim();
-        if (!basePath || !path.isAbsolute(basePath)) {
-            throw new Error("Download save path must be absolute.");
-        }
-        const createCollectionSubfolder = await this.kd.setting.get(
-            "general.createCollectionSubfolder",
-        );
-        const startPaused = await this.kd.setting.get("transfer.startTransfersPaused");
-        const asciiFilenames = draft.asciiFilenames;
-        const loaded = draft.loaded;
-        const selectedPaths = new Set(payload.selectedPaths);
-        const renames = payload.renames ?? {};
-        let tree = loaded.collection.tree;
-
-        if (loaded.provider === "kiosk") {
-            for (const { zip, path: originalZipPath } of listZipNodes(tree)) {
-                const displayZipPath = toDisplayPath(originalZipPath, renames);
-                if (!isZipExtractMode(displayZipPath, selectedPaths)) {
-                    continue;
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:create",
+            { action: "create", draftId: payload.draftId, savePath: payload.savePath },
+            async () => {
+                const draft = this.requirePreparedDraft(payload.draftId);
+                if ("manifest" in draft.loaded) {
+                    return await this.createExtendedDownload(payload, draft);
                 }
-                if (!zip.entries) {
-                    const zipPassword = payload.zipPasswords?.[zip.id];
-                    const indexed = await this.indexZipNode(loaded, zip.id, zip.size, zipPassword);
-                    tree = setZipEntries(tree, zip.id, indexed.entries);
+                const basePath = payload.savePath.trim();
+                if (!basePath || !path.isAbsolute(basePath)) {
+                    throw new Error("Download save path must be absolute.");
                 }
-            }
-        }
+                const createCollectionSubfolder = await this.kd.setting.get(
+                    "general.createCollectionSubfolder",
+                );
+                const startPaused = await this.kd.setting.get("transfer.startTransfersPaused");
+                const asciiFilenames = draft.asciiFilenames;
+                const loaded = draft.loaded;
+                const selectedPaths = new Set(payload.selectedPaths);
+                const renames = payload.renames ?? {};
+                let tree = loaded.collection.tree;
 
-        tree = validateDraftTreeMutation(tree, payload.selectedPaths, renames);
-        if (loaded.provider === "workupload") {
-            const usedNames = new Set<string>();
-            for (const entry of tree.entries) {
-                const safeName = this.kd.lib.fs.sanitizeDownloadPathSegment(entry.node.name, {
+                if (loaded.provider === "kiosk") {
+                    for (const { zip, path: originalZipPath } of listZipNodes(tree)) {
+                        const displayZipPath = toDisplayPath(originalZipPath, renames);
+                        if (!isZipExtractMode(displayZipPath, selectedPaths)) {
+                            continue;
+                        }
+                        if (!zip.entries) {
+                            const zipPassword = payload.zipPasswords?.[zip.id];
+                            const indexed = await this.indexZipNode(
+                                loaded,
+                                zip.id,
+                                zip.size,
+                                zipPassword,
+                            );
+                            tree = setZipEntries(tree, zip.id, indexed.entries);
+                        }
+                    }
+                }
+
+                tree = validateDraftTreeMutation(tree, payload.selectedPaths, renames);
+                if (loaded.provider === "workupload") {
+                    const usedNames = new Set<string>();
+                    for (const entry of tree.entries) {
+                        const safeName = this.kd.lib.fs.sanitizeDownloadPathSegment(
+                            entry.node.name,
+                            {
+                                asciiFilenames,
+                            },
+                        );
+                        const key = safeName.toLowerCase();
+                        if (usedNames.has(key)) {
+                            throw new Error("Workupload file names collide after sanitization.");
+                        }
+                        usedNames.add(key);
+                    }
+                }
+
+                const enriched: LoadedCollection = {
+                    ...loaded,
+                    collection: {
+                        ...loaded.collection,
+                        tree,
+                    },
+                };
+                const savePath = shouldCreateCollectionSubfolder(
+                    enriched.collection.tree,
+                    enriched.collection.name,
+                    createCollectionSubfolder,
+                )
+                    ? path.join(
+                          basePath,
+                          this.kd.lib.fs.sanitizeDownloadPathSegment(enriched.collection.name, {
+                              asciiFilenames,
+                              sanitizeString: " ",
+                          }),
+                      )
+                    : basePath;
+                const collectionId = this.repository.insertDownload({
+                    loaded: enriched,
+                    url:
+                        enriched.provider === "workupload"
+                            ? buildWorkuploadUrl(enriched.collection.shareId, enriched.resource)
+                            : draft.sourceInput,
+                    password: enriched.passwordProtected ? draft.password : undefined,
+                    savePath,
+                    selectedPaths: payload.selectedPaths,
                     asciiFilenames,
+                    zipPasswords: payload.zipPasswords,
+                    startPaused,
                 });
-                const key = safeName.toLowerCase();
-                if (usedNames.has(key)) {
-                    throw new Error("Workupload file names collide after sanitization.");
+                await this.emitUpdate(collectionId);
+                if (!startPaused) {
+                    this.scheduler.requestSchedule();
                 }
-                usedNames.add(key);
-            }
-        }
-
-        const enriched: LoadedCollection = {
-            ...loaded,
-            collection: {
-                ...loaded.collection,
-                tree,
+                void this.kd.setting.set("general.lastDownloadPath", basePath);
+                const item = this.getEnrichedItem(collectionId);
+                if (!item) {
+                    throw new Error("Created download item is missing.");
+                }
+                this.clearPreparedDraft(draft.id);
+                return item;
             },
-        };
-        const savePath = shouldCreateCollectionSubfolder(
-            enriched.collection.tree,
-            enriched.collection.name,
-            createCollectionSubfolder,
-        )
-            ? path.join(
-                  basePath,
-                  this.kd.lib.fs.sanitizeDownloadPathSegment(enriched.collection.name, {
-                      asciiFilenames,
-                      sanitizeString: " ",
-                  }),
-              )
-            : basePath;
-        const collectionId = this.repository.insertDownload({
-            loaded: enriched,
-            url:
-                enriched.provider === "workupload"
-                    ? buildWorkuploadUrl(enriched.collection.shareId, enriched.resource)
-                    : draft.sourceInput,
-            password: enriched.passwordProtected ? draft.password : undefined,
-            savePath,
-            selectedPaths: payload.selectedPaths,
-            asciiFilenames,
-            zipPasswords: payload.zipPasswords,
-            startPaused,
-        });
-        await this.emitUpdate(collectionId);
-        if (!startPaused) {
-            void this.scheduler.schedule();
-        }
-        void this.kd.setting.set("general.lastDownloadPath", basePath);
-        const item = this.getEnrichedItem(collectionId);
-        if (!item) {
-            throw new Error("Created download item is missing.");
-        }
-        this.clearPreparedDraft(draft.id);
-        return item;
+        );
     }
 
     private requirePreparedDraft(draftId: string) {
@@ -848,7 +865,7 @@ export class DownloadService {
         this.createReassemblyCoordinator(bundleId, storedManifest);
         await this.emitUpdate(bundleId);
         if (!startPaused) {
-            void this.scheduler.schedule();
+            this.scheduler.requestSchedule();
         }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         const item = this.getEnrichedItem(bundleId);
@@ -886,55 +903,69 @@ export class DownloadService {
     }
 
     public async pauseCollection(collectionId: string) {
-        const bundle = this.repository.getBundle(collectionId);
-        if (bundle) {
-            const collections = this.repository.listBundleCollections(bundle.id);
-            for (const collection of collections) {
-                if (collection.status === "completed") continue;
-                this.scheduler.pauseCollection(collection.id);
-                this.repository.pauseCollection(collection.id);
-            }
-            this.repository.markBundleStatus(bundle.id, "paused");
-            await this.emitUpdate(bundle.id);
-            await this.kd.service.transfer.refreshPowerSaveBlock();
-            return;
-        }
-        this.scheduler.pauseCollection(collectionId);
-        this.repository.pauseCollection(collectionId);
-        await this.emitUpdate(collectionId);
-        await this.kd.service.transfer.refreshPowerSaveBlock();
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:pauseCollection",
+            { action: "pause", collectionId },
+            async () => {
+                const bundle = this.repository.getBundle(collectionId);
+                if (bundle) {
+                    const collections = this.repository.listBundleCollections(bundle.id);
+                    for (const collection of collections) {
+                        if (collection.status === "completed") continue;
+                        this.scheduler.pauseCollection(collection.id);
+                        this.repository.pauseCollection(collection.id);
+                    }
+                    this.repository.markBundleStatus(bundle.id, "paused");
+                    await this.emitUpdate(bundle.id);
+                    await this.kd.service.transfer.refreshPowerSaveBlock();
+                    return;
+                }
+                this.scheduler.pauseCollection(collectionId);
+                this.repository.pauseCollection(collectionId);
+                await this.emitUpdate(collectionId);
+                await this.kd.service.transfer.refreshPowerSaveBlock();
+            },
+        );
     }
 
     public async resumeCollection(collectionId: string, options: ResumePayload = {}) {
-        const bundle = this.repository.getBundle(collectionId);
-        if (bundle) {
-            const collections = this.repository.listBundleCollections(bundle.id);
-            if (
-                collections.length > 0 &&
-                collections.every((collection) => collection.status === "completed")
-            ) {
-                this.repository.markBundleStatus(bundle.id, "queued");
-                await this.finalizeDownloadBundle(bundle.id);
-                await this.emitUpdate(bundle.id);
-                return;
-            }
-            for (const collection of collections) {
-                if (collection.status === "completed") continue;
-                if (this.repository.ensureCollectionNotExpired(collection.id)) continue;
-                this.repository.resumeCollection(collection.id, Boolean(options.force));
-                this.scheduler.resumeCollection(collection.id);
-            }
-            this.repository.markBundleStatus(bundle.id, "queued");
-            await this.emitUpdate(bundle.id);
-            return;
-        }
-        if (this.repository.ensureCollectionNotExpired(collectionId)) {
-            await this.emitUpdate(collectionId);
-            return;
-        }
-        this.repository.resumeCollection(collectionId, Boolean(options.force));
-        this.scheduler.resumeCollection(collectionId);
-        await this.emitUpdate(collectionId);
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:resumeCollection",
+            { action: "resume", collectionId, force: Boolean(options.force) },
+            async () => {
+                const bundle = this.repository.getBundle(collectionId);
+                if (bundle) {
+                    const collections = this.repository.listBundleCollections(bundle.id);
+                    if (
+                        collections.length > 0 &&
+                        collections.every((collection) => collection.status === "completed")
+                    ) {
+                        this.repository.markBundleStatus(bundle.id, "queued");
+                        await this.finalizeDownloadBundle(bundle.id);
+                        await this.emitUpdate(bundle.id);
+                        return;
+                    }
+                    for (const collection of collections) {
+                        if (collection.status === "completed") continue;
+                        if (this.repository.ensureCollectionNotExpired(collection.id)) continue;
+                        this.repository.resumeCollection(collection.id, Boolean(options.force));
+                        this.scheduler.resumeCollection(collection.id);
+                    }
+                    this.repository.markBundleStatus(bundle.id, "queued");
+                    await this.emitUpdate(bundle.id);
+                    return;
+                }
+                if (this.repository.ensureCollectionNotExpired(collectionId)) {
+                    await this.emitUpdate(collectionId);
+                    return;
+                }
+                this.repository.resumeCollection(collectionId, Boolean(options.force));
+                this.scheduler.resumeCollection(collectionId);
+                await this.emitUpdate(collectionId);
+            },
+        );
     }
 
     public async pauseFile(downloadId: string, fileId: string) {
@@ -1053,35 +1084,53 @@ export class DownloadService {
     }
 
     public async remove(collectionId: string) {
-        const bundle = this.repository.getBundle(collectionId);
-        if (bundle) {
-            const coordinator = this.reassemblyCoordinators.get(bundle.id);
-            if (coordinator) {
-                await coordinator.teardown();
-                this.reassemblyCoordinators.delete(bundle.id);
-            }
-            for (const collection of this.repository.listBundleCollections(bundle.id)) {
-                const files = this.repository.listFiles(collection.id);
-                this.scheduler.removeCollection(collection.id);
-                await this.scheduler.cleanupPartFiles(collection, files);
-            }
-            this.repository.deleteBundle(bundle.id);
-            await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id))).catch(
-                () => undefined,
-            );
-            await this.emitRemoved(collectionId);
-            await this.kd.service.transfer.refreshPowerSaveBlock();
-            return;
-        }
-        const collection = this.repository.getCollection(collectionId);
-        const files = collection ? this.repository.listFiles(collectionId) : [];
-        this.scheduler.removeCollection(collectionId);
-        this.repository.deleteCollection(collectionId);
-        if (collection) {
-            await this.scheduler.cleanupPartFiles(collection, files);
-        }
-        await this.emitRemoved(collectionId);
-        await this.kd.service.transfer.refreshPowerSaveBlock();
+        return withLoggedError(
+            this.kd.logger,
+            "DownloadService:remove",
+            { action: "remove", collectionId },
+            async () => {
+                const bundle = this.repository.getBundle(collectionId);
+                if (bundle) {
+                    const coordinator = this.reassemblyCoordinators.get(bundle.id);
+                    if (coordinator) {
+                        await coordinator.teardown();
+                        this.reassemblyCoordinators.delete(bundle.id);
+                    }
+                    const collections = this.repository.listBundleCollections(bundle.id);
+                    // Park every collection first: settling runs of one collection trigger
+                    // schedule(), which would otherwise start files of a sibling still queued.
+                    for (const collection of collections) {
+                        this.repository.markCollectionStatus(collection.id, "paused");
+                    }
+                    for (const collection of collections) {
+                        await this.scheduler.removeCollection(collection.id);
+                    }
+                    const filesByCollection = collections.map(
+                        (collection) =>
+                            [collection, this.repository.listFiles(collection.id)] as const,
+                    );
+                    this.repository.deleteBundle(bundle.id);
+                    for (const [collection, files] of filesByCollection) {
+                        await this.scheduler.cleanupPartFiles(collection, files);
+                    }
+                    await removeTree(
+                        path.join(bundle.savePath, getBundleTempDirName(bundle.id)),
+                    ).catch(() => undefined);
+                    await this.emitRemoved(collectionId);
+                    await this.kd.service.transfer.refreshPowerSaveBlock();
+                    return;
+                }
+                const collection = this.repository.getCollection(collectionId);
+                await this.scheduler.removeCollection(collectionId);
+                const files = collection ? this.repository.listFiles(collectionId) : [];
+                this.repository.deleteCollection(collectionId);
+                if (collection) {
+                    await this.scheduler.cleanupPartFiles(collection, files);
+                }
+                await this.emitRemoved(collectionId);
+                await this.kd.service.transfer.refreshPowerSaveBlock();
+            },
+        );
     }
 
     public async openFolder(collectionId: string) {
@@ -1293,7 +1342,7 @@ export class DownloadService {
         await this.emitUpdate(collectionId);
         const imported = this.repository.getCollection(collectionId);
         if (imported?.status === "queued") {
-            void this.scheduler.schedule();
+            this.scheduler.requestSchedule();
         }
         void this.kd.setting.set("general.lastDownloadPath", basePath);
         return this.getEnrichedItem(collectionId);
@@ -1320,34 +1369,56 @@ export class DownloadService {
              FROM "download_collection"`,
         );
 
+        // Save paths are often shared folders like ~/Downloads (possibly shared by several
+        // collections), so only remove exact paths derived from finished files, and never one
+        // that an unfinished file in any collection still writes to.
+        const activePartPaths = new Set<string>();
+        const candidates: Array<{ collectionId: string; fileId: string; target: string }> = [];
         for (const collection of collections) {
-            if (!(await fse.pathExists(collection.savePath))) {
-                continue;
-            }
-
-            const expectedPartPaths = new Set(
-                this.repository
-                    .listFiles(collection.id)
-                    .filter((file) => file.selected === 1 && file.status !== "completed")
-                    .flatMap((file) => {
-                        const partPath = this.getPartPath(collection, file);
-                        return [partPath, getStagingPartPath(partPath)];
-                    }),
-            );
-
-            const partFiles = await fg(["**/*.part", "**/*.part.z"], {
-                cwd: collection.savePath,
-                absolute: true,
-                onlyFiles: true,
-            });
-
-            for (const partPath of partFiles) {
-                if (expectedPartPaths.has(partPath)) {
-                    continue;
+            for (const file of this.repository.listFiles(collection.id)) {
+                const partPath = this.getPartPath(collection, file);
+                const finished = file.selected !== 1 || file.status === "completed";
+                for (const target of [partPath, getStagingPartPath(partPath)]) {
+                    if (finished)
+                        candidates.push({ collectionId: collection.id, fileId: file.id, target });
+                    else activePartPaths.add(target);
                 }
+            }
+        }
 
-                await fse.remove(partPath).catch(() => undefined);
-                await PartFileWriter.removeSidecar(partPath);
+        // One readdir per directory instead of a stat per file keeps large histories from
+        // delaying startup; this runs before the main window is created.
+        const candidatesByDir = groupBy(
+            candidates.filter((candidate) => !activePartPaths.has(candidate.target)),
+            (candidate) => path.dirname(candidate.target),
+        );
+        for (const [dir, dirCandidates] of Object.entries(candidatesByDir)) {
+            const entries = await fse.readdir(dir).catch((error: NodeJS.ErrnoException) => {
+                if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+                    logCaughtError(
+                        this.kd.logger,
+                        "DownloadService:cleanupOrphanPartFiles",
+                        { dir },
+                        error,
+                    );
+                }
+                return [];
+            });
+            if (entries.length === 0) continue;
+            const present = new Set(entries);
+            for (const candidate of dirCandidates) {
+                if (!present.has(path.basename(candidate.target))) continue;
+                try {
+                    await fse.remove(candidate.target);
+                    await PartFileWriter.removeSidecar(candidate.target);
+                } catch (error) {
+                    logCaughtError(
+                        this.kd.logger,
+                        "DownloadService:cleanupOrphanPartFiles",
+                        candidate,
+                        error,
+                    );
+                }
             }
         }
     }
@@ -1665,11 +1736,24 @@ export class DownloadService {
             });
     }
 
-    private async finalizeDownloadBundle(bundleId: string) {
+    private finalizeDownloadBundle(bundleId: string) {
+        // Startup restore, collection completion and resume can all trigger finalize; running
+        // twice concurrently would write the same reassembled .part files.
+        const inFlight = this.bundleFinalizations.get(bundleId);
+        if (inFlight) return inFlight;
+        const finalization = this.runBundleFinalization(bundleId).finally(() => {
+            this.bundleFinalizations.delete(bundleId);
+        });
+        this.bundleFinalizations.set(bundleId, finalization);
+        return finalization;
+    }
+
+    private async runBundleFinalization(bundleId: string) {
         const bundle = this.repository.getBundle(bundleId);
         if (!bundle || bundle.status === "completed") return;
         const collections = this.repository.listBundleCollections(bundle.id);
-        const manifest = JSON.parse(bundle.manifestJson) as StoredExtendedManifest;
+        const manifest = this.parseStoredManifest(bundle.id, bundle.manifestJson);
+        if (!manifest) return;
         const collectionByOrdinal = new Map(
             collections.map((collection) => [collection.ordinal, collection]),
         );
@@ -1693,6 +1777,11 @@ export class DownloadService {
             // are not deleted mid-append.
             if (coordinator) {
                 await coordinator.whenIdle();
+                // whenIdle() swallows flush failures, so an unpublished managed file means
+                // incremental reassembly failed and the remaining pieces must be kept.
+                if (!coordinator.isComplete()) {
+                    throw new Error("분할 파일 재조립이 완료되지 않았습니다.");
+                }
             }
 
             for (const splitFile of manifest.splitFiles) {
@@ -1780,11 +1869,19 @@ export class DownloadService {
             await removeTree(path.join(bundle.savePath, getBundleTempDirName(bundle.id)));
             this.repository.markBundleStatus(bundle.id, "completed");
         } catch (error) {
-            this.repository.markBundleStatus(
-                bundle.id,
-                "error",
-                error instanceof Error ? error.message : String(error),
+            logCaughtError(
+                this.kd.logger,
+                "DownloadService:finalizeDownloadBundle",
+                {
+                    action: "bundle-finalize",
+                    bundleId: bundle.id,
+                    bundleName: bundle.name,
+                    savePath: bundle.savePath,
+                    managedSplitPaths: managedSplitPaths.size,
+                },
+                error,
             );
+            this.repository.markBundleStatus(bundle.id, "error", toErrorMessage(error));
         }
     }
 

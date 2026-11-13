@@ -75,6 +75,8 @@ export class UploadService {
     private readonly preparationWorker: PreparationWorkerClient;
     private readonly notifiedFailures = new Set<string>();
     private readonly bundleInitializations = new Map<string, Promise<unknown>>();
+    private readonly bundleInitControllers = new Map<string, AbortController>();
+    private readonly bundlePauses = new Map<string, Promise<void>>();
     /** Absolute paths for the in-progress new-upload draft. Never sent to the renderer. */
     private readonly draftSources = new Map<string, UploadSourceFile>();
     private unsubscribeRequestPoolUsage?: () => void;
@@ -263,43 +265,64 @@ export class UploadService {
     }
 
     public async pauseUpload(collectionId: string) {
-        const bundle = this.repository.getBundle(collectionId);
-        if (bundle) {
-            for (const collection of this.repository.listBundleCollections(bundle.id)) {
-                if (collection.status === "completed") continue;
-                await this.scheduler.pauseCollection(collection.id);
-                this.repository.pauseCollection(collection.id);
-            }
-            this.repository.markBundleStatus(bundle.id, "paused");
-            await this.emitUpdate(bundle.id);
-            await this.kd.service.transfer.refreshPowerSaveBlock();
-            return;
-        }
-        await this.scheduler.pauseCollection(collectionId);
-        this.repository.pauseCollection(collectionId);
-        await this.emitUpdate(collectionId);
-        await this.kd.service.transfer.refreshPowerSaveBlock();
+        return withLoggedError(
+            this.kd.logger,
+            "UploadService:pauseUpload",
+            { action: "pause", collectionId },
+            async () => {
+                const bundle = this.repository.getBundle(collectionId);
+                if (bundle) {
+                    const pausing = this.pauseBundle(bundle.id);
+                    this.bundlePauses.set(bundle.id, pausing);
+                    try {
+                        await pausing;
+                    } finally {
+                        if (this.bundlePauses.get(bundle.id) === pausing) {
+                            this.bundlePauses.delete(bundle.id);
+                        }
+                    }
+                    return;
+                }
+                await this.scheduler.pauseCollection(collectionId);
+                this.repository.pauseCollection(collectionId);
+                await this.emitUpdate(collectionId);
+                await this.kd.service.transfer.refreshPowerSaveBlock();
+            },
+        );
     }
 
     public async resumeUpload(collectionId: string, options: { force?: boolean } = {}) {
-        const bundle = this.repository.getBundle(collectionId);
-        if (bundle) {
-            if (bundle.initializedCount < bundle.physicalCount) {
-                await this.initializeBundle(bundle);
-                return;
-            }
-            for (const collection of this.repository.listBundleCollections(bundle.id)) {
-                if (collection.status !== "paused") continue;
-                this.repository.resumeCollection(collection.id, Boolean(options.force));
-                await this.scheduler.resumeCollection(collection.id);
-            }
-            this.repository.queueBundle(bundle.id);
-            await this.emitUpdate(bundle.id);
-            return;
-        }
-        this.repository.resumeCollection(collectionId, Boolean(options.force));
-        await this.scheduler.resumeCollection(collectionId);
-        await this.emitUpdate(collectionId);
+        return withLoggedError(
+            this.kd.logger,
+            "UploadService:resumeUpload",
+            { action: "resume", collectionId, force: Boolean(options.force) },
+            async () => {
+                // A resume right after pause would otherwise rejoin the initialization that pause
+                // is cancelling, and pause would then write 'paused' over it.
+                // A failed pause was already logged by pauseUpload; resume proceeds regardless.
+                await this.bundlePauses.get(collectionId)?.catch(() => undefined);
+                const bundle = this.repository.getBundle(collectionId);
+                if (bundle) {
+                    // Collections created before a pause during initialization are paused too;
+                    // they stay unrunnable until initialization completes.
+                    for (const collection of this.repository.listBundleCollections(bundle.id)) {
+                        if (collection.status !== "paused") continue;
+                        this.repository.resumeCollection(collection.id, Boolean(options.force));
+                        await this.scheduler.resumeCollection(collection.id);
+                    }
+                    if (bundle.initializedCount < bundle.physicalCount) {
+                        await this.initializeBundle(bundle);
+                        return;
+                    }
+                    this.repository.queueBundle(bundle.id);
+                    await this.emitUpdate(bundle.id);
+                    return;
+                }
+                this.repository.resumeCollection(collectionId, Boolean(options.force));
+                await this.scheduler.resumeCollection(collectionId);
+                await this.emitUpdate(collectionId);
+            },
+        );
     }
 
     public async pauseFile(collectionId: string, fileId: string) {
@@ -348,21 +371,31 @@ export class UploadService {
     }
 
     public async remove(collectionId: string) {
-        const bundle = this.repository.getBundle(collectionId);
-        if (bundle) {
-            for (const collection of this.repository.listBundleCollections(bundle.id)) {
-                await this.scheduler.removeCollection(collection.id);
-            }
-            this.repository.deleteBundle(bundle.id);
-            await this.cleanupBundlePacks(bundle.id);
-            await this.emitRemoved(collectionId);
-            await this.kd.service.transfer.refreshPowerSaveBlock();
-            return;
-        }
-        await this.scheduler.removeCollection(collectionId);
-        this.repository.deleteCollection(collectionId);
-        await this.emitRemoved(collectionId);
-        await this.kd.service.transfer.refreshPowerSaveBlock();
+        return withLoggedError(
+            this.kd.logger,
+            "UploadService:remove",
+            { action: "remove", collectionId },
+            async () => {
+                const bundle = this.repository.getBundle(collectionId);
+                if (bundle) {
+                    // Initialization would otherwise keep materializing packs into the
+                    // deleted pack dir and insert collections for a deleted bundle.
+                    await this.cancelBundleInitialization(bundle.id);
+                    for (const collection of this.repository.listBundleCollections(bundle.id)) {
+                        await this.scheduler.removeCollection(collection.id);
+                    }
+                    this.repository.deleteBundle(bundle.id);
+                    await this.cleanupBundlePacks(bundle.id);
+                    await this.emitRemoved(collectionId);
+                    await this.kd.service.transfer.refreshPowerSaveBlock();
+                    return;
+                }
+                await this.scheduler.removeCollection(collectionId);
+                this.repository.deleteCollection(collectionId);
+                await this.emitRemoved(collectionId);
+                await this.kd.service.transfer.refreshPowerSaveBlock();
+            },
+        );
     }
 
     public async copyLink(collectionId: string) {
@@ -545,7 +578,7 @@ export class UploadService {
 
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.uploadStartupResumeMode");
-        this.repository.restoreStartupState();
+        this.repository.restoreStartupState(mode);
         await this.scheduler.restoreFromRepository();
         for (const bundle of this.repository.listBundles()) {
             const collections = this.repository.listBundleCollections(bundle.id);
@@ -707,33 +740,67 @@ export class UploadService {
         // decide "ordinal N is missing" and create a duplicate collection.
         const existing = this.bundleInitializations.get(bundle.id);
         if (existing) return existing;
-        const task = this.initializeBundleInternal(bundle, plan).finally(() => {
+        const controller = new AbortController();
+        this.bundleInitControllers.set(bundle.id, controller);
+        const task = this.initializeBundleInternal(bundle, controller.signal, plan).finally(() => {
             if (this.bundleInitializations.get(bundle.id) === task) {
                 this.bundleInitializations.delete(bundle.id);
+            }
+            if (this.bundleInitControllers.get(bundle.id) === controller) {
+                this.bundleInitControllers.delete(bundle.id);
             }
         });
         this.bundleInitializations.set(bundle.id, task);
         return task;
     }
 
-    private async initializeBundleInternal(bundle: UploadBundleRow, plan?: PersistedBundlePlan) {
+    private async pauseBundle(bundleId: string) {
+        await this.cancelBundleInitialization(bundleId);
+        for (const collection of this.repository.listBundleCollections(bundleId)) {
+            if (collection.status === "completed") continue;
+            await this.scheduler.pauseCollection(collection.id);
+            this.repository.pauseCollection(collection.id);
+        }
+        this.repository.markBundleStatus(bundleId, "paused");
+        await this.emitUpdate(bundleId);
+        await this.kd.service.transfer.refreshPowerSaveBlock();
+    }
+
+    /** Stops an in-flight initialization at its next checkpoint and waits for it to unwind. */
+    private async cancelBundleInitialization(bundleId: string) {
+        this.bundleInitControllers.get(bundleId)?.abort();
+        // Failures were already logged and persisted by the task itself; only its end matters here.
+        await this.bundleInitializations.get(bundleId)?.catch(() => undefined);
+    }
+
+    private async initializeBundleInternal(
+        bundle: UploadBundleRow,
+        signal: AbortSignal,
+        plan?: PersistedBundlePlan,
+    ) {
         const resolvedPlan = plan ?? (JSON.parse(bundle.planJson) as PersistedBundlePlan);
         this.turnstile.beginSession(this.kd.window.main.window);
         try {
             for (let ordinal = 0; ordinal < resolvedPlan.collections.length; ordinal += 1) {
+                // Pause and remove cancel through `signal` and then set the bundle's status
+                // themselves, so a cancelled run must not queue or mark the bundle.
+                if (signal.aborted) return;
                 // Re-check on every iteration: even within the single-flight lock
                 // the partial unique index is the hard guard, but this avoids
                 // needless work (and a wasted turnstile/API attempt) when an
                 // ordinal was already created by an earlier completed run.
                 if (this.repository.hasBundleCollectionOrdinal(bundle.id, ordinal)) continue;
-                await this.createBundleCollection(bundle, resolvedPlan, ordinal);
-                this.repository.updateBundleInitialization(bundle.id, ordinal + 1);
-                await this.emitUpdate(bundle.id);
+                if (await this.createBundleCollection(bundle, resolvedPlan, ordinal, signal)) {
+                    this.repository.updateBundleInitialization(bundle.id, ordinal + 1);
+                    await this.emitUpdate(bundle.id);
+                }
             }
+            if (signal.aborted) return;
             this.repository.queueBundle(bundle.id);
             await this.emitUpdate(bundle.id);
             void this.scheduler.schedule();
         } catch (error) {
+            if (signal.aborted) return;
             this.repository.markBundleStatus(
                 bundle.id,
                 "paused",
@@ -745,10 +812,12 @@ export class UploadService {
         }
     }
 
+    /** Returns false when `signal` cancelled it before the remote collection was created. */
     private async createBundleCollection(
         bundle: UploadBundleRow,
         plan: PersistedBundlePlan,
         ordinal: number,
+        signal?: AbortSignal,
     ) {
         const context: Record<string, unknown> = {
             action: "initialize-extended-upload",
@@ -764,10 +833,20 @@ export class UploadService {
             context,
             async () => {
                 const files = await this.prepareBundleCollectionFiles(bundle, plan, ordinal);
-                const token = await this.turnstile.solve(this.kd.window.main.window, {
-                    current: ordinal + 1,
-                    total: plan.collections.length,
-                });
+                if (signal?.aborted) return false;
+                const token = await this.turnstile
+                    .solve(
+                        this.kd.window.main.window,
+                        { current: ordinal + 1, total: plan.collections.length },
+                        signal,
+                    )
+                    .catch((error: unknown) => {
+                        if (signal?.aborted) return null;
+                        throw error;
+                    });
+                // Once the remote collection exists it is persisted even if cancelled, so a
+                // later resume continues it and remove() deletes it.
+                if (token === null || signal?.aborted) return false;
                 context.stage = "create-collection";
                 const options = {
                     name: `${bundle.name} (${ordinal + 1}/${plan.collections.length})`,
@@ -793,6 +872,7 @@ export class UploadService {
                     fileRows.map((file) => ({ id: file.id, remoteId: file.remoteId })),
                     created.workItems,
                 );
+                return true;
             },
         );
     }

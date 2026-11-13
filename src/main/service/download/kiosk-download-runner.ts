@@ -1,7 +1,12 @@
 import type { KioApiClient } from "./kio-api-client";
 import type { DownloadRepository } from "./repository";
 import type { GlobalSegmentPool } from "./segment-pool";
-import type { DownloadChunkRow, DownloadCollectionRow, DownloadFileRow } from "./types";
+import type {
+    DownloadChunkRow,
+    DownloadCollectionRow,
+    DownloadFileRow,
+    SegmentDescriptor,
+} from "./types";
 
 import { CborHttpError } from "../../lib/http-error";
 import { PartFileWriter } from "./part-file";
@@ -42,6 +47,7 @@ export class KioskDownloadRunner {
         string,
         { signal: AbortSignal; promise: Promise<string> }
     >();
+    private readonly segmentTokens = new WeakMap<SegmentDescriptor[], string>();
 
     public constructor(private readonly deps: KioskDownloadRunnerDeps) {}
 
@@ -128,6 +134,7 @@ export class KioskDownloadRunner {
                 try {
                     const segments = await this.deps.api.getSegments(file.remoteId, cat, signal);
                     throwIfAborted(signal);
+                    this.segmentTokens.set(segments, cat);
                     return segments;
                 } catch (error) {
                     throwIfAborted(signal);
@@ -140,6 +147,22 @@ export class KioskDownloadRunner {
                 }
             }
         });
+    }
+
+    public async refreshFileSegments(
+        collection: DownloadCollectionRow,
+        file: DownloadFileRow,
+        staleSegments: SegmentDescriptor[],
+        signal: AbortSignal,
+    ) {
+        // CDN segment tokens can share the collection token's lifetime, so refetching with the
+        // same CAT may hand back equally stale URLs. Only drop the CAT that issued the stale
+        // descriptors so a newer token another file already obtained survives.
+        const staleCat = this.segmentTokens.get(staleSegments);
+        if (staleCat !== undefined && this.collectionTokens.get(collection.id) === staleCat) {
+            this.collectionTokens.delete(collection.id);
+        }
+        return await this.getFileSegments(collection, file, signal);
     }
 
     private getCollectionToken(collection: DownloadCollectionRow, signal: AbortSignal) {

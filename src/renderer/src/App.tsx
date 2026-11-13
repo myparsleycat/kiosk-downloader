@@ -47,10 +47,15 @@ export function RootProvider({ children }: { children: React.ReactNode }) {
 
 type TabValue = "downloads" | "new" | "uploads" | "new-upload" | "settings";
 
-const isDarwin = window.electron.process.platform === "darwin";
+const isDarwin = window.api.platform === "darwin";
 
 function MainComponent() {
   const [tab, setTab] = React.useState<TabValue>("downloads");
+  // Creation finishes asynchronously, so read the tab at completion time, not at render time.
+  const tabRef = React.useRef(tab);
+  React.useEffect(() => {
+    tabRef.current = tab;
+  }, [tab]);
   const downloads = useTransferItems(downloadItemsSource);
   const uploads = useTransferItems(uploadItemsSource);
   const [focusDownloadId, setFocusDownloadId] = React.useState<string | null>(null);
@@ -316,15 +321,17 @@ function MainComponent() {
             onNewDownload={() => setTab("new")}
           />
         )}
-        {tab === "new" && (
+        {/* Kept mounted so drafts and in-flight creation survive tab switches. */}
+        <div className={cn("h-full", tab !== "new" && "hidden")}>
           <NewDownloadView
+            active={tab === "new"}
             onCreated={(downloadId) => {
               useDownloadTreeExpanded.getState().resetDownload(downloadId);
               setFocusDownloadId(downloadId);
-              setTab("downloads");
+              if (tabRef.current === "new") setTab("downloads");
             }}
           />
-        )}
+        </div>
         {tab === "uploads" && (
           <UploadList
             items={uploads}
@@ -333,14 +340,15 @@ function MainComponent() {
             onNewUpload={() => setTab("new-upload")}
           />
         )}
-        {tab === "new-upload" && (
+        <div className={cn("h-full", tab !== "new-upload" && "hidden")}>
           <UploadView
+            active={tab === "new-upload"}
             onCreated={(uploadId) => {
               setFocusUploadId(uploadId);
-              setTab("uploads");
+              if (tabRef.current === "new-upload") setTab("uploads");
             }}
           />
-        )}
+        </div>
         {tab === "settings" && <SettingsView />}
       </div>
     </main>

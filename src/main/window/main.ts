@@ -1,6 +1,4 @@
-import { fileURLToPath } from "node:url";
 
-import { is } from "@electron-toolkit/utils";
 import { openExternal } from "@main/service/util";
 import { BrowserWindow, nativeTheme, screen } from "electron";
 import { debounce } from "es-toolkit";
@@ -8,7 +6,13 @@ import { debounce } from "es-toolkit";
 import { KioskDownloader } from "..";
 import icon from "../../../resources/Icon-macOS-512.png?asset";
 import { TRAFFIC_LIGHT_Y, createTitleBarOverlay } from "./titleBar";
-import { focus, getDefaultWebPreferences } from "./utils";
+import {
+    RENDERER_INDEX_PATH,
+    focus,
+    getDefaultWebPreferences,
+    getDevRendererUrl,
+    isAppRendererUrl,
+} from "./utils";
 
 export class MainWindow {
     private readonly kd: KioskDownloader;
@@ -154,21 +158,27 @@ export class MainWindow {
         });
 
         this.window.webContents.setWindowOpenHandler((details) => {
-            void openExternal(details.url);
+            // openExternal logs both blocked schemes and shell failures.
+            void openExternal(details.url).catch(() => undefined);
             return { action: "deny" };
         });
 
-        if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-            const baseUrl = process.env["ELECTRON_RENDERER_URL"];
-            const routeUrl = initialRoute ? `${baseUrl}/#${initialRoute}` : baseUrl;
+        // Dropping a file outside the drop zones or following a link would otherwise replace the
+        // app with arbitrary content that still receives the preload bridge.
+        this.window.webContents.on("will-frame-navigate", (event) => {
+            if (event.isMainFrame && isAppRendererUrl(event.url)) return;
+            event.preventDefault();
+            this.kd.logger.warn({ url: event.url }, "MainWindow:blockedNavigation");
+        });
+
+        const devRendererUrl = getDevRendererUrl();
+        if (devRendererUrl) {
+            const routeUrl = initialRoute ? `${devRendererUrl}/#${initialRoute}` : devRendererUrl;
             void this.window.loadURL(routeUrl);
         } else {
-            void this.window.loadFile(
-                fileURLToPath(new URL("../renderer/index.html", import.meta.url)),
-                {
-                    hash: initialRoute ? initialRoute.slice(1) : undefined,
-                },
-            );
+            void this.window.loadFile(RENDERER_INDEX_PATH, {
+                hash: initialRoute ? initialRoute.slice(1) : undefined,
+            });
         }
 
         this.window.on("blur", () => {

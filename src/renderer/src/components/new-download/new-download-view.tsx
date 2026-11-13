@@ -61,7 +61,13 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 
-export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string) => void }) {
+export function NewDownloadView({
+  active,
+  onCreated,
+}: {
+  active: boolean;
+  onCreated: (downloadId: string) => void;
+}) {
   const url = useNewDownloadDraft((state) => state.url);
   const items = useNewDownloadDraft((state) => state.items);
   const savePath = useNewDownloadDraft((state) => state.savePath);
@@ -103,8 +109,8 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
   const urlInputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
-    requestAnimationFrame(() => urlInputRef.current?.focus());
-  }, []);
+    if (active) requestAnimationFrame(() => urlInputRef.current?.focus());
+  }, [active]);
 
   const loadShareFromResult = React.useCallback(
     (result: { shareInput: string } | null) => {
@@ -392,14 +398,16 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
         />
       </div>
 
+      {/* This view stays mounted while its tab is hidden, but dialogs portal out of it, so gate
+          them on `active` to keep them from showing over another tab. */}
       <BulkShareDialog
-        open={bulkDialogOpen}
+        open={active && bulkDialogOpen}
         onOpenChange={setBulkDialogOpen}
         onConfirm={(urls) => void commitUrls(urls)}
       />
 
       <RenameDialog
-        target={renameTarget}
+        target={active ? renameTarget : null}
         error={renameError}
         onOpenChange={(open) => {
           if (!open) {
@@ -429,7 +437,7 @@ export function NewDownloadView({ onCreated }: { onCreated: (downloadId: string)
       />
 
       <Dialog
-        open={zipPasswordPrompt !== null}
+        open={active && zipPasswordPrompt !== null}
         onOpenChange={(open) => {
           if (!open) {
             setZipPasswordPrompt(null);

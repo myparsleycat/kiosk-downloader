@@ -366,6 +366,39 @@ describe("isSegmentTokenExpired", () => {
         ).toBe(true);
     });
 
+    it("recognizes the Kiosk CDN invalid_token body on 403", () => {
+        expect(
+            isSegmentTokenExpired(
+                new SegmentHttpError(
+                    "Segment 64 HTTP 403",
+                    403,
+                    snapshot({
+                        contentType: "application/json",
+                        bodyKind: "json",
+                        bodyPreview:
+                            '{"code":"AUTH:INVALID_TOKEN","message":"invalid token provided"}',
+                    }),
+                ),
+            ),
+        ).toBe(true);
+    });
+
+    it("ignores invalid_token text outside the JSON code field", () => {
+        expect(
+            isSegmentTokenExpired(
+                new SegmentHttpError(
+                    "Segment HTTP 403",
+                    403,
+                    snapshot({
+                        contentType: "application/json",
+                        bodyKind: "json",
+                        bodyPreview: '{"code":"forbidden","message":"auth:invalid_token"}',
+                    }),
+                ),
+            ),
+        ).toBe(false);
+    });
+
     it("treats a 401 as an expired credential", () => {
         expect(
             isSegmentTokenExpired(

@@ -1,6 +1,6 @@
 {
   "name": "kiosk-downloader",
-  "version": "1.13.2",
+  "version": "1.13.3",
   "private": true,
   "description": "Unofficial Kiosk Downloader",
   "main": "./out/main/index.js",
@@ -22,7 +22,6 @@
     "typecheck": "oxlint --type-aware --type-check"
   },
   "dependencies": {
-    "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@zip.js/zip.js": "^2.12.0",
     "any-ascii": "^0.3.3",
@@ -82,6 +81,5 @@
     "vite": "^8.2.2",
     "vitest": "5.0.0",
     "zustand": "^5.0.15"
-  },
-  "packageManager": "pnpm@12.3.4"
+  }
 }
