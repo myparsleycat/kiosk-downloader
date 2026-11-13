@@ -177,6 +177,31 @@ describe("KioskDownloadRunner recovery", () => {
         expect(repository.updateCollectionFreshMeta).toHaveBeenCalledTimes(2);
     });
 
+    it("drops only the collection token that issued stale segment descriptors", async () => {
+        const { input, runner, api } = createRunner();
+        api.refreshCollectionToken
+            .mockResolvedValueOnce({ cat: "first-token", expires: 1 })
+            .mockResolvedValueOnce({ cat: "second-token", expires: 2 });
+        const signal = input.controller.signal;
+        const stale = await runner.getFileSegments(input.collection, input.file, signal);
+
+        await runner.refreshFileSegments(input.collection, input.file, stale, signal);
+        expect(api.refreshCollectionToken).toHaveBeenCalledTimes(2);
+        expect(api.getSegments).toHaveBeenLastCalledWith(
+            input.file.remoteId,
+            "second-token",
+            signal,
+        );
+
+        await runner.refreshFileSegments(input.collection, input.file, stale, signal);
+        expect(api.refreshCollectionToken).toHaveBeenCalledTimes(2);
+        expect(api.getSegments).toHaveBeenLastCalledWith(
+            input.file.remoteId,
+            "second-token",
+            signal,
+        );
+    });
+
     it("fails without looping when the refreshed token is rejected again", async () => {
         const { input, runner, api } = createRunner();
         const unauthorized = new CborHttpError("file/gets failed: HTTP 401: token expired", 401);

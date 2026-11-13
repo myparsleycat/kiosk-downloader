@@ -59,6 +59,7 @@ type FileDownloadSession = {
     /** Mutable so a credential-expiry recovery can install refreshed descriptors. */
     segments: SegmentDescriptor[];
     segmentsRefresh: Promise<SegmentDescriptor[]> | null;
+    segmentsRefreshedAt: number;
     remainingChunks: number;
     inFlightChunks: number;
     failed: boolean;
@@ -77,11 +78,16 @@ type SegmentPoolDeps = {
     refreshSegments: (
         collection: DownloadCollectionRow,
         file: DownloadFileRow,
+        staleSegments: SegmentDescriptor[],
         signal: AbortSignal,
     ) => Promise<SegmentDescriptor[]>;
     onChunkSettled: () => void;
     onProgress: (collectionId: string, fileId: string) => void;
 };
+
+// Descriptors this fresh failing auth again point to a revoked share rather than expiry, so
+// refetching them per chunk would only add control-plane calls before the file fails.
+const SEGMENT_REFRESH_MIN_INTERVAL_MS = 60_000;
 
 function chunkBackoffMs(attempt: number) {
     return 1000 * 2 ** (attempt - 1);
@@ -158,6 +164,7 @@ export class GlobalSegmentPool {
                 registration,
                 segments: registration.segments,
                 segmentsRefresh: null,
+                segmentsRefreshedAt: 0,
                 remainingChunks: registration.chunks.length,
                 inFlightChunks: 0,
                 failed: false,
@@ -554,12 +561,16 @@ export class GlobalSegmentPool {
                     if (attemptSegments !== session.segments) {
                         continue;
                     }
-                    if (!refreshedDescriptor) {
+                    if (
+                        !refreshedDescriptor &&
+                        Date.now() - session.segmentsRefreshedAt >= SEGMENT_REFRESH_MIN_INTERVAL_MS
+                    ) {
                         try {
                             session.segments = await this.getFreshSegments(
                                 session,
                                 controller.signal,
                             );
+                            session.segmentsRefreshedAt = Date.now();
                             // Only a successful refetch may suppress later refreshes; a transient
                             // refresh failure must keep retrying through the backoff path below.
                             refreshedDescriptor = true;
@@ -669,7 +680,7 @@ export class GlobalSegmentPool {
         }
         const registration = session.registration;
         const refresh = this.deps
-            .refreshSegments(registration.collection, registration.file, signal)
+            .refreshSegments(registration.collection, registration.file, session.segments, signal)
             .finally(() => {
                 if (session.segmentsRefresh === refresh) {
                     session.segmentsRefresh = null;

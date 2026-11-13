@@ -12,7 +12,10 @@ export type ZipRangeReaderOptions = {
     collectionId: string;
     signal?: AbortSignal;
     /** Refetch expired descriptors; long ZIP extractions outlive signed CDN credentials. */
-    refreshSegments?: (signal: AbortSignal) => Promise<SegmentDescriptor[]>;
+    refreshSegments?: (
+        staleSegments: SegmentDescriptor[],
+        signal: AbortSignal,
+    ) => Promise<SegmentDescriptor[]>;
 };
 
 export class ZipRangeReader {
@@ -22,7 +25,10 @@ export class ZipRangeReader {
     private readonly fileSize: number;
     private readonly signal?: AbortSignal;
     private readonly collectionId: string;
-    private readonly refreshSegments?: (signal: AbortSignal) => Promise<SegmentDescriptor[]>;
+    private readonly refreshSegments?: (
+        staleSegments: SegmentDescriptor[],
+        signal: AbortSignal,
+    ) => Promise<SegmentDescriptor[]>;
 
     public constructor(options: ZipRangeReaderOptions) {
         this.kd = options.kd;
@@ -46,7 +52,7 @@ export class ZipRangeReader {
             if (!this.refreshSegments || signal.aborted || !isSegmentTokenExpired(error)) {
                 throw error;
             }
-            this.segments = await this.refreshSegments(signal);
+            this.segments = await this.refreshSegments(this.segments, signal);
             return await this.readMappedRange(absoluteOffset, length);
         }
     }
