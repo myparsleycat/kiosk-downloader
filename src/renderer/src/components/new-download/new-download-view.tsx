@@ -1,5 +1,9 @@
 import { BulkShareDialog } from "@renderer/components/new-download/bulk-share-dialog";
-import { DraftItemCard } from "@renderer/components/new-download/draft-item-card";
+import {
+  DirectHeadersFields,
+  DraftItemCard,
+  isDirectDraftItem,
+} from "@renderer/components/new-download/draft-item-card";
 import { DraftTreePanel } from "@renderer/components/new-download/draft-tree-panel";
 import { RenameDialog, type RenameTarget } from "@renderer/components/tree/rename-dialog";
 import { Button } from "@renderer/components/ui/button";
@@ -74,6 +78,7 @@ export function NewDownloadView({
   const createCollectionSubfolder = useNewDownloadDraft((state) => state.createCollectionSubfolder);
   const setSavePath = useNewDownloadDraft((state) => state.setSavePath);
   const setItemPassword = useNewDownloadDraft((state) => state.setItemPassword);
+  const setItemHeaders = useNewDownloadDraft((state) => state.setItemHeaders);
   const setItemPreparation = useNewDownloadDraft((state) => state.setItemPreparation);
   const updateItemSelected = useNewDownloadDraft((state) => state.updateItemSelected);
   const renameItemNode = useNewDownloadDraft((state) => state.renameItemNode);
@@ -223,13 +228,13 @@ export function NewDownloadView({
               <Field>
                 <FieldLabel htmlFor="url-input">
                   <LinkIcon className="size-3" />
-                  공유 URL 또는 확장 공유 파일
+                  공유 URL · 직접 링크 또는 확장 공유 파일
                 </FieldLabel>
                 <InputGroup>
                   <InputGroupInput
                     ref={urlInputRef}
                     id="url-input"
-                    placeholder="Kiosk · Transfer.it · Workupload URL 또는 .kds"
+                    placeholder="Kiosk · Transfer.it · Workupload · 직접 링크(HTTP) 또는 .kds"
                     value={url}
                     onChange={(e) => applyUrlInput(e.target.value)}
                     onPaste={(e) => {
@@ -239,7 +244,12 @@ export function NewDownloadView({
                         return;
                       }
                       e.preventDefault();
-                      applyUrlInput(resolved);
+                      applyUrlInput(resolved, { commit: true });
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" || !isDownloadShareInput(url.trim())) return;
+                      e.preventDefault();
+                      applyUrlInput(url, { commit: true });
                     }}
                   />
                   <InputGroupAddon align="inline-end">
@@ -265,7 +275,8 @@ export function NewDownloadView({
                   </InputGroupAddon>
                 </InputGroup>
                 <FieldDescription className="text-xs">
-                  .kds 파일을 드래그하거나 파일 선택 버튼으로 불러올 수 있습니다
+                  직접 링크는 붙여넣거나 Enter를 누르면 불러옵니다. .kds 파일은 드래그하거나 파일
+                  선택 버튼으로 불러올 수 있습니다
                 </FieldDescription>
               </Field>
             </div>
@@ -276,7 +287,15 @@ export function NewDownloadView({
                 totalFiles={readySummaries[0]?.totalFiles ?? 0}
                 totalBytes={readySummaries[0]?.totalBytes ?? 0}
                 onRemove={() => handleRemoveItem(readyItem)}
-              />
+              >
+                {isDirectDraftItem(readyItem) ? (
+                  <DirectHeadersFields
+                    headers={readyItem.headers}
+                    onChange={(headers) => setItemHeaders(readyItem.key, headers)}
+                    onApply={() => void loadCollection(readyItem.key, readyItem.url)}
+                  />
+                ) : null}
+              </CollectionMetaCard>
             ) : (
               items.length > 0 && (
                 <div className="flex flex-col gap-2">
@@ -311,6 +330,7 @@ export function NewDownloadView({
                         void loadCollection(item.key, item.url, item.password || undefined);
                       }}
                       onRemove={() => handleRemoveItem(item)}
+                      onHeadersChange={(headers) => setItemHeaders(item.key, headers)}
                     />
                   ))}
                 </div>
@@ -514,11 +534,13 @@ function CollectionMetaCard({
   totalFiles,
   totalBytes,
   onRemove,
+  children,
 }: {
   collection: Collection;
   totalFiles: number;
   totalBytes: number;
   onRemove: () => void;
+  children?: React.ReactNode;
 }) {
   return (
     <div className="flex min-w-0 items-start gap-2 overflow-hidden rounded-lg border bg-muted/30 p-3">
@@ -533,7 +555,9 @@ function CollectionMetaCard({
               ? collection.resource === "archive"
                 ? "Workupload Archive ID"
                 : "Workupload File ID"
-              : "Share ID"
+              : collection.provider === "direct"
+                ? "호스트"
+                : "Share ID"
           }
         >
           <span className="font-mono text-[11px]">{collection.shareId}</span>
@@ -546,6 +570,7 @@ function CollectionMetaCard({
         <MetaRow icon={<HardDriveIcon className="size-3" />} label="총 파일">
           {totalFiles}개 · {formatSize(totalBytes)}
         </MetaRow>
+        {children}
       </div>
       <Button type="button" variant="ghost" size="icon-xs" aria-label="제거" onClick={onRemove}>
         <XIcon />

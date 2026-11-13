@@ -1,3 +1,4 @@
+import { COLLECTION_EXPIRES_NEVER } from "@shared/download-errors";
 import type { DirNode, DownloadTransferPayload } from "@shared/types";
 import { DOWNLOAD_TRANSFER_KIND, DOWNLOAD_TRANSFER_VERSION } from "@shared/types";
 import { describe, expect, it } from "vitest";
@@ -1288,5 +1289,114 @@ describe("DownloadRepository explicit resume", () => {
         expect(repo.getFile("failed")).toMatchObject({ status: "pending" });
         expect(repo.hasErroredChunk("failed")).toBe(false);
         expect(repo.getFile("complete")).toMatchObject({ status: "completed" });
+    });
+});
+
+describe("DownloadRepository direct URL persistence", () => {
+    function insertDirect(
+        repo: DownloadRepository,
+        options: { rangeSupported: boolean; size: number; segmentSize: number },
+    ) {
+        return repo.insertDownload({
+            loaded: {
+                provider: "direct",
+                rootId: "file-id",
+                passwordProtected: false,
+                requestHeaders: { referer: "https://example.com/", cookie: "a=b" },
+                fileMeta: {
+                    rangeSupported: options.rangeSupported,
+                    finalUrl: "https://cdn.example.com/file.bin",
+                    etag: '"v1"',
+                },
+                collection: {
+                    shareId: "example.com",
+                    name: "file.bin",
+                    expires: COLLECTION_EXPIRES_NEVER,
+                    segmentSize: options.segmentSize,
+                    passwordProtected: false,
+                    provider: "direct",
+                    tree: {
+                        type: "dir",
+                        id: "file-id",
+                        name: "",
+                        entries: [
+                            {
+                                kind: "file",
+                                node: {
+                                    type: "file",
+                                    id: "file-id",
+                                    name: "file.bin",
+                                    size: options.size,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            url: "https://example.com/file.bin",
+            requestHeaders: { referer: "https://example.com/", cookie: "a=b" },
+            savePath: "/tmp",
+            selectedPaths: ["file.bin"],
+            asciiFilenames: false,
+        });
+    }
+
+    it("stores request headers and splits Range-capable files into segment chunks", async () => {
+        const { repo } = await createRepository();
+        const collectionId = insertDirect(repo, { rangeSupported: true, size: 10, segmentSize: 4 });
+
+        expect(JSON.parse(repo.getCollection(collectionId)!.requestHeadersJson!)).toEqual({
+            referer: "https://example.com/",
+            cookie: "a=b",
+        });
+        const file = repo.listFiles(collectionId)[0]!;
+        expect(JSON.parse(file.sourceMetaJson!)).toEqual({
+            rangeSupported: true,
+            finalUrl: "https://cdn.example.com/file.bin",
+            etag: '"v1"',
+        });
+        expect(repo.listChunks(file.id).map((chunk) => [chunk.offset, chunk.size])).toEqual([
+            [0, 4],
+            [4, 4],
+            [8, 2],
+        ]);
+        repo.markFileStatus(file.id, "downloading");
+        repo.markCollectionStatus(collectionId, "downloading");
+        const item = repo.getItem(collectionId)!;
+        expect(item.collection).not.toHaveProperty("requestHeadersJson");
+        expect(item.transferControl).toBe("pause");
+    });
+
+    it("uses one chunk and stop control when Range is unsupported", async () => {
+        const { repo } = await createRepository();
+        const collectionId = insertDirect(repo, {
+            rangeSupported: false,
+            size: 10,
+            segmentSize: 10,
+        });
+        const file = repo.listFiles(collectionId)[0]!;
+        expect(repo.listChunks(file.id)).toMatchObject([{ chunkIndex: 0, offset: 0, size: 10 }]);
+        repo.markFileStatus(file.id, "downloading");
+        repo.markCollectionStatus(collectionId, "downloading");
+        expect(repo.getItem(collectionId)?.transferControl).toBe("stop");
+    });
+
+    it("applies a changed remote size to the file, tree and chunk layout", async () => {
+        const { repo } = await createRepository();
+        const collectionId = insertDirect(repo, { rangeSupported: true, size: 10, segmentSize: 4 });
+        const file = repo.listFiles(collectionId)[0]!;
+
+        repo.resetFileProgress(file.id);
+        repo.updateDirectRemote(file.id, {
+            size: 6,
+            segmentSize: 6,
+            sourceMetaJson: JSON.stringify({ rangeSupported: false }),
+        });
+
+        const collection = repo.getCollection(collectionId)!;
+        expect(collection.segmentSize).toBe(6);
+        expect(JSON.parse(collection.treeJson).entries[0].node.size).toBe(6);
+        expect(repo.getFile(file.id)!.size).toBe(6);
+        expect(repo.listChunks(file.id)).toMatchObject([{ offset: 0, size: 6 }]);
     });
 });

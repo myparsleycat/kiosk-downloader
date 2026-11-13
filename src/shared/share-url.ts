@@ -20,6 +20,8 @@ export const WORKUPLOAD_FILE_PATH_PREFIX = "/file/";
 export const WORKUPLOAD_START_PATH_PREFIX = "/start/";
 export const WORKUPLOAD_ARCHIVE_PATH_PREFIX = "/archive/";
 
+const SHARE_PROVIDER_HOSTS = [SHARE_HOST, TRANSFER_HOST, WORKUPLOAD_HOST];
+
 const UUID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 const UUID_DECODE_TABLE = new Map(UUID_ALPHABET.split("").map((char, index) => [char, index]));
 const TRANSFER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -204,7 +206,56 @@ export function tryParseDownloadUrl(url: string): ParsedDownloadUrl | null {
         return { provider: "workupload", ...workupload };
     }
 
+    const directUrl = tryParseDirectUrl(url);
+    if (directUrl) {
+        return { provider: "direct", id: directUrl };
+    }
+
     return null;
+}
+
+/**
+ * Any http(s) URL that is not a recognized share link. Share-provider hosts are
+ * rejected so a malformed share link fails instead of downloading the site's HTML.
+ */
+export function tryParseDirectUrl(url: string) {
+    const trimmed = url.trim();
+    // The URL parser silently drops tabs/newlines and encodes spaces, which would merge
+    // pasted text holding several links into one bogus URL.
+    if (/\s/.test(trimmed)) {
+        return null;
+    }
+    let parsed: URL;
+    try {
+        parsed = new URL(trimmed);
+    } catch {
+        return null;
+    }
+
+    if (
+        (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+        !parsed.hostname ||
+        parsed.username ||
+        parsed.password
+    ) {
+        return null;
+    }
+    const host = parsed.hostname.replace(/\.+$/, "");
+    if (
+        SHARE_PROVIDER_HOSTS.some(
+            (shareHost) => host === shareHost || host.endsWith(`.${shareHost}`),
+        )
+    ) {
+        return null;
+    }
+
+    parsed.hash = "";
+    return parsed.href;
+}
+
+/** Providers whose files lose progress on stop when the server lacks Range support. */
+export function usesRangeDependentControl(provider: DownloadProvider | undefined) {
+    return provider === "workupload" || provider === "direct";
 }
 
 export function buildTransferUrl(transferId: string): string {
@@ -272,16 +323,25 @@ export function isDownloadShareInput(value: string) {
     return Boolean(tryParseDownloadUrl(trimmed) || trimmed.startsWith(EXTENDED_SHARE_PREFIX));
 }
 
+/**
+ * Direct URLs are only loaded on an explicit commit (paste, Enter, bulk add);
+ * auto-loading them while typing would probe every partial URL.
+ */
+export function isAutoCommitShareInput(value: string) {
+    const trimmed = value.trim();
+    if (trimmed.startsWith(EXTENDED_SHARE_PREFIX)) {
+        return true;
+    }
+    const parsed = tryParseDownloadUrl(trimmed);
+    return parsed !== null && parsed.provider !== "direct";
+}
+
 export function parseBulkShareInputs(text: string) {
     const urls: string[] = [];
     const invalid: string[] = [];
     const seen = new Set<string>();
 
-    for (const raw of text.split(/[\n\r,]+/)) {
-        const token = raw.trim();
-        if (!token) {
-            continue;
-        }
+    for (const token of splitBulkTokens(text)) {
         const resolved = (tryDecodeShareUrlBase64(token) ?? token).trim();
         if (!isDownloadShareInput(resolved)) {
             invalid.push(token);
@@ -295,4 +355,46 @@ export function parseBulkShareInputs(text: string) {
     }
 
     return { urls, invalid };
+}
+
+// Commas separate links, but direct URLs may contain commas in their path or query
+// ("?ids=1,2" or "?ids=1,,2"). A comma piece glued to a preceding direct URL (no
+// whitespace after the comma) that does not look like a link of its own is treated as
+// part of that URL; anything link-like stays separate so a bad link is still reported.
+function splitBulkTokens(text: string) {
+    const tokens: string[] = [];
+    for (const line of text.split(/[\n\r]+/)) {
+        let previousIsDirect = false;
+        let pendingCommas = "";
+        for (const raw of line.split(",")) {
+            const token = raw.trim();
+            if (previousIsDirect && raw === raw.trimStart()) {
+                if (!token) {
+                    pendingCommas += ",";
+                    continue;
+                }
+                if (!looksLikeLink(token)) {
+                    tokens[tokens.length - 1] += `,${pendingCommas}${token}`;
+                    pendingCommas = "";
+                    continue;
+                }
+            }
+            pendingCommas = "";
+            if (!token) {
+                previousIsDirect = false;
+                continue;
+            }
+            tokens.push(token);
+            previousIsDirect = tryParseDownloadUrl(token)?.provider === "direct";
+        }
+    }
+    return tokens;
+}
+
+function looksLikeLink(token: string) {
+    return (
+        /^[a-z][a-z\d+.-]*:/i.test(token) ||
+        /^(?:[a-z\d-]+\.)+[a-z]{2,}\//i.test(token) ||
+        isDownloadShareInput(tryDecodeShareUrlBase64(token) ?? token)
+    );
 }

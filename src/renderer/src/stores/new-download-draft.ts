@@ -9,7 +9,7 @@ import {
     rewritePathSet,
     validateNodeName,
 } from "@shared/tree-rename";
-import type { DirNode, ListZipEntriesResult } from "@shared/types";
+import type { DirectRequestHeaders, DirNode, ListZipEntriesResult } from "@shared/types";
 import { setZipEntries } from "@shared/zip-tree";
 import { create } from "zustand";
 
@@ -24,6 +24,8 @@ export type NewDownloadItem = {
     key: string;
     url: string;
     password: string;
+    /** Only sent for direct URLs. */
+    headers: DirectRequestHeaders;
     preparation: DownloadPreparationState;
     selected: Set<string>;
     zipPasswords: Record<string, string>;
@@ -78,6 +80,7 @@ export function createDownloadDraftItem(url: string): NewDownloadItem {
         key: crypto.randomUUID(),
         url,
         password: "",
+        headers: {},
         preparation: { status: "preparing" },
         selected: new Set(),
         zipPasswords: {},
@@ -123,6 +126,8 @@ function updateItem(
 
 type NewDownloadDraftState = {
     url: string;
+    /** Direct URLs only load once explicitly committed (paste or Enter), never while typing. */
+    commitRequestedUrl: string | null;
     items: NewDownloadItem[];
     savePath: string;
     createCollectionSubfolder: boolean;
@@ -131,12 +136,13 @@ type NewDownloadDraftState = {
 };
 
 type NewDownloadDraftActions = {
-    setUrl: (url: string) => void;
+    setUrl: (url: string, options?: { commit?: boolean }) => void;
     setSavePath: (savePath: string) => void;
     setCreateCollectionSubfolder: (createCollectionSubfolder: boolean) => void;
     setAsciiFilenames: (asciiFilenames: boolean) => void;
     replaceItems: (urls: string[]) => void;
     setItemPassword: (key: string, password: string) => void;
+    setItemHeaders: (key: string, headers: DirectRequestHeaders) => void;
     setItemPreparation: (key: string, preparation: DownloadPreparationState) => void;
     setItemSelected: (key: string, selected: Set<string>) => void;
     updateItemSelected: (key: string, updater: (selected: Set<string>) => Set<string>) => void;
@@ -157,6 +163,7 @@ type NewDownloadDraftStore = NewDownloadDraftState & NewDownloadDraftActions;
 
 const draftDefaults = {
     url: "",
+    commitRequestedUrl: null,
     items: [],
     savePath: "",
     createCollectionSubfolder: true,
@@ -167,7 +174,7 @@ const draftDefaults = {
 export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => ({
     ...draftDefaults,
 
-    setUrl: (url) => set({ url }),
+    setUrl: (url, options) => set({ url, commitRequestedUrl: options?.commit ? url.trim() : null }),
 
     setSavePath: (savePath) => set({ savePath }),
 
@@ -178,11 +185,15 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
     replaceItems: (urls) =>
         set({
             url: urls.length === 1 ? urls[0] : "",
+            commitRequestedUrl: null,
             items: urls.map((itemUrl) => createDownloadDraftItem(itemUrl)),
         }),
 
     setItemPassword: (key, password) =>
         set({ items: updateItem(get().items, key, (item) => ({ ...item, password })) }),
+
+    setItemHeaders: (key, headers) =>
+        set({ items: updateItem(get().items, key, (item) => ({ ...item, headers })) }),
 
     setItemPreparation: (key, preparation) =>
         set({
@@ -286,6 +297,7 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
     resetDraft: () =>
         set({
             url: "",
+            commitRequestedUrl: null,
             items: [],
             settingsHydrated: false,
         }),

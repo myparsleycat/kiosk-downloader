@@ -62,6 +62,8 @@ type CollectionState = {
 };
 
 const KIOSK_UPLOAD_HARD_CAP = 8;
+// Many plain HTTP servers throttle or reject more than a handful of parallel ranges per client.
+const DIRECT_DOWNLOAD_CONNECTIONS_PER_COLLECTION = 8;
 const TRANSFER_SUCCESSES_PER_INCREASE = 2;
 const TRANSFER_RATE_LIMIT_DELAYS_MS = [2000, 5000, 10000] as const;
 
@@ -199,7 +201,10 @@ export class TransferScheduler {
             lastGranted: -1,
             inFlight: 0,
             pending: [],
-            transferTarget: 1,
+            transferTarget:
+                context.providerId === "direct-download"
+                    ? DIRECT_DOWNLOAD_CONNECTIONS_PER_COLLECTION
+                    : 1,
             transferSuccesses: 0,
             consecutiveRateLimits: 0,
             cooldownUntil: 0,
@@ -267,11 +272,23 @@ export class TransferScheduler {
         ) {
             return false;
         }
+        if (
+            collection.providerId === "direct-download" &&
+            collection.inFlight >=
+                Math.min(collection.transferTarget, DIRECT_DOWNLOAD_CONNECTIONS_PER_COLLECTION)
+        ) {
+            return false;
+        }
         return true;
     }
 
+    // Only providers that report rate limits keep an adaptive target; a success ends the
+    // current rate-limit streak so isolated throttling never becomes terminal.
     private registerSuccess(context: TransferRequestContext) {
-        if (context.providerId !== "transfer-it-download") {
+        if (
+            context.providerId !== "transfer-it-download" &&
+            context.providerId !== "direct-download"
+        ) {
             return;
         }
         const collection = this.collections.get(collectionKey(context));

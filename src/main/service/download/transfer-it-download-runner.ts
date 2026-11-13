@@ -1,13 +1,23 @@
 import fse from "fs-extra";
 
+import type { KioskDownloader } from "../..";
 import type { DownloadRepository } from "./repository";
-import type { TransferItApiClient } from "./transfer-it-api-client";
 import type { DownloadChunkRow, DownloadCollectionRow, DownloadFileRow } from "./types";
 
+import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
+import { TransferRateLimitError } from "../transfer-request-pool";
 import { PartFileWriter } from "./part-file";
-import { parseTransferNodeKey, type TransferChunkPool } from "./transfer-chunk-pool";
+import {
+    type ChunkRangeSource,
+    parseTransferNodeKey,
+    readRangeBody,
+    type TransferChunkPool,
+} from "./transfer-chunk-pool";
+import { parseTransferRetryAfterMs, type TransferItApiClient } from "./transfer-it-api-client";
+import { decryptTransferChunk } from "./transfer-it-crypto";
 
 type TransferItDownloadRunnerDeps = {
+    kd: KioskDownloader;
     api: TransferItApiClient;
     repository: DownloadRepository;
     transferPool: TransferChunkPool;
@@ -78,8 +88,14 @@ export class TransferItDownloadRunner {
             const outcome = await this.deps.transferPool.register({
                 collection,
                 file,
-                nodeKey: parseTransferNodeKey(file.sourceMetaJson),
-                authPw: this.getAuth(collection),
+                source: createTransferRangeSource({
+                    kd: this.deps.kd,
+                    api: this.deps.api,
+                    collection,
+                    file,
+                    nodeKey: parseTransferNodeKey(file.sourceMetaJson),
+                    authPw: this.getAuth(collection),
+                }),
                 partWriter,
                 controller: input.controller,
                 maxChunkRetries: input.maxChunkRetries,
@@ -120,6 +136,152 @@ export class TransferItDownloadRunner {
         this.collectionAuth.set(collection.id, authPw);
         return authPw;
     }
+}
+
+class TransferCdnUrlExpiredError extends Error {
+    public constructor(message: string) {
+        super(message);
+        this.name = "TransferCdnUrlExpiredError";
+    }
+}
+
+export function createTransferRangeSource(input: {
+    kd: KioskDownloader;
+    api: Pick<TransferItApiClient, "getDownloadUrl">;
+    collection: DownloadCollectionRow;
+    file: DownloadFileRow;
+    nodeKey: Buffer;
+    authPw?: string;
+}): ChunkRangeSource {
+    const kd = input.kd;
+    const requestContext = (signal: AbortSignal) => ({
+        collectionId: input.collection.id,
+        direction: "download" as const,
+        providerId: "transfer-it-download" as const,
+        signal,
+    });
+    let cdnUrl: string | null = null;
+
+    const ensureCdnUrl = async (signal: AbortSignal) => {
+        if (cdnUrl) {
+            return cdnUrl;
+        }
+        if (signal.aborted) {
+            throw new DOMException("The operation was aborted.", "AbortError");
+        }
+        let result: Awaited<ReturnType<TransferItApiClient["getDownloadUrl"]>>;
+        try {
+            result = await input.api.getDownloadUrl(
+                input.collection.shareId,
+                input.file.remoteId,
+                input.authPw,
+                signal,
+            );
+        } catch (error) {
+            if (error instanceof TransferRateLimitError) {
+                kd.service.transfer.requestPool.reportRateLimit(requestContext(signal), error);
+            }
+            throw error;
+        }
+        signal.throwIfAborted();
+        cdnUrl = result.url;
+        return result.url;
+    };
+
+    return {
+        provider: "transfer",
+        providerId: "transfer-it-download",
+        cohortKey: "transfer-cdn",
+        invalidate: () => {
+            cdnUrl = null;
+        },
+        async *openRange(chunk, alreadyWritten, signal, onTransferProgress, onPhaseChange) {
+            onPhaseChange("control-wait");
+            let url = await ensureCdnUrl(signal);
+            const requestStart = chunk.offset + alreadyWritten;
+            const range = `bytes=${requestStart}-${chunk.offset + chunk.size - 1}`;
+
+            for (let requestAttempt = 0; requestAttempt < 2; requestAttempt += 1) {
+                try {
+                    onPhaseChange("request-wait");
+                    yield* kd.service.transfer.requestPool.runPayloadStream(
+                        requestContext(signal),
+                        async function* () {
+                            onPhaseChange("network");
+                            const response = await kd.http.payloadRequest(url, {
+                                method: "GET",
+                                headers: { Range: range },
+                                signal,
+                                timeout: false,
+                            });
+                            if (response.status === 403 || response.status === 404) {
+                                throw new TransferCdnUrlExpiredError(
+                                    formatHttpError(
+                                        "Transfer CDN",
+                                        await snapshotFailedResponse(response, { signal }),
+                                    ),
+                                );
+                            }
+                            if (response.status === 509) {
+                                const retryAfterMs = parseTransferRetryAfterMs(
+                                    response.headers.get("retry-after"),
+                                );
+                                await response.body?.cancel().catch(() => undefined);
+                                throw new TransferRateLimitError(retryAfterMs);
+                            }
+                            if (response.status !== 206 && response.status !== 200) {
+                                throw new Error(
+                                    formatHttpError(
+                                        "Transfer CDN",
+                                        await snapshotFailedResponse(response, { signal }),
+                                    ),
+                                );
+                            }
+                            const contentRange = response.headers.get("content-range");
+                            if (
+                                response.status === 206 &&
+                                !contentRange?.startsWith(`bytes ${requestStart}-`)
+                            ) {
+                                await response.body?.cancel().catch(() => undefined);
+                                throw new Error(
+                                    `Transfer CDN returned invalid Content-Range for ${range}.`,
+                                );
+                            }
+
+                            let position = requestStart;
+                            for await (const encrypted of readRangeBody(response, {
+                                requestStart,
+                                skip: response.status === 200 ? requestStart : 0,
+                                expected: chunk.size - alreadyWritten,
+                                label: "Transfer CDN",
+                                signal,
+                                takeBandwidth: (bytes, takeSignal) =>
+                                    kd.service.transfer.downloadBandwidth.take(bytes, takeSignal),
+                                onTransferProgress,
+                                onPhaseChange,
+                            })) {
+                                const plain = decryptTransferChunk(
+                                    input.nodeKey,
+                                    position,
+                                    Buffer.from(encrypted),
+                                );
+                                position += encrypted.length;
+                                yield plain;
+                            }
+                        },
+                    );
+                    return;
+                } catch (error) {
+                    if (!(error instanceof TransferCdnUrlExpiredError) || requestAttempt > 0) {
+                        throw error;
+                    }
+                    cdnUrl = null;
+                    onPhaseChange("control-wait");
+                    url = await ensureCdnUrl(signal);
+                }
+            }
+        },
+    };
 }
 
 function isActiveFileDownloadStatus(status: DownloadFileRow["status"] | undefined) {

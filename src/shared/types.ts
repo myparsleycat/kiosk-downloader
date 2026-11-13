@@ -67,7 +67,13 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
-export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload";
+export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload" | "direct";
+
+export interface DirectRequestHeaders {
+    referer?: string;
+    cookie?: string;
+    userAgent?: string;
+}
 
 export type TransferControl = "pause" | "stop";
 
@@ -251,6 +257,8 @@ export interface PrepareDownloadPayload {
     password?: string;
     asciiFilenames?: boolean;
     correlationId?: string;
+    /** Only used by direct URLs. */
+    headers?: DirectRequestHeaders;
 }
 
 export type LoadCollectionPayload = Omit<PrepareDownloadPayload, "correlationId">;
@@ -271,6 +279,8 @@ export interface CreateDownloadPayload {
     zipPasswords?: Record<string, string>;
     /** original relative node path → new basename (applied after collection load) */
     renames?: Record<string, string>;
+    /** Direct URLs only: headers edited after preparation replace the prepared ones. */
+    headers?: DirectRequestHeaders;
 }
 
 export interface ListZipEntriesPayload {

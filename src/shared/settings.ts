@@ -54,7 +54,8 @@ export type TransferProviderRequestId =
     | "kiosk-upload"
     | "kiosk-download"
     | "workupload-download"
-    | "transfer-it-download";
+    | "transfer-it-download"
+    | "direct-download";
 
 export const STREAM_WRITE_BATCH_BYTES_OPTIONS = [
     256 * 1024,

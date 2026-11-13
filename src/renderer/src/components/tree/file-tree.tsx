@@ -29,6 +29,7 @@ import type {
 import { getSelectionCheckState, dirTotalSize } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { useDownloadTreeExpanded } from "@renderer/stores/download-tree-expanded";
+import { usesRangeDependentControl } from "@shared/share-url";
 import { formatSize, formatSpeed } from "@shared/utils";
 import {
   ArchiveIcon,
@@ -257,7 +258,9 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
     status === "error"
       ? [{ path: selectionKey, message: prog?.error ?? "오류 정보가 없습니다." }]
       : [];
-  const transferControl = provider === "workupload" ? prog?.transferControl : ("pause" as const);
+  const transferControl = usesRangeDependentControl(provider)
+    ? prog?.transferControl
+    : ("pause" as const);
 
   return (
     <TreeRow
@@ -290,7 +293,7 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
             }
             pct={pct}
             transferControl={transferControl}
-            workupload={provider === "workupload"}
+            rangeDependent={usesRangeDependentControl(provider)}
             onClick={errors.length > 0 ? () => onError?.(errors) : undefined}
           />
         </div>,
@@ -849,13 +852,13 @@ function StatusPill({
   pct,
   onClick,
   transferControl,
-  workupload,
+  rangeDependent,
 }: {
   status: string;
   pct: number;
   onClick?: () => void;
   transferControl?: "pause" | "stop";
-  workupload?: boolean;
+  rangeDependent?: boolean;
 }) {
   const label =
     status === "completed_elsewhere"
@@ -867,7 +870,7 @@ function StatusPill({
           : status === "downloading"
             ? `${pct.toFixed(0)}%`
             : status === "paused"
-              ? transferControl === "stop" || (workupload && !transferControl)
+              ? transferControl === "stop" || (rangeDependent && !transferControl)
                 ? "정지"
                 : "일시정지"
               : status === "error"

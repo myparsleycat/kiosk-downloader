@@ -1,6 +1,7 @@
 import type {
     ChunkDownloadStatus,
     Collection,
+    DirectRequestHeaders,
     DownloadProvider,
     DownloadStatus,
     FileDownloadStatus,
@@ -32,10 +33,20 @@ export type LoadedWorkuploadCollection = {
     fileMetaByRemoteId: Map<string, WorkuploadFileSourceMeta>;
 };
 
+export type LoadedDirectCollection = {
+    provider: "direct";
+    collection: Collection;
+    rootId: string;
+    passwordProtected: false;
+    requestHeaders?: DirectRequestHeaders;
+    fileMeta: DirectFileSourceMeta;
+};
+
 export type LoadedCollection =
     | LoadedKioskCollection
     | LoadedTransferCollection
-    | LoadedWorkuploadCollection;
+    | LoadedWorkuploadCollection
+    | LoadedDirectCollection;
 
 export type SegmentDescriptor = {
     type: "cdn" | "edge";
@@ -73,6 +84,7 @@ export type DownloadCollectionRow = {
     provider: DownloadProvider;
     bundleId: string | null;
     ordinal: number;
+    requestHeadersJson: string | null;
 };
 
 export type DownloadBundleRow = {
@@ -127,6 +139,7 @@ export type CreateDownloadRecord = {
     loaded: LoadedCollection;
     url: string;
     password?: string;
+    requestHeaders?: DirectRequestHeaders;
     savePath: string;
     selectedPaths: string[];
     asciiFilenames: boolean;
@@ -180,6 +193,67 @@ export function parseWorkuploadFileSourceMeta(raw: string | null): WorkuploadFil
         sha256: meta.sha256.toLowerCase(),
         ...(meta.rangeSupported === undefined ? {} : { rangeSupported: meta.rangeSupported }),
     };
+}
+
+export type DirectFileSourceMeta = {
+    rangeSupported: boolean;
+    /** Last URL of the redirect chain; may be a short-lived signed URL. */
+    finalUrl?: string;
+    etag?: string;
+    lastModified?: string;
+};
+
+export function parseDirectFileSourceMeta(raw: string | null): DirectFileSourceMeta {
+    if (!raw) {
+        throw new Error("Missing direct file source metadata.");
+    }
+
+    let input: unknown;
+    try {
+        input = JSON.parse(raw);
+    } catch {
+        throw new Error("Invalid direct file source metadata.");
+    }
+
+    if (typeof input !== "object" || input === null || Array.isArray(input)) {
+        throw new Error("Invalid direct file source metadata.");
+    }
+    const meta = input as Record<string, unknown>;
+    const optionalStrings = ["finalUrl", "etag", "lastModified"] as const;
+    if (
+        typeof meta.rangeSupported !== "boolean" ||
+        optionalStrings.some((key) => meta[key] !== undefined && typeof meta[key] !== "string")
+    ) {
+        throw new Error("Invalid direct file source metadata.");
+    }
+
+    return {
+        rangeSupported: meta.rangeSupported,
+        ...(typeof meta.finalUrl === "string" ? { finalUrl: meta.finalUrl } : {}),
+        ...(typeof meta.etag === "string" ? { etag: meta.etag } : {}),
+        ...(typeof meta.lastModified === "string" ? { lastModified: meta.lastModified } : {}),
+    };
+}
+
+/**
+ * Range support of a single-stream-capable file, or undefined for providers whose
+ * files are always resumable. Unreadable metadata counts as not resumable.
+ */
+export function readRangeSupported(
+    provider: DownloadProvider | undefined,
+    sourceMetaJson: string | null,
+): boolean | undefined {
+    try {
+        if (provider === "workupload") {
+            return parseWorkuploadFileSourceMeta(sourceMetaJson).rangeSupported;
+        }
+        if (provider === "direct") {
+            return parseDirectFileSourceMeta(sourceMetaJson).rangeSupported;
+        }
+    } catch {
+        return provider === "direct" ? false : undefined;
+    }
+    return undefined;
 }
 
 export type ZipEntryStoredMeta = {

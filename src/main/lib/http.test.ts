@@ -557,4 +557,24 @@ describe("HTTP transports", () => {
 
         expect(seenRequest?.headers.get("content-length")).toBe("5");
     });
+
+    it("keeps a caller-provided User-Agent over the default", async () => {
+        let seenRequest: Request | undefined;
+        const customFetch = vi.fn((input: RequestInfo | URL) => {
+            seenRequest = input instanceof Request ? input : new Request(input);
+            return Promise.resolve(new Response("ok"));
+        });
+        const http = new HTTP({} as never);
+
+        await http.payloadRequest("https://example.com", {
+            headers: { "User-Agent": "custom/1.0" },
+            fetch: customFetch,
+        });
+        await http.payloadRequest("https://example.com", { fetch: customFetch });
+
+        expect(customFetch).toHaveBeenCalledTimes(2);
+        expect(seenRequest?.headers.get("user-agent")).toContain("Mozilla/5.0");
+        const first = customFetch.mock.calls[0]![0] as Request;
+        expect(first.headers.get("user-agent")).toBe("custom/1.0");
+    });
 });

@@ -153,7 +153,7 @@ function MainComponent() {
       e.preventDefault();
       const draft = useNewDownloadDraft.getState();
       if (shouldLoadPastedShare(draft.items, resolved)) {
-        draft.setUrl(resolved);
+        draft.setUrl(resolved, { commit: true });
       }
       setTab("new");
     };

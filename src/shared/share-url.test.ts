@@ -12,6 +12,8 @@ import {
     parseBulkShareInputs,
     tryExtractShareId,
     tryExtractTransferId,
+    isAutoCommitShareInput,
+    tryParseDirectUrl,
     tryParseDownloadUrl,
     tryParseShareUrl,
     tryParseTransferUrl,
@@ -187,8 +189,11 @@ describe("tryParseDownloadUrl", () => {
         });
     });
 
-    it("returns null for unknown URLs", () => {
-        expect(tryParseDownloadUrl("https://example.com/something")).toBeNull();
+    it("treats other http(s) URLs as direct downloads", () => {
+        expect(tryParseDownloadUrl("https://example.com/something")).toEqual({
+            provider: "direct",
+            id: "https://example.com/something",
+        });
         expect(tryParseDownloadUrl("garbage")).toBeNull();
     });
 });
@@ -311,6 +316,90 @@ describe("parseBulkShareInputs", () => {
         expect(parseBulkShareInputs(`${kiosk}, not-a-link, ${encoded}, garbage`)).toEqual({
             urls: [kiosk],
             invalid: ["not-a-link", "garbage"],
+        });
+    });
+});
+
+describe("tryParseDirectUrl", () => {
+    it("accepts http and https URLs and strips the fragment", () => {
+        expect(tryParseDirectUrl("http://example.com/a.zip")).toBe("http://example.com/a.zip");
+        expect(tryParseDirectUrl(" https://cdn.example.com/f.bin?sig=a,b#part ")).toBe(
+            "https://cdn.example.com/f.bin?sig=a,b",
+        );
+    });
+
+    it("rejects other schemes, credentials and share-provider hosts", () => {
+        expect(tryParseDirectUrl("ftp://example.com/a.zip")).toBeNull();
+        expect(tryParseDirectUrl("https://user:pw@example.com/a.zip")).toBeNull();
+        expect(tryParseDirectUrl("https://kio.ac/c/short")).toBeNull();
+        expect(tryParseDirectUrl("https://www.transfer.it/t/short")).toBeNull();
+        expect(tryParseDirectUrl("https://workupload.com/file/a?b=1")).toBeNull();
+    });
+
+    it("lets recognized share links win over the direct fallback", () => {
+        expect(tryParseDownloadUrl("https://transfer.it/t/abcd1234ef56")?.provider).toBe(
+            "transfer",
+        );
+    });
+
+    it("decodes a base64-encoded direct URL", () => {
+        const url = "https://example.com/file.zip";
+        expect(tryDecodeShareUrlBase64(Buffer.from(url).toString("base64"))).toBe(url);
+    });
+});
+
+describe("isAutoCommitShareInput", () => {
+    it("auto-commits share links but not direct URLs", () => {
+        expect(isAutoCommitShareInput("https://transfer.it/t/abcd1234ef56")).toBe(true);
+        expect(isAutoCommitShareInput(`${EXTENDED_SHARE_PREFIX}payload`)).toBe(true);
+        expect(isAutoCommitShareInput("https://example.com/file.zip")).toBe(false);
+        expect(isAutoCommitShareInput("https://exa")).toBe(false);
+    });
+});
+
+describe("parseBulkShareInputs with direct URLs", () => {
+    it("keeps commas inside a direct URL and still splits separate links", () => {
+        const direct = "https://example.com/get?ids=1,2,3";
+        const other = "https://example.com/other.zip";
+        expect(parseBulkShareInputs(`${direct}\n${direct}, ${other}`)).toEqual({
+            urls: [direct, other],
+            invalid: [],
+        });
+    });
+});
+
+describe("direct URL edge cases", () => {
+    it("rejects text that holds more than one link or any whitespace", () => {
+        expect(tryParseDirectUrl("https://a.example/x.zip\nhttps://b.example/y.zip")).toBeNull();
+        expect(tryParseDirectUrl("https://a.example/x.zip https://b.example/y.zip")).toBeNull();
+        expect(tryParseDirectUrl("https://a.example/x.zip\thttps://b.example/y.zip")).toBeNull();
+        expect(tryParseDirectUrl("  https://a.example/x.zip  ")).toBe("https://a.example/x.zip");
+    });
+
+    it("rejects share-provider subdomains and trailing-dot hosts", () => {
+        expect(tryParseDirectUrl("https://kio.ac./c/AAAAAAAAAAAAAAAAAAAAAA")).toBeNull();
+        expect(tryParseDirectUrl("https://m.kio.ac/c/short")).toBeNull();
+        expect(tryParseDirectUrl("https://en.workupload.com/file/abc")).toBeNull();
+        expect(tryParseDirectUrl("https://transfer.it./t/abcdefghijkl")).toBeNull();
+        expect(tryParseDirectUrl("https://notkio.ac/file.zip")).toBe("https://notkio.ac/file.zip");
+    });
+
+    it("keeps comma queries together but reports malformed links after a comma", () => {
+        expect(parseBulkShareInputs("https://example.com/a?ids=1,,2")).toEqual({
+            urls: ["https://example.com/a?ids=1,,2"],
+            invalid: [],
+        });
+        expect(parseBulkShareInputs("https://example.com/1.zip,https://kio.ac/c/short")).toEqual({
+            urls: ["https://example.com/1.zip"],
+            invalid: ["https://kio.ac/c/short"],
+        });
+        expect(parseBulkShareInputs("https://example.com/1.zip,htps://x/2.zip")).toEqual({
+            urls: ["https://example.com/1.zip"],
+            invalid: ["htps://x/2.zip"],
+        });
+        expect(parseBulkShareInputs("https://example.com/a.zip,")).toEqual({
+            urls: ["https://example.com/a.zip"],
+            invalid: [],
         });
     });
 });

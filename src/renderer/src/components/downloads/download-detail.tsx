@@ -16,6 +16,7 @@ import type { DownloadItem, SortDir, SortField } from "@renderer/lib/types";
 import { sortTree } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { isCollectionExpiresNever } from "@shared/download-errors";
+import { usesRangeDependentControl } from "@shared/share-url";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import {
   ArrowDownIcon,
@@ -78,8 +79,9 @@ export function DownloadDetail({
   const fileCount = summary.totalFiles;
   const completedCount = summary.completedFiles;
   const speedLabel = status === "downloading" ? formatSpeed(item.speedBps) : null;
-  const transferControl =
-    collection.provider === "workupload" ? item.transferControl : ("pause" as const);
+  const transferControl = usesRangeDependentControl(collection.provider)
+    ? item.transferControl
+    : ("pause" as const);
   const elapsedLabel =
     item.elapsedMs != null && item.elapsedMs > 0
       ? formatTime(item.elapsedMs / 1000, navigator.language)
@@ -121,7 +123,9 @@ export function DownloadDetail({
                   ? "Kiosk Downloader 확장 공유"
                   : collection.provider === "workupload"
                     ? `Workupload · ${collection.shareId}`
-                    : collection.shareId}
+                    : collection.provider === "direct"
+                      ? `직접 링크 · ${collection.shareId}`
+                      : collection.shareId}
               </span>
               <Separator orientation="vertical" className="h-3" />
               <span className="flex items-center gap-1">
@@ -197,24 +201,26 @@ export function DownloadDetail({
               <FolderOpenIcon className="size-3.5" />
               폴더
             </Button>
-            {status !== "completed" && collection.provider !== "extended" && (
-              <Button
-                variant="outline"
-                size="sm"
-                isLoading={pendingAction === "export"}
-                onClick={() =>
-                  runAction("export", async () => {
-                    const result = await window.api.invoke("download:exportCollection", item.id);
-                    if (result) {
-                      toast.success("컬렉션을 내보냈습니다");
-                    }
-                  })
-                }
-              >
-                <ShareIcon className="size-3.5" />
-                내보내기
-              </Button>
-            )}
+            {status !== "completed" &&
+              collection.provider !== "extended" &&
+              collection.provider !== "direct" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  isLoading={pendingAction === "export"}
+                  onClick={() =>
+                    runAction("export", async () => {
+                      const result = await window.api.invoke("download:exportCollection", item.id);
+                      if (result) {
+                        toast.success("컬렉션을 내보냈습니다");
+                      }
+                    })
+                  }
+                >
+                  <ShareIcon className="size-3.5" />
+                  내보내기
+                </Button>
+              )}
             <Button
               variant="ghost"
               size="icon-sm"
@@ -230,7 +236,7 @@ export function DownloadDetail({
         <div className="flex flex-col gap-1">
           <Progress value={pct}>
             <ProgressLabel>
-              {statusLabel(status, transferControl, collection.provider === "workupload")}
+              {statusLabel(status, transferControl, usesRangeDependentControl(collection.provider))}
             </ProgressLabel>
             <ProgressValue>{() => `${pct.toFixed(1)}%`}</ProgressValue>
           </Progress>
@@ -256,9 +262,9 @@ export function DownloadDetail({
               </span>
             </span>
           </div>
-          {collection.provider === "workupload" && transferControl === "stop" && (
+          {usesRangeDependentControl(collection.provider) && transferControl === "stop" && (
             <p className="text-xs text-muted-foreground">
-              이어받기를 지원하지 않는 파일은 정지하면 진행 내용이 삭제됩니다.
+              이어받기를 지원하지 않는 서버의 파일은 정지하면 진행 내용이 삭제됩니다.
             </p>
           )}
         </div>
@@ -330,7 +336,7 @@ export function DownloadDetail({
 function statusLabel(
   status: DownloadItem["status"],
   transferControl: DownloadItem["transferControl"],
-  workupload: boolean,
+  rangeDependent: boolean,
 ): string {
   switch (status) {
     case "downloading":
@@ -338,7 +344,9 @@ function statusLabel(
     case "inflating":
       return "해제 중";
     case "paused":
-      return transferControl === "stop" || (workupload && !transferControl) ? "정지" : "일시정지";
+      return transferControl === "stop" || (rangeDependent && !transferControl)
+        ? "정지"
+        : "일시정지";
     case "completed":
       return "완료";
     case "queued":

@@ -27,6 +27,16 @@ async function loadUndici() {
     return undiciModulePromise;
 }
 
+/** Strips credentials, query and hash, which may carry signatures or tokens. */
+export function toLogUrl(url: string) {
+    const logUrl = new URL(url);
+    logUrl.username = "";
+    logUrl.password = "";
+    logUrl.search = "";
+    logUrl.hash = "";
+    return logUrl.href;
+}
+
 function getDirectDispatcher(forceIpv4: boolean) {
     const key = forceIpv4 ? "direct:ipv4" : "direct:auto";
     const existing = dispatcherCache.get(key);
@@ -385,13 +395,8 @@ export class HTTP {
             options.timeout === false
                 ? undefined
                 : setTimeout(() => {
-                      const logUrl = new URL(url);
-                      logUrl.username = "";
-                      logUrl.password = "";
-                      logUrl.search = "";
-                      logUrl.hash = "";
                       controller.abort(
-                          new TimeoutError(new Request(logUrl, { method: options.method })),
+                          new TimeoutError(new Request(toLogUrl(url), { method: options.method })),
                       );
                   }, options.timeout ?? DEFAULT_TIMEOUT_MS);
         const cancelUnreadBody = () => {
@@ -436,7 +441,9 @@ export class HTTP {
     ) {
         const headers = new Headers(options.headers);
         for (const [key, value] of Object.entries(await this.getHeaders(url))) {
-            headers.set(key, value);
+            if (!headers.has(key)) {
+                headers.set(key, value);
+            }
         }
         const timeoutMs =
             options.timeout === false ? undefined : (options.timeout ?? DEFAULT_TIMEOUT_MS);
