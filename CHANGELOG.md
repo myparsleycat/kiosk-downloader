@@ -1,3 +1,24 @@
+## [1.13.3](https://github.com/myparsleycat/kiosk-downloader/compare/v1.13.2...v1.13.3) (2026-11-13)
+
+
+### Bug Fixes
+
+* address review findings in startup, logging, and transfer removal ([071fe26](https://github.com/myparsleycat/kiosk-downloader/commit/071fe268d1782e84bf62d9110d4149fbc176a918))
+* **download:** honor manual startup resume mode ([2ea33b2](https://github.com/myparsleycat/kiosk-downloader/commit/2ea33b2f4551bf2270835e902bb5fbc25e32c6e7))
+* **download:** limit orphan part cleanup and fail incomplete bundles ([c8a6a92](https://github.com/myparsleycat/kiosk-downloader/commit/c8a6a920a037d8ab51f8aa3d000bc3432cd8e5fe))
+* **download:** log failed collection actions ([ccecb53](https://github.com/myparsleycat/kiosk-downloader/commit/ccecb53e42670475c063ce24cec6e827a9443e02))
+* **download:** refresh segment credentials on CDN invalid_token responses ([7f83cca](https://github.com/myparsleycat/kiosk-downloader/commit/7f83cca09c60e7753d9d08b912a9c9130d9a4dd6))
+* **download:** settle zip.js entries and keep scheduler chain alive ([f7b1219](https://github.com/myparsleycat/kiosk-downloader/commit/f7b1219326dbcff9b35d9218691bf6d3e0c7f8b4))
+* **download:** wait for running files before removing collections ([fd9f334](https://github.com/myparsleycat/kiosk-downloader/commit/fd9f3346d240ef61c9207c4009f40f82fd03f6f3))
+* **log:** serialize errors and log startup failures ([543a79a](https://github.com/myparsleycat/kiosk-downloader/commit/543a79a37f5c4f96b7b92f1336ca40c898d15d08))
+* **package:** remove packageManager field ([998311e](https://github.com/myparsleycat/kiosk-downloader/commit/998311e62f1e08bf99ce544ce4f304d694d82529))
+* **security:** restrict IPC and navigation to the app renderer ([5663bdf](https://github.com/myparsleycat/kiosk-downloader/commit/5663bdff9f9afde79b8796c68b67f6b29ff889af))
+* **settings:** commit number inputs on blur and roll back failed saves ([645a64d](https://github.com/myparsleycat/kiosk-downloader/commit/645a64d1684915583e189c211c8a1fc4d478b547))
+* **ui:** keep new transfer drafts across tabs and apply setting changes ([4e00280](https://github.com/myparsleycat/kiosk-downloader/commit/4e00280447f5f60ae7a55a0a288020cb8f8881e8))
+* **ui:** show download error details and sync update dialog ([6fc11bb](https://github.com/myparsleycat/kiosk-downloader/commit/6fc11bb75dacc8a838fc116dc214d0d1c0904ade))
+* **upload:** cancel bundle initialization on pause and remove ([539fded](https://github.com/myparsleycat/kiosk-downloader/commit/539fded0177a3b465f6ad12044068bf6d7701b79))
+* **upload:** requeue stranded chunks and time stalls only during payload ([5bb105c](https://github.com/myparsleycat/kiosk-downloader/commit/5bb105c51f47177446f2e6005f9c33306d2e4827))
+
 ## [1.13.2](https://github.com/myparsleycat/kiosk-downloader/compare/v1.13.1...v1.13.2) (2026-11-01)
 
 
