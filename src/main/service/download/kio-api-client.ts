@@ -448,12 +448,25 @@ export function isSegmentTokenExpired(error: unknown) {
     if (error.status === 401) return true;
     if (error.status !== 403) return false;
     // CDN 403s are ambiguous (e.g. Cloudflare WAF blocks); only an explicitly
-    // expired credential justifies refetching the segment descriptors.
+    // expired credential justifies refetching the segment descriptors. The Kiosk CDN
+    // reports an expired segment token as `auth:invalid_token` without saying "expired".
+    if (readJsonErrorCode(error.snapshot)?.toLowerCase() === "auth:invalid_token") return true;
     const amzCode = error.snapshot.headers["x-amz-error-code"] ?? "";
     const amzMessage = error.snapshot.headers["x-amz-error-message"] ?? "";
     return [error.snapshot.bodyPreview, amzCode, amzMessage].some((text) =>
         text.toLowerCase().includes("expired"),
     );
+}
+
+function readJsonErrorCode(snapshot: HttpErrorSnapshot) {
+    if (snapshot.bodyKind !== "json") return undefined;
+    try {
+        const code = asRecord(JSON.parse(snapshot.bodyPreview))?.code;
+        return typeof code === "string" ? code : undefined;
+    } catch {
+        // The preview is truncated for large bodies, so unparseable JSON is expected here.
+        return undefined;
+    }
 }
 
 export async function* streamSegmentBytes(

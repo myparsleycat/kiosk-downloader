@@ -152,8 +152,8 @@ export class DownloadScheduler {
             api,
             repository: this.repository,
             metrics: this.metrics,
-            refreshSegments: (collection, file, signal) =>
-                this.kioskRunner.getFileSegments(collection, file, signal),
+            refreshSegments: (collection, file, staleSegments, signal) =>
+                this.kioskRunner.refreshFileSegments(collection, file, staleSegments, signal),
             onChunkSettled: () => {
                 this.requestSchedule();
             },
@@ -969,10 +969,11 @@ export class DownloadScheduler {
                 entryPath: meta.path,
                 zipPassword: meta.password,
                 signal,
-                refreshSegments: async (refreshSignal) => {
-                    const freshSegments = await this.kioskRunner.getFileSegments(
+                refreshSegments: async (staleSegments, refreshSignal) => {
+                    const freshSegments = await this.kioskRunner.refreshFileSegments(
                         collection,
                         file,
+                        staleSegments,
                         refreshSignal,
                     );
                     this.kd.logger.warn(

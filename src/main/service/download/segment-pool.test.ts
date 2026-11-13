@@ -193,6 +193,13 @@ function createRunningPool() {
     };
 }
 
+async function invalidTokenResponse() {
+    return new Response('{"code":"auth:invalid_token","message":"invalid token provided"}', {
+        status: 403,
+        headers: { "content-type": "application/json" },
+    });
+}
+
 async function flushMicrotasks() {
     for (let i = 0; i < 30; i += 1) await Promise.resolve();
 }
@@ -310,6 +317,7 @@ describe("GlobalSegmentPool recovery", () => {
             expect(refreshSegments).toHaveBeenCalledWith(
                 input.collection,
                 input.file,
+                input.segments,
                 input.controller.signal,
             );
             expect(payloadRequest).toHaveBeenCalledTimes(3);
@@ -322,6 +330,44 @@ describe("GlobalSegmentPool recovery", () => {
             );
         },
     );
+
+    it("retries with refreshed descriptors after a CDN auth:invalid_token 403", async () => {
+        const { pool, input, payloadRequest, refreshSegments } = createRunningPool();
+        payloadRequest.mockImplementationOnce(invalidTokenResponse);
+        pool.resize(1);
+
+        await expect(pool.register(input)).resolves.toBe("completed");
+
+        expect(refreshSegments).toHaveBeenCalledOnce();
+        expect(payloadRequest.mock.calls.map((call) => call[0])).toEqual([
+            "https://cdn.test/file",
+            "https://cdn.test/fresh",
+            "https://cdn.test/fresh",
+        ]);
+    });
+
+    it("does not refetch descriptors again when freshly refreshed ones are rejected", async () => {
+        vi.useFakeTimers();
+        const { pool, input, payloadRequest, refreshSegments } = createRunningPool();
+        input.maxChunkRetries = 1;
+        const sibling = Promise.withResolvers<Response>();
+        payloadRequest
+            .mockImplementation(invalidTokenResponse)
+            .mockImplementationOnce(invalidTokenResponse)
+            .mockImplementationOnce(() => sibling.promise)
+            .mockImplementationOnce(async () => {
+                // The sibling's stale-descriptor failure lands only after the refresh settled.
+                sibling.resolve(await invalidTokenResponse());
+                return await invalidTokenResponse();
+            });
+        pool.resize(2);
+
+        const outcome = pool.register(input);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await expect(outcome).resolves.toBe("failed");
+
+        expect(refreshSegments).toHaveBeenCalledOnce();
+    });
 
     it("retries the descriptor refresh after a transient refresh failure", async () => {
         vi.useFakeTimers();
