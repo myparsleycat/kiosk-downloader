@@ -35,7 +35,11 @@ if (IS_ELECTRON) {
     app?.commandLine.appendSwitch("disable-pinch");
 }
 
-const dbPath = !app.isPackaged ? DB_FILE_NAME : path.join(app.getPath("userData"), "data.db");
+// Protocol launches start with the browser's working directory, so the dev database is anchored to
+// the app directory instead of the current directory.
+const dbPath = app.isPackaged
+    ? path.join(app.getPath("userData"), "data.db")
+    : path.join(app.getAppPath(), DB_FILE_NAME);
 
 export class KioskDownloader {
     public readonly ipc: IPC;
@@ -197,6 +201,12 @@ export class KioskDownloader {
     }
 }
 
+// A second launch (a shortcut or a protocol link) only forwards its arguments to the running
+// instance, so it exits before KioskDownloader opens the database and starts its services.
+if (!app.requestSingleInstanceLock()) {
+    process.exit(0);
+}
+
 export const kd = new KioskDownloader();
 
 process.on("unhandledRejection", (reason) => {
@@ -204,13 +214,6 @@ process.on("unhandledRejection", (reason) => {
 });
 
 void app.whenReady().then(() => {
-    const gotTheLock = app.requestSingleInstanceLock();
-
-    if (!gotTheLock) {
-        app.quit();
-        return;
-    }
-
     app.on("second-instance", async (_event, _commandLine, _workingDirectory) => {
         try {
             let mainWindow = kd.window.main.window;
