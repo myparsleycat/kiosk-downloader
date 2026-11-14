@@ -20,6 +20,13 @@ export class DirectRemoteChangedError extends Error {
     }
 }
 
+export class DirectWebPageError extends Error {
+    public constructor() {
+        super("링크가 파일이 아닌 웹 페이지(HTML)를 가리켜 다운로드할 수 없습니다.");
+        this.name = "DirectWebPageError";
+    }
+}
+
 export type DirectProbe = {
     size: number;
     rangeSupported: boolean;
@@ -89,6 +96,11 @@ export class DirectHttpClient {
             throw new Error(
                 `서버가 압축된 응답(${encoding})을 보내 파일 크기를 확인할 수 없습니다.`,
             );
+        }
+
+        // A 416 body is the server's error page, not the resource.
+        if (response.status !== 416 && isWebPageResponse(response)) {
+            throw new DirectWebPageError();
         }
 
         const base = {
@@ -166,6 +178,18 @@ export class DirectHttpError extends Error {
         super(message);
         this.name = "DirectHttpError";
     }
+}
+
+export function isWebPageResponse(response: Response) {
+    const mediaType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
+        return false;
+    }
+    // Download scripts often keep PHP's default text/html type but still attach or name
+    // the file, so only an unnamed, non-attachment HTML response counts as a page.
+    return !/^\s*attachment\b|filename\*?\s*=/i.test(
+        response.headers.get("content-disposition") ?? "",
+    );
 }
 
 export function directSegmentSize(probe: Pick<DirectProbe, "size" | "rangeSupported">) {

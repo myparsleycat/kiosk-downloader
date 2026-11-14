@@ -12,10 +12,12 @@ import { TransferRateLimitError } from "../transfer-request-pool";
 import {
     DirectHttpError,
     DirectRemoteChangedError,
+    DirectWebPageError,
     directIfRangeValidator,
     directSegmentSize,
     hasDirectRemoteChanged,
     hasDirectValidatorChanged,
+    isWebPageResponse,
     parseContentRangeTotal,
     toDirectSourceMeta,
     type DirectHttpClient,
@@ -111,7 +113,7 @@ export class DirectDownloadRunner {
                 this.deps.api.probe(collection.sourceUrl, parseRequestHeaders(collection), signal),
             )
             .catch((error: unknown) => {
-                if (isAbortError(error) || signal.aborted) {
+                if (isAbortError(error) || signal.aborted || error instanceof DirectWebPageError) {
                     throw error;
                 }
                 this.deps.kd.logger.warn(
@@ -285,7 +287,8 @@ export class DirectDownloadRunner {
             providerId: "direct-download",
             cohortKey: `direct:${collection.shareId}`,
             remoteChanged: false,
-            isFatal: (error) => error instanceof DirectRemoteChangedError,
+            isFatal: (error) =>
+                error instanceof DirectRemoteChangedError || error instanceof DirectWebPageError,
             async *openRange(chunk, alreadyWritten, signal, onTransferProgress, onPhaseChange) {
                 const requestStart = chunk.offset + alreadyWritten;
                 const range = meta.rangeSupported
@@ -402,6 +405,9 @@ function assertSameRemote(
         ) {
             throw new DirectRemoteChangedError();
         }
+    }
+    if (isWebPageResponse(response)) {
+        throw new DirectWebPageError();
     }
     const current = {
         etag: response.headers.get("etag"),

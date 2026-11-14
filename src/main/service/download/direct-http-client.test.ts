@@ -60,7 +60,10 @@ describe("DirectHttpClient.probe", () => {
     it("accepts an empty file reported through 416", async () => {
         const payloadRequest = vi.fn(
             async () =>
-                new Response(null, { status: 416, headers: { "content-range": "bytes */0" } }),
+                new Response("<html>416</html>", {
+                    status: 416,
+                    headers: { "content-range": "bytes */0", "content-type": "text/html" },
+                }),
         );
         await expect(
             createClient(payloadRequest).probe("https://example.com/empty", undefined),
@@ -86,6 +89,36 @@ describe("DirectHttpClient.probe", () => {
         await expect(createClient(gzip).probe("https://example.com/a", undefined)).rejects.toThrow(
             "gzip",
         );
+    });
+
+    it("rejects web pages unless the server attaches or names the file", async () => {
+        const page = (headers: Record<string, string>) =>
+            vi.fn(
+                async () =>
+                    new Response("<html>", {
+                        status: 200,
+                        headers: {
+                            "content-type": "text/html; charset=utf-8",
+                            "content-length": "6",
+                            ...headers,
+                        },
+                    }),
+            );
+        await expect(
+            createClient(page({})).probe("https://example.com/d/abc", undefined),
+        ).rejects.toThrow("웹 페이지");
+        await expect(
+            createClient(page({ "content-disposition": 'attachment; filename="page.html"' })).probe(
+                "https://example.com/page.html",
+                undefined,
+            ),
+        ).resolves.toMatchObject({ size: 6 });
+        await expect(
+            createClient(page({ "content-disposition": 'inline; filename="a.zip"' })).probe(
+                "https://example.com/get.php",
+                undefined,
+            ),
+        ).resolves.toMatchObject({ size: 6 });
     });
 
     it("follows redirects and drops the cookie once the origin changes", async () => {
