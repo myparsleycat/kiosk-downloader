@@ -1,8 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TransferScheduler } from "../transfer-request-pool";
-import { TransferChunkPool, type TransferFileRegistration } from "./transfer-chunk-pool";
+import {
+    type ChunkRangeSource,
+    readRangeBody,
+    TransferChunkPool,
+    type TransferFileRegistration,
+} from "./transfer-chunk-pool";
 import { TRANSFER_RATE_LIMIT_ERROR } from "./transfer-it-api-client";
+import { createTransferRangeSource } from "./transfer-it-download-runner";
+
+// Set by the latest createHarness() so registration() builds a source bound to its mocks.
+let createSource: () => ChunkRangeSource;
 
 function createHarness(payloadRequest: ReturnType<typeof vi.fn>) {
     const requestPool = new TransferScheduler(8);
@@ -22,18 +31,26 @@ function createHarness(payloadRequest: ReturnType<typeof vi.fn>) {
             url: "https://cdn.test/file",
         }),
     );
-    const pool = new TransferChunkPool({
-        kd: {
-            http: { payloadRequest },
-            logger,
-            service: {
-                transfer: {
-                    downloadBandwidth: { take: vi.fn(async () => undefined) },
-                    requestPool,
-                },
+    const kd = {
+        http: { payloadRequest },
+        logger,
+        service: {
+            transfer: {
+                downloadBandwidth: { take: vi.fn(async () => undefined) },
+                requestPool,
             },
-        } as never,
-        api: { getDownloadUrl } as never,
+        },
+    };
+    createSource = () =>
+        createTransferRangeSource({
+            kd: kd as never,
+            api: { getDownloadUrl } as never,
+            collection: { id: "collection", shareId: "share" } as never,
+            file: { id: "file", remoteId: "remote" } as never,
+            nodeKey: Buffer.alloc(32),
+        });
+    const pool = new TransferChunkPool({
+        kd: kd as never,
         repository: repository as never,
         metrics: {
             registerFile: vi.fn(),
@@ -63,7 +80,7 @@ function registration(chunkCount = 1): TransferFileRegistration {
     return {
         collection: { id: "collection", shareId: "share" },
         file: { id: "file", remoteId: "remote", downloadedBytes: 0 },
-        nodeKey: Buffer.alloc(32),
+        source: createSource(),
         partWriter: {
             writeChunkFromStream: async (
                 _offset: number,
@@ -286,4 +303,42 @@ it("aborts a sibling CDN lookup when another chunk fails", async () => {
     await expect(pool.register(item)).resolves.toBe("failed");
     expect(getDownloadUrl).toHaveBeenCalledTimes(2);
     expect(item.controller.signal.aborted).toBe(true);
+});
+
+it("fails a chunk without retrying when the source reports a fatal error", async () => {
+    const { pool } = createHarness(vi.fn());
+    const fatal = new Error("remote changed");
+    let attempts = 0;
+    const item = registration();
+    item.source = {
+        provider: "direct",
+        providerId: "direct-download",
+        cohortKey: "direct:test",
+        isFatal: (error) => error === fatal,
+        // oxlint-disable-next-line require-yield
+        async *openRange() {
+            attempts += 1;
+            throw fatal;
+        },
+    };
+
+    const outcome = pool.register(item);
+    pool.start(1);
+    await expect(outcome).resolves.toBe("failed");
+    expect(attempts).toBe(1);
+});
+
+it("skips already-written bytes when a ranged request is answered with 200", async () => {
+    const chunks: Uint8Array[] = [];
+    for await (const bytes of readRangeBody(new Response("abcdefgh", { status: 200 }), {
+        requestStart: 3,
+        skip: 3,
+        expected: 4,
+        label: "test",
+        signal: new AbortController().signal,
+        takeBandwidth: async () => undefined,
+    })) {
+        chunks.push(bytes);
+    }
+    expect(Buffer.concat(chunks).toString()).toBe("defg");
 });

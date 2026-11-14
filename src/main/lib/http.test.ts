@@ -216,19 +216,31 @@ describe("HTTP transports", () => {
             electronMocks.resolveProxy.mockResolvedValue(result);
             const http = new HTTP({} as never);
 
-            await expect(http.payloadRequest("https://example.com")).rejects.toBeInstanceOf(
-                ProxyResolutionError,
-            );
+            const pending = http.payloadRequest("https://example.com/file?signature=secret#token");
+            await expect(pending).rejects.toBeInstanceOf(ProxyResolutionError);
+            await expect(pending).rejects.toMatchObject({
+                name: "ProxyResolutionError",
+                message: result
+                    ? `No supported proxy directive was resolved for https://example.com/file: ${result}`
+                    : "Failed to resolve a proxy for https://example.com/file",
+            });
         },
     );
 
     it("rejects payload requests when proxy resolution fails", async () => {
-        electronMocks.resolveProxy.mockRejectedValue(new Error("PAC failed"));
+        const cause = new Error("PAC failed");
+        electronMocks.resolveProxy.mockRejectedValue(cause);
         const http = new HTTP({} as never);
 
-        await expect(http.payloadRequest("https://example.com")).rejects.toBeInstanceOf(
-            ProxyResolutionError,
+        const pending = http.payloadRequest(
+            "https://user:password@example.com/file?signature=secret#token",
         );
+        await expect(pending).rejects.toBeInstanceOf(ProxyResolutionError);
+        await expect(pending).rejects.toMatchObject({
+            name: "ProxyResolutionError",
+            message: "Failed to resolve a proxy for https://example.com/file",
+            cause,
+        });
     });
 
     it("forwards RequestInit through plainUndiciFetch", async () => {
@@ -293,12 +305,17 @@ describe("HTTP transports", () => {
             }) as unknown as typeof fetch;
             const http = new HTTP({} as never);
 
-            const pending = expect(
-                http[method]("https://example.com", { timeout: 1_000, fetch: customFetch }),
-            ).rejects.toBeInstanceOf(TimeoutError);
+            const request = http[method]("https://example.com/file?signature=secret#token", {
+                timeout: 1_000,
+                fetch: customFetch,
+            });
+            const pending = expect(request).rejects.toBeInstanceOf(TimeoutError);
             await vi.advanceTimersByTimeAsync(1_000);
 
             await pending;
+            await expect(request).rejects.toMatchObject({
+                message: "Request timed out: GET https://example.com/file",
+            });
             expect(signal?.aborted).toBe(true);
         },
     );
@@ -556,5 +573,25 @@ describe("HTTP transports", () => {
         });
 
         expect(seenRequest?.headers.get("content-length")).toBe("5");
+    });
+
+    it("keeps a caller-provided User-Agent over the default", async () => {
+        let seenRequest: Request | undefined;
+        const customFetch = vi.fn((input: RequestInfo | URL) => {
+            seenRequest = input instanceof Request ? input : new Request(input);
+            return Promise.resolve(new Response("ok"));
+        });
+        const http = new HTTP({} as never);
+
+        await http.payloadRequest("https://example.com", {
+            headers: { "User-Agent": "custom/1.0" },
+            fetch: customFetch,
+        });
+        await http.payloadRequest("https://example.com", { fetch: customFetch });
+
+        expect(customFetch).toHaveBeenCalledTimes(2);
+        expect(seenRequest?.headers.get("user-agent")).toContain("Mozilla/5.0");
+        const first = customFetch.mock.calls[0]![0] as Request;
+        expect(first.headers.get("user-agent")).toBe("custom/1.0");
     });
 });

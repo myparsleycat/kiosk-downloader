@@ -1695,6 +1695,7 @@ function createCollection(id: string, index: number): DownloadCollectionRow {
         provider: "kiosk",
         bundleId: null,
         ordinal: index,
+        requestHeadersJson: null,
     };
 }
 

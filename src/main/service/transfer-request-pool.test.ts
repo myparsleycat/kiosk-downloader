@@ -313,6 +313,24 @@ describe("TransferScheduler", () => {
         }
     });
 
+    it("ends a direct-download rate-limit streak after a success", async () => {
+        vi.useFakeTimers();
+        const scheduler = new TransferScheduler(4);
+        const directContext = context("direct-download", "direct");
+
+        for (let episode = 0; episode < 3; episode += 1) {
+            const error = new TransferRateLimitError(undefined, "rate limited");
+            await expect(
+                scheduler.runPayload(directContext, async () => {
+                    throw error;
+                }),
+            ).rejects.toBe(error);
+            expect(error.state).toMatchObject({ consecutiveRateLimits: 1, terminal: false });
+            await vi.advanceTimersByTimeAsync(error.state?.cooldownMs ?? 0);
+            await scheduler.runPayload(directContext, async () => undefined);
+        }
+    });
+
     it("removes aborted waiters without consuming a permit", async () => {
         const scheduler = new TransferScheduler(4);
         const active = await reserve(scheduler, context("kiosk-download", "active"), 4);

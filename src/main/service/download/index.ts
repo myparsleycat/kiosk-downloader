@@ -23,6 +23,7 @@ import { applyRenamesToTree, toDisplayPath, validateNodeName } from "@shared/tre
 import {
     DOWNLOAD_PREPARE_CONCURRENCY,
     type Collection,
+    type DirectRequestHeaders,
     type CreateDownloadPayload,
     type DownloadItem,
     type DownloadProvider,
@@ -47,10 +48,12 @@ import type {
     DownloadCollectionRow,
     DownloadFileRow,
     LoadedCollection,
+    LoadedDirectCollection,
     LoadedKioskCollection,
     LoadedWorkuploadCollection,
 } from "./types";
 
+import { toLogUrl } from "../../lib/http";
 import { logCaughtError, withLoggedError } from "../../lib/logged-error";
 import {
     decodeExtendedShare,
@@ -64,10 +67,16 @@ import {
 import { toOsProgressTransfer } from "../os-progress-bar";
 import { showOpenDialog, showSaveDialog } from "../util";
 import { BundleReassemblyCoordinator } from "./bundle-reassembly-coordinator";
+import { DirectHttpClient } from "./direct-http-client";
 import { reassembleExtendedFile } from "./extended-reassembly";
 import { KioApiClient } from "./kio-api-client";
 import { DownloadTransferMetrics } from "./metrics";
-import { PartFileWriter, getBundleTempDirName, getStagingPartPath } from "./part-file";
+import {
+    PartFileWriter,
+    getBundleTempDirName,
+    getPartDigestPath,
+    getStagingPartPath,
+} from "./part-file";
 import { DownloadRepository } from "./repository";
 import { DownloadScheduler } from "./scheduler";
 import {
@@ -76,7 +85,7 @@ import {
     encodeDownloadTransfer,
 } from "./transfer-format";
 import { TransferItApiClient } from "./transfer-it-api-client";
-import { parseWorkuploadFileSourceMeta } from "./types";
+import { readRangeSupported } from "./types";
 import { WorkuploadApiClient } from "./workupload-api-client";
 import { uniquifyWorkuploadTree } from "./workupload-filenames";
 import { indexZipFromSegments } from "./zip-index";
@@ -99,6 +108,8 @@ type PreparedDownloadDraft = {
     loaded: LoadedCollection | LoadedExtendedCollection;
 };
 
+const MAX_DIRECT_HEADER_VALUE_LENGTH = 8 * 1024;
+
 type StoredExtendedManifest = {
     renames: Record<string, string>;
     selectedPaths?: string[];
@@ -120,6 +131,7 @@ export class DownloadService {
     private readonly api: KioApiClient;
     private readonly transferApi: TransferItApiClient;
     private readonly workuploadApi: WorkuploadApiClient;
+    private readonly directApi: DirectHttpClient;
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
@@ -136,6 +148,7 @@ export class DownloadService {
         this.api = new KioApiClient(kd);
         this.transferApi = new TransferItApiClient(kd);
         this.workuploadApi = new WorkuploadApiClient(kd);
+        this.directApi = new DirectHttpClient(kd);
         this.repository = new DownloadRepository(kd);
         this.scheduler = new DownloadScheduler(
             kd,
@@ -178,7 +191,7 @@ export class DownloadService {
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.startupResumeMode");
         this.repository.restoreStartupState(mode);
-        await this.resetNonResumableWorkuploadStartupState();
+        await this.resetNonResumableStartupState();
         this.repository.syncExpiredCollections();
         await this.emitUpdate();
         for (const bundle of this.repository.listBundles()) {
@@ -207,9 +220,10 @@ export class DownloadService {
         this.scheduler.requestSchedule();
     }
 
-    private async resetNonResumableWorkuploadStartupState() {
+    private async resetNonResumableStartupState() {
         for (const item of this.repository.listItems()) {
-            if (item.collection.provider !== "workupload") {
+            const provider = item.collection.provider;
+            if (provider !== "workupload" && provider !== "direct") {
                 continue;
             }
             const collection = this.repository.getCollection(item.id);
@@ -221,8 +235,7 @@ export class DownloadService {
                 .filter(
                     (file) =>
                         file.status !== "completed" &&
-                        tryParseWorkuploadFileSourceMeta(file.sourceMetaJson)?.rangeSupported !==
-                            true,
+                        readRangeSupported(provider, file.sourceMetaJson) !== true,
                 );
             if (files.length === 0) {
                 continue;
@@ -265,11 +278,88 @@ export class DownloadService {
         this.scheduler.destroy();
     }
 
+    // Direct links often resolve to the same name ("download", "get.php"). Pick a free
+    // name the way browsers do so downloads never share final or temporary files.
+    private async claimDirectTarget(
+        loaded: LoadedDirectCollection,
+        savePath: string,
+        asciiFilenames: boolean,
+        selectedPaths: string[],
+    ) {
+        const entry = loaded.collection.tree.entries[0];
+        if (entry?.kind !== "file") {
+            return { loaded, selectedPaths };
+        }
+        const toFinalPath = (name: string, ascii: boolean, base = savePath) =>
+            path.join(base, this.kd.lib.fs.getSafeRelativePath(name, { asciiFilenames: ascii }));
+        const getTargetPaths = (finalPath: string) => {
+            const partPath = `${finalPath}.part`;
+            const stagingPath = getStagingPartPath(partPath);
+            return [
+                finalPath,
+                partPath,
+                getPartDigestPath(partPath),
+                stagingPath,
+                getPartDigestPath(stagingPath),
+            ];
+        };
+        const occupied = new Set(
+            this.repository.listUnfinishedFileTargets().flatMap((target) => {
+                const finalPath = toFinalPath(
+                    target.path,
+                    target.asciiFilenames === 1,
+                    target.savePath,
+                ).toLowerCase();
+                return getTargetPaths(finalPath);
+            }),
+        );
+        const originalName = entry.node.name;
+        const extension = path.extname(originalName);
+        const stem = originalName.slice(0, originalName.length - extension.length);
+        for (let attempt = 0; ; attempt += 1) {
+            const name = attempt === 0 ? originalName : `${stem} (${attempt})${extension}`;
+            let collision = false;
+            for (const targetPath of getTargetPaths(toFinalPath(name, asciiFilenames))) {
+                if (occupied.has(targetPath.toLowerCase()) || (await pathExists(targetPath))) {
+                    collision = true;
+                    break;
+                }
+            }
+            if (collision) {
+                continue;
+            }
+            if (attempt === 0) {
+                return { loaded, selectedPaths };
+            }
+            return {
+                loaded: {
+                    ...loaded,
+                    collection: {
+                        ...loaded.collection,
+                        name,
+                        tree: {
+                            ...loaded.collection.tree,
+                            entries: [{ ...entry, node: { ...entry.node, name } }],
+                        },
+                    },
+                },
+                selectedPaths: selectedPaths.map((selected) =>
+                    selected === originalName ? name : selected,
+                ),
+            };
+        }
+    }
+
     public async prepare(payload: PrepareDownloadPayload): Promise<PrepareDownloadResult> {
         const sourceInput = payload.url.trim();
         const parsed = tryParseDownloadUrl(sourceInput);
         if (!parsed && !sourceInput.startsWith(EXTENDED_SHARE_PREFIX)) {
             return { status: "failed", code: "invalidUrl", message: "Invalid share URL." };
+        }
+        const directHeaders =
+            parsed?.provider === "direct" ? normalizeDirectRequestHeaders(payload.headers) : null;
+        if (directHeaders && "error" in directHeaders) {
+            return { status: "failed", code: "invalidUrl", message: directHeaders.error };
         }
 
         const epoch = this.prepareEpoch;
@@ -280,7 +370,13 @@ export class DownloadService {
 
         try {
             return await this.prepareLimit(() =>
-                this.prepareDraft(payload, sourceInput, epoch, controller, correlationId),
+                this.prepareDraft(
+                    { ...payload, headers: directHeaders?.headers },
+                    sourceInput,
+                    epoch,
+                    controller,
+                    correlationId,
+                ),
             );
         } finally {
             if (this.prepareControllers.get(correlationId) === controller) {
@@ -452,15 +548,30 @@ export class DownloadService {
                           }),
                       )
                     : basePath;
+                const target =
+                    enriched.provider === "direct"
+                        ? await this.claimDirectTarget(
+                              enriched,
+                              savePath,
+                              asciiFilenames,
+                              payload.selectedPaths,
+                          )
+                        : { loaded: enriched, selectedPaths: payload.selectedPaths };
                 const collectionId = this.repository.insertDownload({
-                    loaded: enriched,
+                    loaded: target.loaded,
                     url:
                         enriched.provider === "workupload"
                             ? buildWorkuploadUrl(enriched.collection.shareId, enriched.resource)
-                            : draft.sourceInput,
+                            : enriched.provider === "direct"
+                              ? (tryParseDownloadUrl(draft.sourceInput)?.id ?? draft.sourceInput)
+                              : draft.sourceInput,
                     password: enriched.passwordProtected ? draft.password : undefined,
+                    requestHeaders:
+                        enriched.provider === "direct"
+                            ? resolveCreateRequestHeaders(payload.headers, enriched.requestHeaders)
+                            : undefined,
                     savePath,
-                    selectedPaths: payload.selectedPaths,
+                    selectedPaths: target.selectedPaths,
                     asciiFilenames,
                     zipPasswords: payload.zipPasswords,
                     startPaused,
@@ -526,7 +637,12 @@ export class DownloadService {
         }
 
         const attempt = async (password?: string) => {
-            const loadPayload = { url: sourceInput, password, signal: controller.signal };
+            const loadPayload = {
+                url: sourceInput,
+                password,
+                headers: payload.headers,
+                signal: controller.signal,
+            };
             const loaded = sourceInput.startsWith(EXTENDED_SHARE_PREFIX)
                 ? await this.loadExtendedCollection(loadPayload)
                 : await this.loadCollectionUnlocked(loadPayload, asciiFilenames);
@@ -618,10 +734,16 @@ export class DownloadService {
                     message: "Preparation superseded.",
                 };
             }
+            const direct = tryParseDownloadUrl(sourceInput)?.provider === "direct";
             logCaughtError(
                 this.kd.logger,
                 "DownloadService:prepare",
-                { channel: "download:prepare", stage: "load", url: sourceInput },
+                {
+                    channel: "download:prepare",
+                    stage: "load",
+                    url: direct ? toLogUrl(sourceInput) : sourceInput,
+                    ...(direct ? { requestHeaderNames: Object.keys(payload.headers ?? {}) } : {}),
+                },
                 error,
             );
             return {
@@ -636,6 +758,7 @@ export class DownloadService {
         payload: {
             url: string;
             password?: string;
+            headers?: DirectRequestHeaders;
             signal?: AbortSignal;
         },
         asciiFilenames: boolean,
@@ -643,6 +766,12 @@ export class DownloadService {
         const parsed = tryParseDownloadUrl(payload.url);
         if (!parsed) {
             throw new Error("Invalid share URL.");
+        }
+        if (parsed.provider === "direct") {
+            return this.directApi.loadCollection(
+                { url: parsed.id, headers: payload.headers, signal: payload.signal },
+                asciiFilenames,
+            );
         }
         if (parsed.provider === "transfer") {
             return this.transferApi.loadCollection(payload);
@@ -1220,6 +1349,9 @@ export class DownloadService {
         const collection = this.repository.getCollection(collectionId);
         if (!collection) {
             throw new Error("Download item not found.");
+        }
+        if (collection.provider === "direct") {
+            throw new Error("Export is not supported for direct URL downloads.");
         }
 
         const payload = await withLoggedError(
@@ -1910,15 +2042,80 @@ function requestPoolProviderId(provider: DownloadProvider | undefined) {
     if (provider === "workupload") {
         return "workupload-download" satisfies TransferProviderRequestId;
     }
+    if (provider === "direct") {
+        return "direct-download" satisfies TransferProviderRequestId;
+    }
     return "kiosk-download" satisfies TransferProviderRequestId;
 }
 
-function tryParseWorkuploadFileSourceMeta(raw: string | null) {
+const DIRECT_HEADER_LABELS = {
+    referer: "Referer",
+    cookie: "Cookie",
+    userAgent: "User-Agent",
+} as const satisfies Record<keyof DirectRequestHeaders, string>;
+
+/**
+ * Validates and trims renderer-supplied headers. HTTP header values must be ASCII bytes,
+ * so a Referer is normalized through URL parsing (which percent-encodes Hangul) and any
+ * other non-ASCII or control character is rejected up front.
+ */
+function normalizeDirectRequestHeaders(
+    headers: DirectRequestHeaders | undefined,
+): { headers: DirectRequestHeaders | undefined } | { error: string } {
+    const normalized: DirectRequestHeaders = {};
+    for (const [key, label] of Object.entries(DIRECT_HEADER_LABELS) as [
+        keyof DirectRequestHeaders,
+        string,
+    ][]) {
+        const raw: unknown = headers?.[key];
+        if (raw === undefined || raw === null) {
+            continue;
+        }
+        if (typeof raw !== "string") {
+            return { error: `요청 헤더 ${label} 값이 올바르지 않습니다.` };
+        }
+        const trimmed = raw.trim();
+        if (!trimmed) {
+            continue;
+        }
+        if (trimmed.length > MAX_DIRECT_HEADER_VALUE_LENGTH) {
+            return { error: `요청 헤더 ${label} 값이 너무 깁니다.` };
+        }
+        const value = key === "referer" ? normalizeReferer(trimmed) : trimmed;
+        if (value === null) {
+            return { error: "Referer는 http(s) 주소여야 합니다." };
+        }
+        if (/[^\t\x20-\x7e]/.test(value)) {
+            return {
+                error: `요청 헤더 ${label}에는 줄바꿈이나 한글 같은 비ASCII 문자를 넣을 수 없습니다.`,
+            };
+        }
+        normalized[key] = value;
+    }
+    return { headers: Object.keys(normalized).length > 0 ? normalized : undefined };
+}
+
+function normalizeReferer(value: string) {
     try {
-        return parseWorkuploadFileSourceMeta(raw);
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
     } catch {
         return null;
     }
+}
+
+function resolveCreateRequestHeaders(
+    edited: DirectRequestHeaders | undefined,
+    prepared: DirectRequestHeaders | undefined,
+) {
+    if (edited === undefined) {
+        return prepared;
+    }
+    const normalized = normalizeDirectRequestHeaders(edited);
+    if ("error" in normalized) {
+        throw new Error(normalized.error);
+    }
+    return normalized.headers;
 }
 
 function validateDraftTreeMutation(

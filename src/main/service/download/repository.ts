@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { StartupResumeMode } from "@shared/settings";
+import { usesRangeDependentControl } from "@shared/share-url";
 import type {
     Collection,
     DirNode,
@@ -30,7 +31,7 @@ import type {
 } from "./types";
 
 import { transferChunkLayoutMatches, transferChunkSizes } from "./transfer-it-crypto";
-import { parseWorkuploadFileSourceMeta } from "./types";
+import { parseWorkuploadFileSourceMeta, readRangeSupported } from "./types";
 import { buildZipEntrySegmentChunks, supportsZipEntryPoolDownload } from "./zip-segment-map";
 
 const COLLECTION_EXPIRED_ERROR = "Collection has expired.";
@@ -53,7 +54,8 @@ const COLLECTION_SELECT = `"id",
                     "ascii_filenames" AS "asciiFilenames",
                     COALESCE("provider", 'kiosk') AS "provider",
                     "bundle_id" AS "bundleId",
-                    "ordinal"`;
+                    "ordinal",
+                    "request_headers_json" AS "requestHeadersJson"`;
 
 const FILE_SELECT = `"id",
                     "collection_id" AS "collectionId",
@@ -81,14 +83,6 @@ function tryParseZipEntryMeta(raw: string | null): ZipEntryStoredMeta | null {
         return JSON.parse(raw) as ZipEntryStoredMeta;
     } catch {
         return null;
-    }
-}
-
-function tryParseWorkuploadFileSourceMeta(raw: string | null) {
-    try {
-        return parseWorkuploadFileSourceMeta(raw);
-    } catch {
-        return undefined;
     }
 }
 
@@ -159,6 +153,10 @@ function workuploadSourceMetaJson(
         throw new Error(`Missing Workupload source metadata for file: ${remoteId}.`);
     }
     return JSON.stringify(parseWorkuploadFileSourceMeta(JSON.stringify(meta)));
+}
+
+function directSourceMetaJson(loaded: CreateDownloadRecord["loaded"]): string | null {
+    return loaded.provider === "direct" ? JSON.stringify(loaded.fileMeta) : null;
 }
 
 function normalizeTransferFile(file: DownloadFileRow) {
@@ -419,8 +417,8 @@ export class DownloadRepository {
                  ("id", "share_id", "source_url", "password_plain", "name", "root_id",
                   "segment_size", "expires", "tree_json", "save_path", "status",
                   "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames",
-                  "provider", "bundle_id", "ordinal")
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?)`,
+                  "provider", "bundle_id", "ordinal", "request_headers_json")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)`,
                 [
                     collectionId,
                     record.loaded.collection.shareId,
@@ -439,6 +437,7 @@ export class DownloadRepository {
                     record.loaded.provider,
                     record.bundleId ?? null,
                     record.ordinal ?? 0,
+                    record.requestHeaders ? JSON.stringify(record.requestHeaders) : null,
                 ],
             );
 
@@ -465,7 +464,8 @@ export class DownloadRepository {
                         file.zipEntryJson,
                         file.sourceMetaJson ??
                             transferSourceMetaJson(record.loaded, file.remoteId) ??
-                            workuploadSourceMetaJson(record.loaded, file.remoteId),
+                            workuploadSourceMetaJson(record.loaded, file.remoteId) ??
+                            directSourceMetaJson(record.loaded),
                     ],
                 );
             }
@@ -1479,6 +1479,55 @@ export class DownloadRepository {
         );
     }
 
+    /** Applies a fresh probe of a direct URL after the remote file changed. */
+    public updateDirectRemote(
+        fileId: string,
+        remote: { size: number; segmentSize: number; sourceMetaJson: string },
+    ) {
+        const file = this.getFile(fileId);
+        const collection = file ? this.getCollection(file.collectionId) : null;
+        if (!file || !collection) {
+            return;
+        }
+        const tree = parseTree(collection.treeJson);
+        for (const entry of tree.entries) {
+            if (entry.kind === "file" && entry.node.id === file.remoteId) {
+                (entry.node as FileNode).size = remote.size;
+            }
+        }
+        const timestamp = nowIso();
+        this.kd.lib.db.transaction((tx) => {
+            tx.run(
+                `UPDATE "download_file"
+                 SET "size" = ?, "source_meta_json" = ?, "updated_at" = ?
+                 WHERE "id" = ?`,
+                [remote.size, remote.sourceMetaJson, timestamp, fileId],
+            );
+            tx.run(
+                `UPDATE "download_collection"
+                 SET "segment_size" = ?, "tree_json" = ?, "updated_at" = ?
+                 WHERE "id" = ?`,
+                [
+                    requireSegmentSize(remote.segmentSize),
+                    JSON.stringify(tree),
+                    timestamp,
+                    collection.id,
+                ],
+            );
+        });
+    }
+
+    /** Save targets of every file not finalized yet, for picking collision-free names. */
+    public listUnfinishedFileTargets() {
+        return this.kd.lib.db.all<{ savePath: string; path: string; asciiFilenames: number }>(
+            `SELECT c."save_path" AS "savePath", f."path" AS "path",
+                    c."ascii_filenames" AS "asciiFilenames"
+             FROM "download_file" f
+             JOIN "download_collection" c ON c."id" = f."collection_id"
+             WHERE f."status" != 'completed'`,
+        );
+    }
+
     public resetFileProgress(fileId: string) {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
@@ -1632,7 +1681,11 @@ export class DownloadRepository {
                 .map((chunk) => [chunk.chunkIndex, chunk]),
         );
 
-        if ((collection.provider ?? "kiosk") === "workupload") {
+        if (
+            collection.provider === "workupload" ||
+            (collection.provider === "direct" &&
+                readRangeSupported(collection.provider, file.sourceMetaJson) !== true)
+        ) {
             if (file.size <= 0) {
                 return [];
             }
@@ -1794,10 +1847,7 @@ export class DownloadRepository {
         const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
         const activeTransferControls: Array<"pause" | "stop" | undefined> = [];
         for (const file of this.listFiles(collection.id)) {
-            const rangeSupported =
-                collection.provider === "workupload"
-                    ? tryParseWorkuploadFileSourceMeta(file.sourceMetaJson)?.rangeSupported
-                    : undefined;
+            const rangeSupported = readRangeSupported(collection.provider, file.sourceMetaJson);
             const transferControl =
                 rangeSupported === undefined ? undefined : rangeSupported ? "pause" : "stop";
             progress[file.path] = {
@@ -1841,10 +1891,9 @@ export class DownloadRepository {
             updatedAt: Date.parse(collection.updatedAt),
             elapsedMs: collection.elapsedMs,
             error: collection.error ?? undefined,
-            transferControl:
-                collection.provider === "workupload"
-                    ? aggregateTransferControls(activeTransferControls)
-                    : undefined,
+            transferControl: usesRangeDependentControl(collection.provider)
+                ? aggregateTransferControls(activeTransferControls)
+                : undefined,
         };
     }
 

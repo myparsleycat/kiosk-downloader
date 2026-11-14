@@ -254,6 +254,13 @@ describe("download transfer format", () => {
         );
     });
 
+    it("rejects direct URL downloads", () => {
+        const payload = createWorkuploadPayload();
+        payload.collection.provider = "direct";
+
+        expect(() => requireDownloadTransferPayload(payload)).toThrow();
+    });
+
     it("rejects a Workupload ZIP entry source", () => {
         const payload = createWorkuploadPayload();
         payload.files[0]!.sourceKind = "zip_entry";

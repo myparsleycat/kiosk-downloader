@@ -2,6 +2,7 @@ import { RequestPoolUsageLabel } from "@renderer/components/transfer/request-poo
 import type { DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { isCollectionExpiresNever } from "@shared/download-errors";
+import { usesRangeDependentControl } from "@shared/share-url";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import { ClockIcon, FolderIcon, LockIcon, TimerIcon } from "lucide-react";
 
@@ -62,13 +63,15 @@ export function DownloadCard({
               ? "확장 공유"
               : collection.provider === "workupload"
                 ? `Workupload · ${collection.shareId}`
-                : collection.shareId}
+                : collection.provider === "direct"
+                  ? `직접 링크 · ${collection.shareId}`
+                  : collection.shareId}
           </div>
         </div>
         <StatusBadge
           status={status}
           transferControl={item.transferControl}
-          workupload={collection.provider === "workupload"}
+          rangeDependent={usesRangeDependentControl(collection.provider)}
         />
       </div>
 
@@ -125,17 +128,18 @@ export function DownloadCard({
 function StatusBadge({
   status,
   transferControl,
-  workupload,
+  rangeDependent,
 }: {
   status: DownloadItem["status"];
   transferControl?: DownloadItem["transferControl"];
-  workupload: boolean;
+  rangeDependent: boolean;
 }) {
   const map: Record<DownloadItem["status"], { label: string; cls: string }> = {
     downloading: { label: "다운로드", cls: "bg-primary/10 text-primary" },
     inflating: { label: "해제 중", cls: "bg-primary/10 text-primary" },
     paused: {
-      label: transferControl === "stop" || (workupload && !transferControl) ? "정지" : "일시정지",
+      label:
+        transferControl === "stop" || (rangeDependent && !transferControl) ? "정지" : "일시정지",
       cls: "bg-muted text-muted-foreground",
     },
     completed: { label: "완료", cls: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },

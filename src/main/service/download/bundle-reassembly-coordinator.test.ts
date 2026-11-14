@@ -46,6 +46,7 @@ function createCollection(id: string, ordinal: number, savePath: string): Downlo
         provider: "kiosk",
         bundleId: "bundle-1",
         ordinal,
+        requestHeadersJson: null,
     };
 }
 

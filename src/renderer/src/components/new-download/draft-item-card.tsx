@@ -1,5 +1,6 @@
 import { Button } from "@renderer/components/ui/button";
-import { Field } from "@renderer/components/ui/field";
+import { Field, FieldLabel } from "@renderer/components/ui/field";
+import { Input } from "@renderer/components/ui/input";
 import {
   InputGroup,
   InputGroupAddon,
@@ -8,8 +9,18 @@ import {
 } from "@renderer/components/ui/input-group";
 import { countFiles, dirTotalSize } from "@renderer/lib/types";
 import { itemDisplayTree, type NewDownloadItem } from "@renderer/stores/new-download-draft";
+import { tryParseDownloadUrl } from "@shared/share-url";
+import type { DirectRequestHeaders } from "@shared/types";
 import { formatSize } from "@shared/utils";
-import { CheckIcon, Loader2Icon, RefreshCwIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  Loader2Icon,
+  RefreshCwIcon,
+  XIcon,
+} from "lucide-react";
+import * as React from "react";
 
 export function DraftItemCard({
   item,
@@ -18,6 +29,7 @@ export function DraftItemCard({
   onVerifyPassword,
   onRetry,
   onRemove,
+  onHeadersChange,
 }: {
   item: NewDownloadItem;
   extendedLoadProgress: { current: number; total: number } | null;
@@ -25,6 +37,7 @@ export function DraftItemCard({
   onVerifyPassword: () => void;
   onRetry: () => void;
   onRemove: () => void;
+  onHeadersChange: (headers: DirectRequestHeaders) => void;
 }) {
   const title = item.preparation.status === "ready" ? item.preparation.collection.name : item.url;
   const tree = itemDisplayTree(item);
@@ -98,6 +111,91 @@ export function DraftItemCard({
           <RefreshCwIcon />
           다시 시도
         </Button>
+      ) : null}
+      {isDirectDraftItem(item) ? (
+        <DirectHeadersFields
+          headers={item.headers}
+          forceOpen={
+            item.preparation.status === "error" && /HTTP 40[13]\b/.test(item.preparation.message)
+          }
+          disabled={item.preparation.status === "preparing"}
+          onChange={onHeadersChange}
+          onApply={onRetry}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+export function isDirectDraftItem(item: NewDownloadItem) {
+  return tryParseDownloadUrl(item.url)?.provider === "direct";
+}
+
+const DIRECT_HEADER_FIELDS = [
+  { key: "referer", label: "Referer", placeholder: "https://example.com/page", secret: false },
+  { key: "cookie", label: "Cookie", placeholder: "name=value; other=value", secret: true },
+  { key: "userAgent", label: "User-Agent", placeholder: "기본값 사용", secret: false },
+] as const;
+
+export function DirectHeadersFields({
+  headers,
+  forceOpen = false,
+  disabled = false,
+  onChange,
+  onApply,
+}: {
+  headers: DirectRequestHeaders;
+  forceOpen?: boolean;
+  disabled?: boolean;
+  onChange: (headers: DirectRequestHeaders) => void;
+  onApply: () => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const expanded = open || forceOpen;
+  const configured = DIRECT_HEADER_FIELDS.filter((field) => headers[field.key]?.trim()).length;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        className="flex items-center gap-1 self-start text-[11px] text-muted-foreground hover:text-foreground"
+        aria-expanded={expanded}
+        onClick={() => setOpen(!expanded)}
+      >
+        {expanded ? (
+          <ChevronDownIcon className="size-3" />
+        ) : (
+          <ChevronRightIcon className="size-3" />
+        )}
+        요청 헤더{configured > 0 ? ` (${configured})` : ""}
+      </button>
+      {expanded ? (
+        <div className="flex flex-col gap-2">
+          {DIRECT_HEADER_FIELDS.map((field) => (
+            <Field key={field.key} className="gap-1">
+              <FieldLabel className="text-[11px]">{field.label}</FieldLabel>
+              <Input
+                className="h-7 text-xs"
+                type={field.secret ? "password" : "text"}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={field.placeholder}
+                value={headers[field.key] ?? ""}
+                disabled={disabled}
+                onChange={(event) => onChange({ ...headers, [field.key]: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  onApply();
+                }}
+              />
+            </Field>
+          ))}
+          <Button type="button" variant="outline" size="xs" disabled={disabled} onClick={onApply}>
+            <RefreshCwIcon />
+            헤더 적용 후 다시 불러오기
+          </Button>
+        </div>
       ) : null}
     </div>
   );

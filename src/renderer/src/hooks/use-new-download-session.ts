@@ -10,8 +10,10 @@ import {
 import { getIpcErrorCause } from "@shared/download-errors";
 import {
     EXTENDED_SHARE_PREFIX,
+    isAutoCommitShareInput,
     isDownloadShareInput,
     tryDecodeShareUrlBase64,
+    tryParseDownloadUrl,
 } from "@shared/share-url";
 import { DOWNLOAD_PREPARE_CONCURRENCY } from "@shared/types";
 import * as React from "react";
@@ -19,6 +21,7 @@ import { toast } from "sonner";
 
 export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: string) => void }) {
     const url = useNewDownloadDraft((state) => state.url);
+    const commitRequestedUrl = useNewDownloadDraft((state) => state.commitRequestedUrl);
     const items = useNewDownloadDraft((state) => state.items);
     const setUrl = useNewDownloadDraft((state) => state.setUrl);
     const setSavePath = useNewDownloadDraft((state) => state.setSavePath);
@@ -134,9 +137,14 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
                 if (!isCurrentGeneration()) {
                     return;
                 }
+                const headers = findItem()?.headers;
                 const result = await window.api.invoke("download:prepare", {
                     url: trimmedUrl,
                     password: loadPassword || undefined,
+                    headers:
+                        tryParseDownloadUrl(trimmedUrl)?.provider === "direct" && headers
+                            ? headers
+                            : undefined,
                     asciiFilenames: useNewDownloadDraft.getState().asciiFilenames,
                     correlationId: itemKey,
                 });
@@ -214,19 +222,22 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
     );
 
     const applyUrlInput = React.useCallback(
-        (value: string) => {
-            setUrl(tryDecodeShareUrlBase64(value) ?? value);
+        (value: string, options?: { commit?: boolean }) => {
+            setUrl(tryDecodeShareUrlBase64(value) ?? value, options);
         },
         [setUrl],
     );
 
     React.useEffect(() => {
         const trimmed = url.trim();
-        if (!isDownloadShareInput(trimmed) || !shouldLoadPastedShare(items, trimmed)) {
+        const committed =
+            isAutoCommitShareInput(trimmed) ||
+            (commitRequestedUrl === trimmed && isDownloadShareInput(trimmed));
+        if (!committed || !shouldLoadPastedShare(items, trimmed)) {
             return;
         }
         void commitUrls([trimmed]);
-    }, [commitUrls, items, url]);
+    }, [commitRequestedUrl, commitUrls, items, url]);
 
     const expandZip = React.useCallback(
         async (itemKey: string, zipPath: string, fileId: string, zipPassword?: string) => {
@@ -347,6 +358,10 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
                                 ? item.zipPasswords
                                 : undefined,
                         renames: Object.keys(item.renames).length > 0 ? item.renames : undefined,
+                        headers:
+                            item.preparation.collection.provider === "direct"
+                                ? item.headers
+                                : undefined,
                     });
                     if (!created) {
                         throw new Error("다운로드 항목을 만들지 못했습니다.");
