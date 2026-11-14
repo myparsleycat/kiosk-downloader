@@ -34,6 +34,7 @@ async function createHarness(options: {
         shareId: "example.com",
         sourceUrl: "https://example.com/file.bin",
         requestHeadersJson: JSON.stringify({ cookie: "a=b" }),
+        pauseReasonJson: null,
     };
     const file = {
         id: "file",

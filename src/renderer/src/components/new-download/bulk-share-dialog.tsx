@@ -64,7 +64,7 @@ export function BulkShareDialog({
             id="bulk-share-input"
             className="min-h-40"
             placeholder={
-              "https://kio.ac/c/...\nhttps://transfer.it/t/...\nhttps://example.com/file.zip"
+              "https://kio.ac/c/...\nhttps://transfer.it/t/...\nhttps://mega.nz/file/...\nhttps://example.com/file.zip"
             }
             value={text}
             aria-invalid={error ? true : undefined}

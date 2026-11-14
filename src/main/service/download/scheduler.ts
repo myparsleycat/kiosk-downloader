@@ -11,6 +11,7 @@ import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
 import type { KioApiClient } from "./kio-api-client";
+import type { MegaApiClient } from "./mega-api-client";
 import type { DownloadTransferMetrics } from "./metrics";
 import type { DownloadRepository } from "./repository";
 import type { TransferItApiClient } from "./transfer-it-api-client";
@@ -29,10 +30,10 @@ import { TransferProgressBatcher } from "../transfer-progress-batcher";
 import { DirectDownloadRunner } from "./direct-download-runner";
 import { DirectHttpClient } from "./direct-http-client";
 import { KioskDownloadRunner } from "./kiosk-download-runner";
+import { createTransferItSpecFactory, MegaCdnDownloadRunner } from "./mega-cdn-download-runner";
 import { getStagingPartPath, PartFileWriter } from "./part-file";
 import { GlobalSegmentPool } from "./segment-pool";
 import { TransferChunkPool } from "./transfer-chunk-pool";
-import { TransferItDownloadRunner } from "./transfer-it-download-runner";
 import { createWorkuploadLogContext, WorkuploadDownloadRunner } from "./workupload-download-runner";
 import { openZipFileEntry } from "./zip-index";
 import { inflateRawFile, zipDeflateProgressScale } from "./zip-inflate";
@@ -113,7 +114,8 @@ export class DownloadScheduler {
     private readonly segmentPool: GlobalSegmentPool;
     private readonly transferPool: TransferChunkPool;
     private readonly kioskRunner: KioskDownloadRunner;
-    private readonly transferRunner: TransferItDownloadRunner;
+    private readonly transferRunner: MegaCdnDownloadRunner;
+    private readonly megaRunner: MegaCdnDownloadRunner;
     private readonly workuploadRunner: WorkuploadDownloadRunner;
     private readonly directRunner: DirectDownloadRunner;
     private readonly fileStartedAt = new Map<string, number>();
@@ -127,6 +129,7 @@ export class DownloadScheduler {
         private readonly kd: KioskDownloader,
         api: KioApiClient,
         transferApi: TransferItApiClient,
+        megaApi: MegaApiClient,
         workuploadApi: WorkuploadApiClient,
         private readonly repository: DownloadRepository,
         private readonly metrics: DownloadTransferMetrics,
@@ -201,15 +204,22 @@ export class DownloadScheduler {
             finalizeFile,
             markProgress,
         });
-        this.transferRunner = new TransferItDownloadRunner({
+        const megaCdnDeps = {
             kd: this.kd,
-            api: transferApi,
             repository: this.repository,
             transferPool: this.transferPool,
             getPartPath,
             validateCompletedChunks,
             finalizeFile,
             markProgress,
+        };
+        this.transferRunner = new MegaCdnDownloadRunner({
+            ...megaCdnDeps,
+            specs: createTransferItSpecFactory(transferApi),
+        });
+        this.megaRunner = new MegaCdnDownloadRunner({
+            ...megaCdnDeps,
+            specs: { create: (_collection, file) => megaApi.createSpec(file) },
         });
         this.workuploadRunner = new WorkuploadDownloadRunner({
             api: workuploadApi,
@@ -349,6 +359,7 @@ export class DownloadScheduler {
         this.progressBatcher.destroy();
         this.kioskRunner.destroy();
         this.transferRunner.destroy();
+        this.megaRunner.destroy();
         this.workuploadRunner.destroy();
         this.directRunner.destroy();
         for (const [fileId, controller] of this.fileControllers) {
@@ -661,6 +672,9 @@ export class DownloadScheduler {
                 if ((collection.provider ?? "kiosk") === "transfer") {
                     throw new Error("ZIP entry downloads are not supported for transfer.it.");
                 }
+                if (collection.provider === "mega") {
+                    throw new Error("ZIP entry downloads are not supported for Mega.");
+                }
                 if (collection.provider === "direct") {
                     throw new Error("ZIP entry downloads are not supported for direct URLs.");
                 }
@@ -668,8 +682,10 @@ export class DownloadScheduler {
                 return;
             }
 
-            if ((collection.provider ?? "kiosk") === "transfer") {
-                await this.transferRunner.runFile({
+            if ((collection.provider ?? "kiosk") === "transfer" || collection.provider === "mega") {
+                await (
+                    collection.provider === "mega" ? this.megaRunner : this.transferRunner
+                ).runFile({
                     collection,
                     file,
                     controller,
@@ -1228,6 +1244,7 @@ export class DownloadScheduler {
     private clearProviderState(collectionId: string) {
         this.kioskRunner.clearCollection(collectionId);
         this.transferRunner.clearCollection(collectionId);
+        this.megaRunner.clearCollection(collectionId);
         this.workuploadRunner.clearCollection(collectionId);
         this.directRunner.clearCollection(collectionId);
     }

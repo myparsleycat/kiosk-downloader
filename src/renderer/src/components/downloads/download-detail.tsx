@@ -34,6 +34,8 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
+import { MegaQuotaAlert } from "./mega-quota-notice";
+
 export function DownloadDetail({
   item,
   onRemove,
@@ -125,7 +127,9 @@ export function DownloadDetail({
                     ? `Workupload · ${collection.shareId}`
                     : collection.provider === "direct"
                       ? `직접 링크 · ${collection.shareId}`
-                      : collection.shareId}
+                      : collection.provider === "mega"
+                        ? `Mega · ${collection.shareId}`
+                        : collection.shareId}
               </span>
               <Separator orientation="vertical" className="h-3" />
               <span className="flex items-center gap-1">
@@ -274,6 +278,7 @@ export function DownloadDetail({
             {item.error}
           </div>
         )}
+        {status === "paused" && item.pauseReason && <MegaQuotaAlert reason={item.pauseReason} />}
       </div>
 
       <ProgressSortHeader field={sortField} dir={sortDir} onSort={handleSortClick} />

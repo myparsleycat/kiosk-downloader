@@ -17,6 +17,7 @@ import { Tray } from "./lib/tray";
 import { Utils } from "./lib/utils";
 import { Logger } from "./logger";
 import { DownloadService } from "./service/download";
+import { MegaAccountService } from "./service/mega";
 import { StartupCleanupService } from "./service/startup-cleanup";
 import { TransferService } from "./service/transfer";
 import { Updater } from "./service/updater";
@@ -61,6 +62,7 @@ export class KioskDownloader {
         upload: UploadService;
         startupCleanup: StartupCleanupService;
         updater: Updater;
+        mega: MegaAccountService;
     };
 
     public constructor() {
@@ -84,6 +86,7 @@ export class KioskDownloader {
             download: new DownloadService(this),
             upload: new UploadService(this),
             updater: new Updater(this),
+            mega: new MegaAccountService(this),
         };
         this.service.download.bindRequestPoolUsage();
         this.service.upload.bindRequestPoolUsage();
@@ -173,7 +176,9 @@ export class KioskDownloader {
 
         // A bad persisted row must not keep the app from opening: the window is already up, so
         // log the failure and let the user remove the offending item from the UI.
+        // Mega first so downloads resumed on startup already use the account session.
         for (const [restoreStage, restore] of [
+            ["mega-restore", () => this.service.mega.restoreSession()],
             ["download-restore", () => this.service.download.restoreStartupState()],
             ["upload-restore", () => this.service.upload.restoreStartupState()],
         ] as const) {
@@ -251,6 +256,7 @@ app.on("before-quit", () => {
     try {
         kd.service.download.destroy();
         kd.service.upload.destroy();
+        kd.service.mega.destroy();
     } catch (error) {
         kd.logger.error(error, "App:before-quit");
     }

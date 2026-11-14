@@ -8,7 +8,7 @@ import {
 } from "@shared/download-errors";
 import type { TreeEntry, ZipNode } from "@shared/types";
 import fse from "fs-extra";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { KioskDownloader } from "../..";
 import type { LoadedCollection } from "./types";
@@ -38,7 +38,10 @@ type DownloadServiceInternals = {
         insertDownload: ReturnType<typeof vi.fn>;
         listUnfinishedFileTargets: ReturnType<typeof vi.fn>;
     };
-    scheduler: { schedule: ReturnType<typeof vi.fn> };
+    scheduler: {
+        schedule: ReturnType<typeof vi.fn>;
+        resumeCollection: ReturnType<typeof vi.fn>;
+    };
     emitUpdate: ReturnType<typeof vi.fn>;
     getEnrichedItem: ReturnType<typeof vi.fn>;
 };
@@ -685,5 +688,82 @@ describe("DownloadService prepared draft", () => {
 
         expect(state.preparedDrafts.has(first.draftId)).toBe(false);
         expect(state.preparedDrafts.has(second.draftId)).toBe(true);
+    });
+});
+
+describe("DownloadService Mega quota auto-resume", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("resumes quota-paused collections when due, only while the setting is on", async () => {
+        vi.useFakeTimers({ now: 0 });
+        const { service, kd } = createService();
+        let enabled = false;
+        (kd.setting as unknown as { get: ReturnType<typeof vi.fn> }).get.mockImplementation((async (
+            key: string,
+        ) => (key === "transfer.megaQuotaAutoResume" ? enabled : false)) as never);
+        let paused = [
+            {
+                id: "mega",
+                name: "Mega",
+                pauseReasonJson: JSON.stringify({
+                    kind: "megaQuota",
+                    pausedAt: 0,
+                    resumeAt: 60_000,
+                }),
+            },
+        ];
+        const resume = vi.fn(() => {
+            paused = [];
+        });
+        (service as unknown as { repository: object }).repository = {
+            listMegaQuotaPausedCollections: () => paused,
+            resumeCollection: resume,
+        };
+        const scheduled = vi
+            .spyOn(internals(service).scheduler, "resumeCollection")
+            .mockImplementation(() => undefined);
+        internals(service).emitUpdate = vi.fn(async () => undefined);
+
+        await service.scheduleMegaQuotaResume();
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(resume).not.toHaveBeenCalled();
+
+        enabled = true;
+        await service.scheduleMegaQuotaResume();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(resume).toHaveBeenCalledExactlyOnceWith("mega", false, { preserveUserPauses: true });
+        expect(scheduled).toHaveBeenCalledExactlyOnceWith("mega");
+        expect(internals(service).emitUpdate).toHaveBeenCalledExactlyOnceWith("mega");
+        service.destroy();
+    });
+
+    it("does not resume before the quota wait has passed", async () => {
+        vi.useFakeTimers({ now: 0 });
+        const { service, kd } = createService();
+        (kd.setting as unknown as { get: ReturnType<typeof vi.fn> }).get.mockImplementation(
+            (async () => true) as never,
+        );
+        const resume = vi.fn();
+        (service as unknown as { repository: object }).repository = {
+            listMegaQuotaPausedCollections: () => [
+                {
+                    id: "mega",
+                    name: "Mega",
+                    pauseReasonJson: JSON.stringify({
+                        kind: "megaQuota",
+                        pausedAt: 0,
+                        resumeAt: 60_000,
+                    }),
+                },
+            ],
+            resumeCollection: resume,
+        };
+
+        await service.scheduleMegaQuotaResume();
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(resume).not.toHaveBeenCalled();
+        service.destroy();
     });
 });

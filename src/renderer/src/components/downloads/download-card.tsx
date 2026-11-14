@@ -6,6 +6,8 @@ import { usesRangeDependentControl } from "@shared/share-url";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
 import { ClockIcon, FolderIcon, LockIcon, TimerIcon } from "lucide-react";
 
+import { MegaQuotaCardLine } from "./mega-quota-notice";
+
 export function DownloadCard({
   item,
   active,
@@ -65,7 +67,9 @@ export function DownloadCard({
                 ? `Workupload · ${collection.shareId}`
                 : collection.provider === "direct"
                   ? `직접 링크 · ${collection.shareId}`
-                  : collection.shareId}
+                  : collection.provider === "mega"
+                    ? `Mega · ${collection.shareId}`
+                    : collection.shareId}
           </div>
         </div>
         <StatusBadge
@@ -106,6 +110,7 @@ export function DownloadCard({
             <span>{formatSize(downloadedBytes)}</span>
           </span>
         </div>
+        {status === "paused" && item.pauseReason && <MegaQuotaCardLine reason={item.pauseReason} />}
       </div>
 
       <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">

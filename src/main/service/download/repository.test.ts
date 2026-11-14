@@ -4,9 +4,11 @@ import { DOWNLOAD_TRANSFER_KIND, DOWNLOAD_TRANSFER_VERSION } from "@shared/types
 import { describe, expect, it } from "vitest";
 
 import type { KioskDownloader } from "../..";
+import type { CreateDownloadRecord } from "./types";
 
 import { DatabaseClient } from "../../lib/db/client";
-import { DownloadRepository, flattenDownloadTree } from "./repository";
+import { FS } from "../../lib/fs";
+import { DownloadRepository, flattenDownloadTree, parsePauseReason } from "./repository";
 import { TRANSFER_CHUNK_SIZE, transferChunkSizes } from "./transfer-it-crypto";
 
 describe("flattenDownloadTree", () => {
@@ -76,7 +78,9 @@ describe("flattenDownloadTree", () => {
 async function createRepository() {
     const db = new DatabaseClient(":memory:");
     await db.reconcile();
-    const repo = new DownloadRepository({ lib: { db } } as KioskDownloader);
+    const repo = new DownloadRepository({
+        lib: { db, fs: new FS({} as KioskDownloader) },
+    } as KioskDownloader);
     return { db, repo };
 }
 
@@ -1186,6 +1190,122 @@ async function createResumeRepository() {
     }
     return { db, repo };
 }
+
+describe("DownloadRepository pause reasons", () => {
+    const reason = { kind: "megaQuota" as const, pausedAt: 1_000, resumeAt: 61_000 };
+
+    async function createMegaPausedRepository() {
+        const { db, repo } = await createResumeRepository();
+        db.run(`UPDATE "download_collection" SET "provider" = 'mega' WHERE "id" = 'resume'`);
+        repo.pauseCollection("resume", reason);
+        return repo;
+    }
+
+    it("keeps a quota pause reason until the collection runs again", async () => {
+        const repo = await createMegaPausedRepository();
+        expect(parsePauseReason(repo.getCollection("resume")!.pauseReasonJson)).toEqual(reason);
+        expect(repo.listMegaQuotaPausedCollections().map((row) => row.id)).toEqual(["resume"]);
+
+        repo.markCollectionStatus("resume", "paused");
+        expect(repo.listMegaQuotaPausedCollections()).toHaveLength(1);
+
+        repo.markCollectionStatus("resume", "downloading");
+        expect(repo.getCollection("resume")!.pauseReasonJson).toBeNull();
+    });
+
+    it("drops the reason on a user pause or an explicit resume", async () => {
+        const paused = await createMegaPausedRepository();
+        paused.pauseCollection("resume");
+        expect(paused.listMegaQuotaPausedCollections()).toHaveLength(0);
+
+        const resumed = await createMegaPausedRepository();
+        resumed.resumeCollection("resume", false);
+        expect(resumed.getCollection("resume")!.pauseReasonJson).toBeNull();
+    });
+
+    it("preserves manually paused files and their chunks when recovering from quota", async () => {
+        const repo = await createMegaPausedRepository();
+        const manual = { file: repo.getFile("manual"), chunks: repo.listChunks("manual") };
+
+        repo.resumeCollection("resume", false, { preserveUserPauses: true });
+
+        expect(repo.getCollection("resume")).toMatchObject({
+            status: "queued",
+            pauseReasonJson: null,
+        });
+        expect(repo.getFile("active")).toMatchObject({ status: "pending", pausedByUser: 0 });
+        expect(repo.getFile("manual")).toEqual(manual.file);
+        expect(repo.listChunks("manual")).toEqual(manual.chunks);
+    });
+});
+
+describe("DownloadRepository Mega target paths", () => {
+    function record(names: string[], asciiFilenames: boolean): CreateDownloadRecord {
+        return {
+            loaded: {
+                provider: "mega",
+                rootId: "root",
+                passwordProtected: false,
+                nodeKeys: new Map(
+                    names.map((_, index) => [
+                        String(index),
+                        Buffer.alloc(32).toString("base64url"),
+                    ]),
+                ),
+                collection: {
+                    shareId: "share",
+                    name: "Mega",
+                    provider: "mega",
+                    passwordProtected: false,
+                    expires: COLLECTION_EXPIRES_NEVER,
+                    segmentSize: TRANSFER_CHUNK_SIZE,
+                    tree: {
+                        type: "dir",
+                        id: "root",
+                        name: "",
+                        entries: names.map((name, index) => ({
+                            kind: "file",
+                            node: { type: "file", id: String(index), name, size: 10 },
+                        })),
+                    },
+                },
+            },
+            url: "https://mega.nz/folder/share",
+            savePath: "/tmp",
+            selectedPaths: names,
+            asciiFilenames,
+        };
+    }
+
+    it.each([
+        ["a", "a.", false],
+        ["a", " a ", false],
+        ["é", "e", true],
+    ] as const)(
+        "rejects colliding targets %s and %s (ASCII: %s) before inserting",
+        async (first, second, ascii) => {
+            const { repo } = await createRepository();
+
+            expect(() => repo.insertDownload(record([first, second], ascii))).toThrow(
+                "collide after sanitization",
+            );
+            expect(repo.listItems()).toEqual([]);
+        },
+    );
+
+    it("checks imported file paths instead of trusting their tree names", async () => {
+        const { repo } = await createRepository();
+        const id = repo.insertDownload(record(["first", "second"], false));
+        const payload = repo.buildTransferPayload(id);
+        payload.files[0]!.path = "folder/a";
+        payload.files[1]!.path = "folder./a";
+
+        expect(() => repo.insertImportedDownload(payload, "/tmp")).toThrow(
+            "collide after sanitization",
+        );
+        expect(repo.listItems()).toHaveLength(1);
+    });
+});
 
 describe("DownloadRepository explicit resume", () => {
     it.each([false, true])(

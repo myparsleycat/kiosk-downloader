@@ -15,6 +15,7 @@ import {
     isAutoCommitShareInput,
     tryParseDirectUrl,
     tryParseDownloadUrl,
+    tryParseMegaUrl,
     tryParseShareUrl,
     tryParseTransferUrl,
     tryParseWorkuploadUrl,
@@ -318,6 +319,20 @@ describe("parseBulkShareInputs", () => {
             invalid: ["not-a-link", "garbage"],
         });
     });
+    it.each([
+        "mega://enc?QUJD,REVG==",
+        "mega://fenc?QUJD,REVG==",
+        "mega://enc2/?QUJD,,REVG==",
+        "mega://fenc2/?QUJD,,REVG==",
+    ])("keeps encoded Mega payload commas and adjacent links intact: %s", (mega) => {
+        expect(parseBulkShareInputs(mega)).toEqual({ urls: [mega], invalid: [] });
+
+        const direct = "https://example.com/get?ids=1,,2";
+        expect(parseBulkShareInputs(`${direct},${mega},${kiosk}, ${transfer}`)).toEqual({
+            urls: [direct, mega, kiosk, transfer],
+            invalid: [],
+        });
+    });
 });
 
 describe("tryParseDirectUrl", () => {
@@ -401,5 +416,73 @@ describe("direct URL edge cases", () => {
             urls: ["https://example.com/a.zip"],
             invalid: [],
         });
+    });
+});
+
+describe("tryParseMegaUrl", () => {
+    const fileKey = "A".repeat(43);
+    const folderKey = "B".repeat(22);
+
+    it.each([
+        [
+            `https://mega.nz/file/abcd1234#${fileKey}`,
+            { kind: "file", handle: "abcd1234", key: fileKey },
+        ],
+        [`mega.co.nz/file/abcd1234#${fileKey}`, { kind: "file", handle: "abcd1234", key: fileKey }],
+        [
+            `https://mega.nz/#!abcd1234!${fileKey}`,
+            { kind: "file", handle: "abcd1234", key: fileKey },
+        ],
+        [`mega://#!abcd1234!${fileKey}`, { kind: "file", handle: "abcd1234", key: fileKey }],
+        [
+            `https://www.mega.nz/folder/root1234#${folderKey}`,
+            { kind: "folder", handle: "root1234", key: folderKey },
+        ],
+        [
+            `https://mega.nz/#F!root1234!${folderKey}`,
+            { kind: "folder", handle: "root1234", key: folderKey },
+        ],
+        [`mega:F!root1234!${folderKey}`, { kind: "folder", handle: "root1234", key: folderKey }],
+        [
+            `https://mega.nz/folder/root1234#${folderKey}/folder/sub12345`,
+            { kind: "folder", handle: "root1234", key: folderKey, subFolderId: "sub12345" },
+        ],
+        [
+            `https://mega.nz/folder/root1234#${folderKey}/file/file1234`,
+            { kind: "folder", handle: "root1234", key: folderKey, subFileId: "file1234" },
+        ],
+        ["https://mega.nz/file/abcd1234", { kind: "file", handle: "abcd1234" }],
+    ])("parses %s", (url, expected) => {
+        expect(tryParseMegaUrl(url)).toEqual({ type: "public", ...expected });
+    });
+
+    it("parses MegaDownloader encoded links", () => {
+        expect(tryParseMegaUrl("mega://enc?QUJD-_")).toEqual({
+            type: "encoded",
+            kind: "file",
+            version: 1,
+            payload: "QUJD-_",
+        });
+        expect(tryParseMegaUrl("mega://fenc2/?QUJD")).toMatchObject({ kind: "folder", version: 2 });
+    });
+
+    it("rejects partial keys and keys on the wrong link kind", () => {
+        expect(tryParseMegaUrl(`https://mega.nz/file/abcd1234#${fileKey.slice(1)}`)).toBeNull();
+        expect(tryParseMegaUrl(`https://mega.nz/folder/root1234#${fileKey}`)).toBeNull();
+        expect(tryParseMegaUrl(`https://mega.nz/file/abcd1234#${fileKey}/file/x`)).toBeNull();
+    });
+
+    it("keeps malformed Mega links out of direct downloads", () => {
+        expect(tryParseDirectUrl("https://mega.nz/file/abcd1234#short")).toBeNull();
+        expect(tryParseDownloadUrl("https://mega.nz/file/abcd1234#short")).toBeNull();
+        expect(tryParseDownloadUrl(`https://mega.nz/file/abcd1234#${fileKey}`)?.provider).toBe(
+            "mega",
+        );
+    });
+
+    it("auto-loads only links that carry their key", () => {
+        expect(isAutoCommitShareInput(`https://mega.nz/file/abcd1234#${fileKey}`)).toBe(true);
+        expect(isAutoCommitShareInput("https://mega.nz/file/abcd1234")).toBe(false);
+        expect(isAutoCommitShareInput("mega://enc?QUJD")).toBe(true);
     });
 });

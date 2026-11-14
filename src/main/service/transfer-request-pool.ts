@@ -267,7 +267,8 @@ export class TransferScheduler {
             return false;
         }
         if (
-            collection.providerId === "transfer-it-download" &&
+            (collection.providerId === "transfer-it-download" ||
+                collection.providerId === "mega-download") &&
             collection.inFlight >= collection.transferTarget
         ) {
             return false;
@@ -287,6 +288,7 @@ export class TransferScheduler {
     private registerSuccess(context: TransferRequestContext) {
         if (
             context.providerId !== "transfer-it-download" &&
+            context.providerId !== "mega-download" &&
             context.providerId !== "direct-download"
         ) {
             return;

@@ -45,6 +45,7 @@ export function DraftItemCard({
   const bytes = tree ? dirTotalSize(tree) : 0;
   const passwordInvalid =
     item.preparation.status === "passwordRequired" && item.preparation.invalid;
+  const secretLabel = tryParseDownloadUrl(item.url)?.provider === "mega" ? "복호화 키" : "비밀번호";
 
   return (
     <div className="flex min-w-0 flex-col gap-2 rounded-lg border bg-muted/30 p-3">
@@ -60,7 +61,7 @@ export function DraftItemCard({
           ) : item.preparation.status === "preparing" ? (
             <p className="text-[11px] text-muted-foreground">불러오는 중</p>
           ) : item.preparation.status === "passwordRequired" ? (
-            <p className="text-[11px] text-muted-foreground">비밀번호 필요</p>
+            <p className="text-[11px] text-muted-foreground">{secretLabel} 필요</p>
           ) : item.preparation.status === "error" ? (
             <p className="text-[11px] text-destructive">{item.preparation.message}</p>
           ) : null}
@@ -83,7 +84,7 @@ export function DraftItemCard({
         <Field {...(passwordInvalid ? { "data-invalid": true } : {})}>
           <InputGroup>
             <InputGroupInput
-              placeholder="비밀번호 입력"
+              placeholder={`${secretLabel} 입력`}
               value={item.password}
               aria-invalid={passwordInvalid || undefined}
               onChange={(event) => onPasswordChange(event.target.value)}
@@ -97,7 +98,7 @@ export function DraftItemCard({
               <InputGroupButton
                 size="icon-xs"
                 disabled={!item.password.trim()}
-                aria-label="비밀번호 확인"
+                aria-label={`${secretLabel} 확인`}
                 onClick={onVerifyPassword}
               >
                 <CheckIcon />

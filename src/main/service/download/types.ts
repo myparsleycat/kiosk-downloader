@@ -24,6 +24,16 @@ export type LoadedTransferCollection = {
     nodeKeys: Map<string, string>;
 };
 
+export type LoadedMegaCollection = {
+    provider: "mega";
+    collection: Collection;
+    rootId: string;
+    passwordProtected: boolean;
+    nodeKeys: Map<string, string>;
+    /** Public folder handle the files belong to; absent for a single-file link. */
+    folderHandle?: string;
+};
+
 export type LoadedWorkuploadCollection = {
     provider: "workupload";
     resource: "file" | "archive";
@@ -45,6 +55,7 @@ export type LoadedDirectCollection = {
 export type LoadedCollection =
     | LoadedKioskCollection
     | LoadedTransferCollection
+    | LoadedMegaCollection
     | LoadedWorkuploadCollection
     | LoadedDirectCollection;
 
@@ -85,6 +96,8 @@ export type DownloadCollectionRow = {
     bundleId: string | null;
     ordinal: number;
     requestHeadersJson: string | null;
+    /** JSON `DownloadPauseReason`, set while the collection is paused for a reason other than the user. */
+    pauseReasonJson: string | null;
 };
 
 export type DownloadBundleRow = {
@@ -151,6 +164,10 @@ export type CreateDownloadRecord = {
 
 export type TransferFileSourceMeta = {
     nodeKey: string;
+};
+
+export type MegaFileSourceMeta = TransferFileSourceMeta & {
+    folderHandle?: string;
 };
 
 export type WorkuploadFileSourceMeta = {

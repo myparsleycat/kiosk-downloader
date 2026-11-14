@@ -21,7 +21,9 @@ import {
 } from "@renderer/components/ui/select";
 import { Switch } from "@renderer/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@renderer/components/ui/tabs";
+import { type SettingsSection, useAppNavigation } from "@renderer/stores/app-navigation";
 import { useUpdaterStore } from "@renderer/stores/updater";
+import { getIpcErrorCause } from "@shared/download-errors";
 import {
   type AppSettings,
   AUTO_UPDATE_MODES,
@@ -50,10 +52,18 @@ import {
   UPLOAD_CHUNK_RETRY_MAX,
   UPLOAD_CHUNK_RETRY_MIN,
 } from "@shared/settings";
-import type { AppStatus } from "@shared/types";
+import type { AppStatus, MegaAccountState } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import { clamp } from "es-toolkit";
-import { CpuIcon, FolderOpenIcon, PlusIcon, PowerIcon, XIcon, ZapIcon } from "lucide-react";
+import {
+  CpuIcon,
+  FolderOpenIcon,
+  PlusIcon,
+  PowerIcon,
+  UserIcon,
+  XIcon,
+  ZapIcon,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -77,6 +87,7 @@ const SETTING_KEYS = [
   "transfer.startupResumeMode",
   "transfer.uploadStartupResumeMode",
   "transfer.startTransfersPaused",
+  "transfer.megaQuotaAutoResume",
   "transfer.downloadBandwidthLimitMibps",
   "transfer.uploadBandwidthLimitMibps",
   "network.forceIpv4",
@@ -106,6 +117,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.startupResumeMode": "auto",
   "transfer.uploadStartupResumeMode": "auto",
   "transfer.startTransfersPaused": false,
+  "transfer.megaQuotaAutoResume": false,
   "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "network.forceIpv4": true,
@@ -163,8 +175,9 @@ const SECTIONS = [
   { id: "general", icon: PowerIcon, title: "일반" },
   { id: "collection", icon: FolderOpenIcon, title: "컬렉션 및 저장" },
   { id: "transfer", icon: ZapIcon, title: "전송" },
+  { id: "account", icon: UserIcon, title: "계정" },
   { id: "advanced", icon: CpuIcon, title: "고급" },
-] as const;
+] as const satisfies readonly { id: SettingsSection; icon: unknown; title: string }[];
 
 function getUpdaterStatusText(options: {
   strategy: string;
@@ -213,6 +226,8 @@ export function SettingsView() {
   const isChecking = useUpdaterStore((state) => state.isChecking);
   const isDownloading = useUpdaterStore((state) => state.isDownloading);
   const setShouldPromptForUpdate = useUpdaterStore((state) => state.setShouldPromptForUpdate);
+  const settingsSection = useAppNavigation((state) => state.settingsSection);
+  const setSettingsSection = useAppNavigation((state) => state.setSettingsSection);
 
   React.useEffect(() => {
     void window.api
@@ -286,7 +301,12 @@ export function SettingsView() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Tabs defaultValue="general" orientation="vertical" className="h-full gap-0">
+      <Tabs
+        value={settingsSection}
+        onValueChange={(value) => setSettingsSection(value as SettingsSection)}
+        orientation="vertical"
+        className="h-full gap-0"
+      >
         <div className="flex h-full w-52 shrink-0 flex-col border-r bg-sidebar">
           <div className="flex items-center gap-2 px-4 py-3.5">
             <h2 className="cn-font-heading text-base font-medium text-sidebar-foreground">설정</h2>
@@ -743,6 +763,33 @@ export function SettingsView() {
               </div>
             </TabsContent>
 
+            <TabsContent value="account" keepMounted>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="Mega" />
+                  <MegaAccountSettings />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="Mega 다운로드" />
+                  <Section>
+                    <SettingRow
+                      title="한도 복구 시 자동 재개"
+                      description="Mega 전송 한도 초과로 일시정지된 다운로드를 한도가 복구되는 시점에 자동으로 재개합니다."
+                      control={
+                        <Switch
+                          checked={settings["transfer.megaQuotaAutoResume"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("transfer.megaQuotaAutoResume", value)
+                          }
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+              </div>
+            </TabsContent>
+
             <TabsContent value="advanced" keepMounted>
               <div className="flex flex-col gap-6">
                 <div className="flex flex-col gap-1">
@@ -864,6 +911,188 @@ type PasswordRow = { id: string; value: string };
 
 function createPasswordRow(value = ""): PasswordRow {
   return { id: crypto.randomUUID(), value };
+}
+
+const MEGA_PLAN_LABELS: Record<number, string> = {
+  0: "무료",
+  1: "Pro I",
+  2: "Pro II",
+  3: "Pro III",
+  4: "Pro Lite",
+  100: "Business",
+  101: "Pro Flexi",
+};
+
+function MegaAccountSettings() {
+  const [account, setAccount] = React.useState<MegaAccountState | null>(null);
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [mfaCode, setMfaCode] = React.useState("");
+  const [mfaRequired, setMfaRequired] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+
+  React.useEffect(() => {
+    window.api
+      .invoke("mega:getAccount")
+      .then(setAccount)
+      .catch((error) => {
+        toast.error("Mega 계정 정보를 불러오지 못했습니다", {
+          description: getIpcErrorCause(error),
+        });
+      });
+    return window.api.on("mega:accountChanged", setAccount);
+  }, []);
+
+  const run = async (action: () => Promise<void>, failure: string) => {
+    setPending(true);
+    try {
+      await action();
+    } catch (error) {
+      toast.error(failure, { description: getIpcErrorCause(error) });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const login = () =>
+    run(async () => {
+      const result = await window.api.invoke("mega:login", {
+        email,
+        password,
+        ...(mfaRequired ? { mfaCode } : {}),
+      });
+      if (result.status === "mfaRequired") {
+        setMfaRequired(true);
+        return;
+      }
+      setAccount(result.account);
+      setPassword("");
+      setMfaCode("");
+      setMfaRequired(false);
+    }, "Mega에 로그인하지 못했습니다");
+
+  if (!account) {
+    return null;
+  }
+
+  if (account.loggedIn) {
+    return (
+      <Section>
+        <SettingRow
+          title={account.email}
+          description={`요금제: ${MEGA_PLAN_LABELS[account.proLevel] ?? `유형 ${account.proLevel}`}${
+            account.persistent
+              ? ""
+              : " · 이 시스템에서는 세션을 저장할 수 없어 앱을 다시 시작하면 로그아웃됩니다."
+          }`}
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={pending}
+              onClick={() =>
+                void run(async () => {
+                  setAccount(await window.api.invoke("mega:logout"));
+                }, "Mega에서 로그아웃하지 못했습니다")
+              }
+            >
+              로그아웃
+            </Button>
+          }
+        />
+        <SettingRow
+          title="전송 한도"
+          description={
+            account.transferUsedBytes === undefined
+              ? "사용량 정보 없음"
+              : account.transferMaxBytes
+                ? `${formatSize(account.transferUsedBytes)} / ${formatSize(account.transferMaxBytes)} 사용`
+                : `${formatSize(account.transferUsedBytes)} 사용`
+          }
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={pending}
+              onClick={() =>
+                void run(async () => {
+                  setAccount(await window.api.invoke("mega:refreshAccount"));
+                }, "Mega 계정 정보를 불러오지 못했습니다")
+              }
+            >
+              새로고침
+            </Button>
+          }
+        />
+      </Section>
+    );
+  }
+
+  return (
+    <Section>
+      <form
+        className="flex flex-col gap-3 p-3.5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void login();
+        }}
+      >
+        <span className="text-xs text-muted-foreground">
+          로그인하면 Mega 다운로드에 계정의 전송 한도가 적용됩니다. 비밀번호는 저장하지 않습니다.
+        </span>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="mega-email">이메일</Label>
+          <Input
+            id="mega-email"
+            type="email"
+            autoComplete="username"
+            value={email}
+            disabled={pending}
+            onChange={(event) => {
+              setEmail(event.target.value);
+              setMfaRequired(false);
+              setMfaCode("");
+            }}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="mega-password">비밀번호</Label>
+          <Input
+            id="mega-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            disabled={pending}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </div>
+        {mfaRequired && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="mega-mfa">2단계 인증 코드</Label>
+            <Input
+              id="mega-mfa"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={mfaCode}
+              disabled={pending}
+              onChange={(event) => setMfaCode(event.target.value)}
+            />
+          </div>
+        )}
+        <div>
+          <Button
+            type="submit"
+            size="sm"
+            disabled={pending || !email.trim() || !password || (mfaRequired && !mfaCode.trim())}
+          >
+            로그인
+          </Button>
+        </div>
+      </form>
+    </Section>
+  );
 }
 
 function CollectionPasswordListSetting({

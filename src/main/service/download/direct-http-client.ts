@@ -7,7 +7,7 @@ import type { KioskDownloader } from "../..";
 import type { DirectFileSourceMeta, LoadedDirectCollection } from "./types";
 
 import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
-import { parseTransferRetryAfterMs } from "./transfer-it-api-client";
+import { parseRetryAfterMs } from "../mega/mega-api";
 
 export const DIRECT_CHUNK_SIZE = 8 * 1024 * 1024;
 const MAX_REDIRECTS = 10;
@@ -141,7 +141,7 @@ export class DirectHttpClient {
                 continue;
             }
             if (response.status !== 200 && response.status !== 206 && response.status !== 416) {
-                const retryAfterMs = parseTransferRetryAfterMs(response.headers.get("retry-after"));
+                const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
                 throw new DirectHttpError(
                     response.status,
                     retryAfterMs,

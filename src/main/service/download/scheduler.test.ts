@@ -77,6 +77,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -129,6 +130,7 @@ describe("DownloadScheduler", () => {
         const repository = createRepository([collection], [file]);
         const scheduler = new DownloadScheduler(
             createKioskDownloader(),
+            {} as never,
             {} as never,
             {} as never,
             {} as never,
@@ -186,6 +188,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -234,6 +237,7 @@ describe("DownloadScheduler", () => {
         const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
         const scheduler = new DownloadScheduler(
             createKioskDownloader(logger, { requestPoolSize: 2 }),
+            {} as never,
             {} as never,
             {} as never,
             {} as never,
@@ -373,6 +377,7 @@ describe("DownloadScheduler", () => {
             { refreshCollectionToken } as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -417,6 +422,7 @@ describe("DownloadScheduler", () => {
         const emitUpdate = vi.fn(async () => undefined);
         const scheduler = new DownloadScheduler(
             createKioskDownloader(),
+            {} as never,
             {} as never,
             {} as never,
             {} as never,
@@ -476,6 +482,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -519,6 +526,7 @@ describe("DownloadScheduler", () => {
                 { error: vi.fn(), warn: vi.fn(), info: vi.fn() },
                 { requestPoolSize: REQUEST_POOL_SIZE_MAX },
             ),
+            {} as never,
             {} as never,
             {} as never,
             {} as never,
@@ -568,6 +576,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -612,6 +621,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -641,6 +651,7 @@ describe("DownloadScheduler", () => {
         const repository = createRepository([collection], files);
         const scheduler = new DownloadScheduler(
             createKioskDownloader(),
+            {} as never,
             {} as never,
             {} as never,
             {} as never,
@@ -686,6 +697,7 @@ describe("DownloadScheduler", () => {
             {
                 streamSegment: vi.fn(() => (async function* () {})()),
             } as never,
+            {} as never,
             {} as never,
             {} as never,
             repository.value,
@@ -767,6 +779,7 @@ describe("DownloadScheduler", () => {
             {
                 streamSegment: vi.fn(() => (async function* () {})()),
             } as never,
+            {} as never,
             {} as never,
             {} as never,
             repository.value,
@@ -852,6 +865,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             createRepository(collections, files).value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -919,6 +933,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -963,6 +978,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -998,6 +1014,7 @@ describe("DownloadScheduler", () => {
         const repository = createRepository([collection], [file]);
         const scheduler = new DownloadScheduler(
             createKioskDownloader(),
+            {} as never,
             {} as never,
             {} as never,
             {} as never,
@@ -1061,6 +1078,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -1103,6 +1121,7 @@ describe("DownloadScheduler", () => {
         const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
         const scheduler = new DownloadScheduler(
             createKioskDownloader(logger),
+            {} as never,
             {} as never,
             {} as never,
             {} as never,
@@ -1168,6 +1187,7 @@ describe("DownloadScheduler", () => {
             });
             const scheduler = new DownloadScheduler(
                 kd,
+                {} as never,
                 {} as never,
                 {} as never,
                 {
@@ -1332,6 +1352,7 @@ describe("DownloadScheduler", () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
             repository.value,
             createMetrics(),
             vi.fn(async () => undefined),
@@ -1360,6 +1381,7 @@ describe("DownloadScheduler", () => {
         };
         const scheduler = new DownloadScheduler(
             createKioskDownloader(),
+            {} as never,
             {} as never,
             {} as never,
             workuploadApi as never,
@@ -1600,6 +1622,7 @@ async function createZipJsFixture() {
         {} as never,
         {} as never,
         {} as never,
+        {} as never,
         repository.value,
         createMetrics(),
         vi.fn(async () => undefined),
@@ -1645,6 +1668,7 @@ function createSchedulerSettings(maxChunkRetries: number): SchedulerSettings {
 function createSchedulerForStreamTest() {
     return new DownloadScheduler(
         createKioskDownloader(),
+        {} as never,
         {} as never,
         {} as never,
         {} as never,
@@ -1696,6 +1720,7 @@ function createCollection(id: string, index: number): DownloadCollectionRow {
         bundleId: null,
         ordinal: index,
         requestHeadersJson: null,
+        pauseReasonJson: null,
     };
 }
 

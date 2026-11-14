@@ -171,6 +171,7 @@ function requireTransferCollection(input: unknown): DownloadTransferPayload["col
     if (
         input.provider !== "kiosk" &&
         input.provider !== "transfer" &&
+        input.provider !== "mega" &&
         input.provider !== "workupload"
     ) {
         throw new Error("Invalid transfer collection.");

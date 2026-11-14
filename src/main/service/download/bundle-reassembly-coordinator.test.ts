@@ -47,6 +47,7 @@ function createCollection(id: string, ordinal: number, savePath: string): Downlo
         bundleId: "bundle-1",
         ordinal,
         requestHeadersJson: null,
+        pauseReasonJson: null,
     };
 }
 

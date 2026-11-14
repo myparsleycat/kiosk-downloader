@@ -206,9 +206,6 @@ export function NewDownloadView({
       <div className="flex w-[320px] min-w-0 shrink-0 flex-col overflow-hidden border-r">
         <div className="border-b px-4 py-3">
           <h2 className="cn-font-heading text-sm font-medium">새 다운로드</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            공유 URL을 입력하거나 확장 공유 파일(.kds)을 선택하세요
-          </p>
         </div>
 
         <ScrollArea className="flex-1">
@@ -228,13 +225,12 @@ export function NewDownloadView({
               <Field>
                 <FieldLabel htmlFor="url-input">
                   <LinkIcon className="size-3" />
-                  공유 URL · 직접 링크 또는 확장 공유 파일
+                  공유 링크
                 </FieldLabel>
                 <InputGroup>
                   <InputGroupInput
                     ref={urlInputRef}
                     id="url-input"
-                    placeholder="Kiosk · Transfer.it · Workupload · 직접 링크(HTTP) 또는 .kds"
                     value={url}
                     onChange={(e) => applyUrlInput(e.target.value)}
                     onPaste={(e) => {
@@ -274,10 +270,6 @@ export function NewDownloadView({
                     </InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
-                <FieldDescription className="text-xs">
-                  직접 링크는 붙여넣거나 Enter를 누르면 불러옵니다. .kds 파일은 드래그하거나 파일
-                  선택 버튼으로 불러올 수 있습니다
-                </FieldDescription>
               </Field>
             </div>
 
@@ -557,7 +549,9 @@ function CollectionMetaCard({
                 : "Workupload File ID"
               : collection.provider === "direct"
                 ? "호스트"
-                : "Share ID"
+                : collection.provider === "mega"
+                  ? "Mega ID"
+                  : "Share ID"
           }
         >
           <span className="font-mono text-[11px]">{collection.shareId}</span>

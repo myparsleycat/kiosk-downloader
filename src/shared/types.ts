@@ -67,7 +67,7 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
-export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload" | "direct";
+export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload" | "direct" | "mega";
 
 export interface DirectRequestHeaders {
     referer?: string;
@@ -153,6 +153,14 @@ export interface TransferProgressPatch<TProgress, TStatus> {
     updatedAt: number;
 }
 
+export type DownloadPauseReason = {
+    kind: "megaQuota";
+    /** ms epoch */
+    pausedAt: number;
+    /** ms epoch when the quota is available again; null when the server did not say. */
+    resumeAt: number | null;
+};
+
 export interface DownloadItem {
     id: string;
     collection: Collection;
@@ -165,6 +173,7 @@ export interface DownloadItem {
     createdAt: number;
     updatedAt: number;
     error?: string;
+    pauseReason?: DownloadPauseReason;
     transferControl?: TransferControl;
     requestPoolUsage?: RequestPoolUsage;
 }
@@ -365,6 +374,29 @@ export type UploadSegmentDedupSnapshot = {
     uploadedBytes: number;
 };
 
+export type MegaAccountState =
+    | { loggedIn: false; persistent: boolean }
+    | {
+          loggedIn: true;
+          persistent: boolean;
+          email: string;
+          name?: string;
+          /** MEGA `utype`: 0 free, 1-4 Pro tiers, 100 business, 101 Pro Flexi. */
+          proLevel: number;
+          transferUsedBytes?: number;
+          transferMaxBytes?: number;
+      };
+
+export type MegaLoginPayload = {
+    email: string;
+    password: string;
+    mfaCode?: string;
+};
+
+export type MegaLoginResult =
+    | { status: "ok"; account: MegaAccountState }
+    | { status: "mfaRequired" };
+
 export type IpcEvents = {
     "window:blur": () => void;
     "window:focus": () => void;
@@ -382,4 +414,5 @@ export type IpcEvents = {
     "updater:status-changed": (status: UpdaterStatus) => void;
     "updater:update-available": () => void;
     "updater:update-downloaded": () => void;
+    "mega:accountChanged": (account: MegaAccountState) => void;
 };

@@ -340,6 +340,13 @@ export class Setting {
                 fromStored: (value) => parseBooleanSetting(value, false),
                 toStored: (value) => String(value),
             },
+            "transfer.megaQuotaAutoResume": {
+                definition: APP_SETTINGS["transfer.megaQuotaAutoResume"],
+                getDefault: () => false,
+                fromStored: (value) => parseBooleanSetting(value, false),
+                toStored: (value) => String(value),
+                afterSet: () => this.kd.service.download.scheduleMegaQuotaResume(),
+            },
             "transfer.startupResumeMode": {
                 definition: APP_SETTINGS["transfer.startupResumeMode"],
                 getDefault: () => "auto" as const,

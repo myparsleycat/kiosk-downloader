@@ -34,6 +34,7 @@ export interface AppSettings {
     "transfer.uploadStartupResumeMode": StartupResumeMode;
     "transfer.downloadBandwidthLimitMibps": number;
     "transfer.uploadBandwidthLimitMibps": number;
+    "transfer.megaQuotaAutoResume": boolean;
     "network.forceIpv4": boolean;
 }
 
@@ -55,6 +56,7 @@ export type TransferProviderRequestId =
     | "kiosk-download"
     | "workupload-download"
     | "transfer-it-download"
+    | "mega-download"
     | "direct-download";
 
 export const STREAM_WRITE_BATCH_BYTES_OPTIONS = [
@@ -203,6 +205,11 @@ export const APP_SETTINGS = {
         publicKey: "transfer.uploadBandwidthLimitMibps",
         scope: "transfer",
         storageKey: "transfer.uploadBandwidthLimitMibps",
+    },
+    "transfer.megaQuotaAutoResume": {
+        publicKey: "transfer.megaQuotaAutoResume",
+        scope: "transfer",
+        storageKey: "transfer.megaQuotaAutoResume",
     },
     "network.forceIpv4": {
         publicKey: "network.forceIpv4",

@@ -1,4 +1,5 @@
 import type { DownloadService } from "@main/service/download";
+import type { MegaAccountService } from "@main/service/mega";
 import type { Updater } from "@main/service/updater";
 import type { UploadService } from "@main/service/upload";
 import type { getAppStatus, openExternal, showOpenDialog } from "@main/service/util";
@@ -23,6 +24,10 @@ export type IpcHandlers = {
     "download:remove": DownloadService["remove"];
     "download:resumeCollection": DownloadService["resumeCollection"];
     "download:resumeFile": DownloadService["resumeFile"];
+    "mega:getAccount": MegaAccountService["getAccount"];
+    "mega:login": MegaAccountService["login"];
+    "mega:logout": MegaAccountService["logout"];
+    "mega:refreshAccount": MegaAccountService["refreshAccount"];
     "setting:getMany": <K extends readonly SettingKey[] = readonly SettingKey[]>(
         keys?: K,
     ) => Promise<{ [P in K[number]]: AppSettings[P] }>;

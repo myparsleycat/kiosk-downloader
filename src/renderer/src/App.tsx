@@ -28,7 +28,9 @@ import {
   uploadItemsSource,
   useTransferItems,
 } from "./hooks/use-transfer-items";
+import { useAppNavigation } from "./stores/app-navigation";
 import { useDownloadTreeExpanded } from "./stores/download-tree-expanded";
+import { subscribeMegaStatus } from "./stores/mega-status";
 import { shouldLoadPastedShare, useNewDownloadDraft } from "./stores/new-download-draft";
 import { useUpdaterStore } from "./stores/updater";
 
@@ -45,12 +47,12 @@ export function RootProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-type TabValue = "downloads" | "new" | "uploads" | "new-upload" | "settings";
-
 const isDarwin = window.api.platform === "darwin";
 
 function MainComponent() {
-  const [tab, setTab] = React.useState<TabValue>("downloads");
+  const tab = useAppNavigation((state) => state.tab);
+  const setTab = useAppNavigation((state) => state.setTab);
+  const openSettings = useAppNavigation((state) => state.openSettings);
   // Creation finishes asynchronously, so read the tab at completion time, not at render time.
   const tabRef = React.useRef(tab);
   React.useEffect(() => {
@@ -135,6 +137,8 @@ function MainComponent() {
       window.removeEventListener("focus", onFocus);
     };
   }, []);
+
+  React.useEffect(() => subscribeMegaStatus(), []);
 
   React.useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
@@ -267,7 +271,7 @@ function MainComponent() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setTab("settings")}
+          onClick={() => openSettings()}
           className={cn(
             "h-6 gap-1 px-2 text-xs",
             tab === "settings" ? "bg-muted text-foreground" : "text-foreground/60",

@@ -2,16 +2,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TransferScheduler } from "../transfer-request-pool";
 import {
+    createTransferRangeSource,
+    type MegaCdnSpec,
+    transferItCdnSpec,
+} from "./mega-cdn-download-runner";
+import {
     type ChunkRangeSource,
     readRangeBody,
     TransferChunkPool,
     type TransferFileRegistration,
 } from "./transfer-chunk-pool";
 import { TRANSFER_RATE_LIMIT_ERROR } from "./transfer-it-api-client";
-import { createTransferRangeSource } from "./transfer-it-download-runner";
 
 // Set by the latest createHarness() so registration() builds a source bound to its mocks.
-let createSource: () => ChunkRangeSource;
+let createSource: (overrides?: Partial<MegaCdnSpec>) => ChunkRangeSource;
 
 function createHarness(payloadRequest: ReturnType<typeof vi.fn>) {
     const requestPool = new TransferScheduler(8);
@@ -41,13 +45,19 @@ function createHarness(payloadRequest: ReturnType<typeof vi.fn>) {
             },
         },
     };
-    createSource = () =>
+    createSource = (overrides = {}) =>
         createTransferRangeSource({
             kd: kd as never,
-            api: { getDownloadUrl } as never,
             collection: { id: "collection", shareId: "share" } as never,
-            file: { id: "file", remoteId: "remote" } as never,
             nodeKey: Buffer.alloc(32),
+            spec: {
+                ...transferItCdnSpec(
+                    { getDownloadUrl } as never,
+                    { id: "collection", shareId: "share" } as never,
+                    { id: "file", remoteId: "remote" } as never,
+                ),
+                ...overrides,
+            },
         });
     const pool = new TransferChunkPool({
         kd: kd as never,
@@ -206,6 +216,24 @@ describe("TransferChunkPool", () => {
             expect.anything(),
             TRANSFER_RATE_LIMIT_ERROR,
         );
+    });
+
+    it("pauses instead of retrying when a quota-limited CDN reports 509", async () => {
+        const payloadRequest = vi.fn(
+            async () => new Response(null, { status: 509, headers: { "x-mega-time-left": "120" } }),
+        );
+        const { pool, repository } = createHarness(payloadRequest);
+        pool.start(8);
+        const item = registration();
+        const onQuotaExceeded = vi.fn(() => item.controller.abort());
+        item.source = createSource({ onQuotaExceeded });
+
+        await expect(pool.register(item)).resolves.toBe("paused");
+        expect(onQuotaExceeded).toHaveBeenCalledWith(
+            expect.objectContaining({ name: "MegaQuotaExceededError", timeLeftMs: 120_000 }),
+        );
+        expect(payloadRequest).toHaveBeenCalledTimes(1);
+        expect(repository.markChunkError).not.toHaveBeenCalled();
     });
 
     it("includes CDN error bodies in unclassified HTTP failures", async () => {

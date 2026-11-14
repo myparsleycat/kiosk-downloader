@@ -231,7 +231,14 @@ function SortButton({
   );
 }
 
-const SUPPORTED_PROVIDERS = ["Kiosk", "Transfer.it", "Workupload", "확장 공유 (.kds)"] as const;
+const SUPPORTED_PROVIDERS = [
+  "Kiosk",
+  "Transfer.it",
+  "Workupload",
+  "Mega",
+  "직접 링크",
+  "확장 공유 (.kds)",
+] as const;
 
 function EmptyState() {
   return (

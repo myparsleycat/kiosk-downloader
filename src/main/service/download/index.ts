@@ -12,6 +12,7 @@ import {
     isZipInvalidPasswordError,
     isZipPasswordRequiredError,
 } from "@shared/download-errors";
+import { getAutoResumeTime } from "@shared/pause-reason";
 import type { TransferProviderRequestId } from "@shared/settings";
 import {
     buildShareUrl,
@@ -26,6 +27,7 @@ import {
     type DirectRequestHeaders,
     type CreateDownloadPayload,
     type DownloadItem,
+    type DownloadPauseReason,
     type DownloadProvider,
     type FileProgress,
     type ListZipEntriesPayload,
@@ -44,6 +46,7 @@ import fse from "fs-extra";
 import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
+import type { MegaQuotaExceededError } from "../mega/mega-api";
 import type {
     DownloadCollectionRow,
     DownloadFileRow,
@@ -70,6 +73,7 @@ import { BundleReassemblyCoordinator } from "./bundle-reassembly-coordinator";
 import { DirectHttpClient } from "./direct-http-client";
 import { reassembleExtendedFile } from "./extended-reassembly";
 import { KioApiClient } from "./kio-api-client";
+import { MegaApiClient } from "./mega-api-client";
 import { DownloadTransferMetrics } from "./metrics";
 import {
     PartFileWriter,
@@ -77,7 +81,7 @@ import {
     getPartDigestPath,
     getStagingPartPath,
 } from "./part-file";
-import { DownloadRepository } from "./repository";
+import { DownloadRepository, parsePauseReason } from "./repository";
 import { DownloadScheduler } from "./scheduler";
 import {
     MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES,
@@ -130,6 +134,8 @@ type StoredExtendedManifest = {
 export class DownloadService {
     private readonly api: KioApiClient;
     private readonly transferApi: TransferItApiClient;
+    private readonly megaApi: MegaApiClient;
+    private megaQuotaResumeTimer: ReturnType<typeof setTimeout> | null = null;
     private readonly workuploadApi: WorkuploadApiClient;
     private readonly directApi: DirectHttpClient;
     private readonly repository: DownloadRepository;
@@ -147,6 +153,9 @@ export class DownloadService {
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
         this.transferApi = new TransferItApiClient(kd);
+        this.megaApi = new MegaApiClient(kd, {
+            onQuotaExceeded: (error) => this.pauseMegaCollectionsForQuota(error),
+        });
         this.workuploadApi = new WorkuploadApiClient(kd);
         this.directApi = new DirectHttpClient(kd);
         this.repository = new DownloadRepository(kd);
@@ -154,6 +163,7 @@ export class DownloadService {
             kd,
             this.api,
             this.transferApi,
+            this.megaApi,
             this.workuploadApi,
             this.repository,
             this.metrics,
@@ -210,6 +220,7 @@ export class DownloadService {
         if (mode === "auto") {
             this.scheduler.requestSchedule();
         }
+        await this.scheduleMegaQuotaResume();
     }
 
     public hasActiveTransfers() {
@@ -272,6 +283,10 @@ export class DownloadService {
     }
 
     public destroy() {
+        if (this.megaQuotaResumeTimer) {
+            clearTimeout(this.megaQuotaResumeTimer);
+            this.megaQuotaResumeTimer = null;
+        }
         this.abortAllPrepares();
         this.preparedDrafts.clear();
         this.unsubscribeRequestPoolUsage?.();
@@ -776,6 +791,9 @@ export class DownloadService {
         if (parsed.provider === "transfer") {
             return this.transferApi.loadCollection(payload);
         }
+        if (parsed.provider === "mega") {
+            return this.megaApi.loadCollection(payload);
+        }
         if (parsed.provider === "workupload") {
             return this.normalizeWorkuploadCollection(
                 await this.workuploadApi.loadCollection(payload),
@@ -783,6 +801,107 @@ export class DownloadService {
             );
         }
         return this.api.loadCollection(payload);
+    }
+
+    /**
+     * The MEGA transfer quota belongs to the IP or account, so every running Mega collection is
+     * stopped together. Runs synchronously so in-flight chunks are aborted (kept pending) before
+     * the failing range is handled; the reason stays on the collection until it runs again.
+     */
+    private pauseMegaCollectionsForQuota(error: MegaQuotaExceededError) {
+        const collections = this.repository
+            .listRunnableCollections()
+            .filter((collection) => collection.provider === "mega");
+        if (collections.length === 0) {
+            return;
+        }
+        const loggedIn = Boolean(this.kd.service.mega.getSessionId());
+        const pausedAt = Date.now();
+        const reason: DownloadPauseReason = {
+            kind: "megaQuota",
+            pausedAt,
+            resumeAt: error.timeLeftMs === undefined ? null : pausedAt + error.timeLeftMs,
+        };
+        this.kd.logger.warn(
+            {
+                collectionIds: collections.map((collection) => collection.id),
+                timeLeftMs: error.timeLeftMs,
+                loggedIn,
+            },
+            "DownloadService:megaQuotaExceeded",
+        );
+        for (const collection of collections) {
+            this.scheduler.pauseCollection(collection.id);
+            this.repository.pauseCollection(collection.id, reason);
+        }
+        void (async () => {
+            for (const collection of collections) {
+                await this.emitUpdate(collection.id);
+            }
+            await this.kd.service.transfer.refreshPowerSaveBlock();
+            await this.scheduleMegaQuotaResume();
+        })().catch((emitError: unknown) => {
+            logCaughtError(
+                this.kd.logger,
+                "DownloadService:megaQuotaExceeded",
+                { stage: "emit-update" },
+                emitError,
+            );
+        });
+    }
+
+    /**
+     * Re-arms the single timer that resumes quota-paused Mega collections. Called after a quota
+     * pause, on startup and when the auto-resume setting changes; a no-op while the setting is off.
+     */
+    public async scheduleMegaQuotaResume() {
+        const autoResume = await this.kd.setting.get("transfer.megaQuotaAutoResume");
+        // Cleared only after the await so overlapping calls cannot leave an orphaned timer.
+        if (this.megaQuotaResumeTimer) {
+            clearTimeout(this.megaQuotaResumeTimer);
+            this.megaQuotaResumeTimer = null;
+        }
+        if (!autoResume) {
+            return;
+        }
+        const resumeTimes = this.repository
+            .listMegaQuotaPausedCollections()
+            .map((collection) => megaQuotaResumeTime(collection.pauseReasonJson))
+            .filter((time) => time !== undefined);
+        if (resumeTimes.length === 0) {
+            return;
+        }
+        // setTimeout overflows above ~24.8 days; a long wait is simply re-armed.
+        const delayMs = Math.min(Math.max(0, Math.min(...resumeTimes) - Date.now()), 2 ** 31 - 1);
+        this.megaQuotaResumeTimer = setTimeout(() => {
+            this.megaQuotaResumeTimer = null;
+            void this.resumeDueMegaQuotaCollections();
+        }, delayMs);
+    }
+
+    private async resumeDueMegaQuotaCollections() {
+        const now = Date.now();
+        for (const collection of this.repository.listMegaQuotaPausedCollections()) {
+            const resumeAt = megaQuotaResumeTime(collection.pauseReasonJson);
+            if (resumeAt === undefined || resumeAt > now) {
+                continue;
+            }
+            try {
+                this.repository.resumeCollection(collection.id, false, {
+                    preserveUserPauses: true,
+                });
+                this.scheduler.resumeCollection(collection.id);
+                await this.emitUpdate(collection.id);
+            } catch (error) {
+                logCaughtError(
+                    this.kd.logger,
+                    "DownloadService:megaQuotaAutoResume",
+                    { collectionId: collection.id, name: collection.name, resumeAt },
+                    error,
+                );
+            }
+        }
+        await this.scheduleMegaQuotaResume();
     }
 
     private normalizeWorkuploadCollection(
@@ -2035,9 +2154,17 @@ export class DownloadService {
     }
 }
 
+function megaQuotaResumeTime(pauseReasonJson: string | null) {
+    const reason = parsePauseReason(pauseReasonJson);
+    return reason && getAutoResumeTime(reason);
+}
+
 function requestPoolProviderId(provider: DownloadProvider | undefined) {
     if (provider === "transfer") {
         return "transfer-it-download" satisfies TransferProviderRequestId;
+    }
+    if (provider === "mega") {
+        return "mega-download" satisfies TransferProviderRequestId;
     }
     if (provider === "workupload") {
         return "workupload-download" satisfies TransferProviderRequestId;
