@@ -73,7 +73,10 @@ export class DirectDownloadRunner {
 
     public async runFile(input: DirectDownloadRunInput) {
         const signal = input.controller.signal;
-        if (hasStoredProgress(this.deps.repository.listChunks(input.file.id))) {
+        if (
+            input.file.size === 0 ||
+            hasStoredProgress(this.deps.repository.listChunks(input.file.id))
+        ) {
             await this.revalidateRemote(input.collection, input.file, signal);
         }
 
@@ -97,7 +100,7 @@ export class DirectDownloadRunner {
     }
 
     // Before resuming, re-probe so a file replaced while paused restarts instead of
-    // splicing old and new bytes. Probe failures fall through to If-Range on each chunk.
+    // splicing old and new bytes. On probe failure, only a validator permits resuming.
     private async revalidateRemote(
         collection: DownloadCollectionRow,
         file: DownloadFileRow,
@@ -123,11 +126,15 @@ export class DirectDownloadRunner {
                 );
                 return null;
             });
+        const stored = parseDirectFileSourceMeta(file.sourceMetaJson);
         if (!probe) {
+            if (!directIfRangeValidator(stored)) {
+                await this.removePartFiles(collection, file);
+                this.deps.repository.resetFileProgress(file.id);
+            }
             return;
         }
 
-        const stored = parseDirectFileSourceMeta(file.sourceMetaJson);
         if (hasDirectRemoteChanged({ ...stored, size: file.size }, probe)) {
             this.deps.kd.logger.warn(
                 {

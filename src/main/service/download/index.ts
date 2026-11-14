@@ -288,15 +288,14 @@ export class DownloadService {
         const toFinalPath = (name: string, ascii: boolean, base = savePath) =>
             path.join(base, this.kd.lib.fs.getSafeRelativePath(name, { asciiFilenames: ascii }));
         const occupied = new Set(
-            this.repository
-                .listUnfinishedFileTargets()
-                .map((target) =>
-                    toFinalPath(
-                        target.path,
-                        target.asciiFilenames === 1,
-                        target.savePath,
-                    ).toLowerCase(),
-                ),
+            this.repository.listUnfinishedFileTargets().flatMap((target) => {
+                const finalPath = toFinalPath(
+                    target.path,
+                    target.asciiFilenames === 1,
+                    target.savePath,
+                ).toLowerCase();
+                return [finalPath, `${finalPath}.part`];
+            }),
         );
         const originalName = entry.node.name;
         const extension = path.extname(originalName);
@@ -304,10 +303,12 @@ export class DownloadService {
         for (let attempt = 0; ; attempt += 1) {
             const name = attempt === 0 ? originalName : `${stem} (${attempt})${extension}`;
             const finalPath = toFinalPath(name, asciiFilenames);
+            const partPath = `${finalPath}.part`;
             if (
                 occupied.has(finalPath.toLowerCase()) ||
+                occupied.has(partPath.toLowerCase()) ||
                 (await pathExists(finalPath)) ||
-                (await pathExists(`${finalPath}.part`))
+                (await pathExists(partPath))
             ) {
                 continue;
             }

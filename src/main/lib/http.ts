@@ -135,7 +135,7 @@ export type PayloadRequestOptions = BaseRequestOptions & {
 
 export class TimeoutError extends Error {
     public constructor(request: Request) {
-        super(`Request timed out: ${request.method} ${request.url}`);
+        super(`Request timed out: ${request.method} ${toLogUrl(request.url)}`);
         this.name = "TimeoutError";
     }
 }
@@ -177,8 +177,8 @@ export class ProxyResolutionError extends Error {
     public constructor(url: string, proxyResult?: string, cause?: unknown) {
         super(
             proxyResult
-                ? `No supported proxy directive was resolved for ${url}: ${proxyResult}`
-                : `Failed to resolve a proxy for ${url}`,
+                ? `No supported proxy directive was resolved for ${toLogUrl(url)}: ${proxyResult}`
+                : `Failed to resolve a proxy for ${toLogUrl(url)}`,
             cause === undefined ? undefined : { cause },
         );
         this.name = "ProxyResolutionError";

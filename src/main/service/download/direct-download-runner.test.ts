@@ -22,6 +22,9 @@ async function createHarness(options: {
     payloadRequest: ReturnType<typeof vi.fn>;
     poolOutcome?: "paused";
     meta?: Record<string, unknown>;
+    size?: number;
+    downloadedBytes?: number;
+    chunkStatus?: DownloadChunkRow["status"];
 }) {
     const dir = await fse.mkdtemp(path.join(os.tmpdir(), "direct-runner-"));
     tempDirs.push(dir);
@@ -35,9 +38,9 @@ async function createHarness(options: {
     const file = {
         id: "file",
         collectionId: "collection",
-        size: 4,
+        size: options.size ?? 4,
         sourceMetaJson: JSON.stringify(meta),
-        downloadedBytes: 0,
+        downloadedBytes: options.downloadedBytes ?? 0,
         status: "downloading",
     };
     const chunk = (): DownloadChunkRow => ({
@@ -47,23 +50,27 @@ async function createHarness(options: {
         offset: 0,
         size: file.size,
         status: chunkStatus,
-        downloadedBytes: 0,
+        downloadedBytes: file.downloadedBytes,
         attempts: 0,
         updatedAt: "",
         error: null,
     });
-    let chunkStatus: DownloadChunkRow["status"] = "pending";
+    let chunkStatus: DownloadChunkRow["status"] = options.chunkStatus ?? "pending";
     const repository = {
-        listChunks: vi.fn(() => [chunk()]),
+        listChunks: vi.fn(() => (file.size === 0 ? [] : [chunk()])),
         syncFileDownloadedBytes: vi.fn(),
         getFile: vi.fn(() => file),
         getCollection: vi.fn(() => collection),
         resetFileProgress: vi.fn(() => {
             chunkStatus = "pending";
+            file.downloadedBytes = 0;
         }),
-        updateDirectRemote: vi.fn((_fileId: string, remote: { sourceMetaJson: string }) => {
-            file.sourceMetaJson = remote.sourceMetaJson;
-        }),
+        updateDirectRemote: vi.fn(
+            (_fileId: string, remote: { size: number; sourceMetaJson: string }) => {
+                file.size = remote.size;
+                file.sourceMetaJson = remote.sourceMetaJson;
+            },
+        ),
         markFileStatus: vi.fn(),
         hasErroredChunk: vi.fn(() => false),
     };
@@ -87,7 +94,7 @@ async function createHarness(options: {
             try {
                 for await (const _ of registration.source.openRange(
                     pending,
-                    0,
+                    pending.downloadedBytes,
                     registration.controller.signal,
                     () => undefined,
                     () => undefined,
@@ -128,7 +135,7 @@ async function createHarness(options: {
             startedAt: 0,
             collectionStartedAt: 0,
         });
-    return { run, repository, register, finalizeFile };
+    return { run, repository, register, finalizeFile, partPath: path.join(dir, "file.bin.part") };
 }
 
 const partial = (body: string, etag = '"v1"') =>
@@ -143,6 +150,145 @@ const probe = (size: number, etag: string) =>
     });
 
 describe("DirectDownloadRunner", () => {
+    it("downloads a file that grew after it was recorded as empty", async () => {
+        const payloadRequest = vi
+            .fn()
+            .mockResolvedValueOnce(probe(4, '"v2"'))
+            .mockResolvedValueOnce(partial("abcd", '"v2"'));
+        const harness = await createHarness({ rangeSupported: true, payloadRequest, size: 0 });
+
+        await harness.run();
+
+        expect(harness.repository.updateDirectRemote).toHaveBeenCalledWith(
+            "file",
+            expect.objectContaining({ size: 4 }),
+        );
+        expect(harness.register.mock.calls[0]?.[0].chunks).toMatchObject([
+            { offset: 0, size: 4, downloadedBytes: 0 },
+        ]);
+        expect(new Headers(payloadRequest.mock.calls[1]![1].headers).get("range")).toBe(
+            "bytes=0-3",
+        );
+        expect(harness.finalizeFile).toHaveBeenCalledOnce();
+    });
+
+    it("finalizes a file that is still empty after revalidation", async () => {
+        const payloadRequest = vi.fn().mockResolvedValue(
+            new Response(null, {
+                status: 416,
+                headers: { "content-range": "bytes */0", etag: '"v1"' },
+            }),
+        );
+        const harness = await createHarness({ rangeSupported: true, payloadRequest, size: 0 });
+
+        await harness.run();
+
+        expect(payloadRequest).toHaveBeenCalledOnce();
+        expect(harness.register).not.toHaveBeenCalled();
+        expect(harness.finalizeFile).toHaveBeenCalledOnce();
+    });
+
+    it("discards unvalidated progress when probing fails without a validator", async () => {
+        const payloadRequest = vi
+            .fn()
+            .mockRejectedValueOnce(new Error("probe failed"))
+            .mockImplementationOnce(async (_url: string, init: { headers: HeadersInit }) => {
+                const resumed = new Headers(init.headers).get("range") === "bytes=2-3";
+                return new Response(resumed ? "cd" : "abcd", {
+                    status: 206,
+                    headers: { "content-range": resumed ? "bytes 2-3/4" : "bytes 0-3/4" },
+                });
+            });
+        const harness = await createHarness({
+            rangeSupported: true,
+            payloadRequest,
+            downloadedBytes: 2,
+            meta: { etag: undefined },
+        });
+        await fse.writeFile(harness.partPath, "ab");
+        await fse.writeFile(`${harness.partPath}.crc`, "old!");
+
+        await harness.run();
+
+        expect(harness.repository.resetFileProgress).toHaveBeenCalledWith("file");
+        expect(new Headers(payloadRequest.mock.calls[1]![1].headers).get("range")).toBe(
+            "bytes=0-3",
+        );
+        expect(await fse.readFile(harness.partPath, "utf8")).toBe("");
+        expect(await fse.readFile(`${harness.partPath}.crc`, "utf8")).toBe("");
+        expect(harness.finalizeFile).toHaveBeenCalledOnce();
+    });
+
+    it.each([{ etag: '"v1"' }, { etag: undefined, lastModified: "Mon" }])(
+        "keeps progress on probe failure with validator %j",
+        async (meta) => {
+            const payloadRequest = vi
+                .fn()
+                .mockRejectedValueOnce(new Error("probe failed"))
+                .mockResolvedValueOnce(
+                    new Response("cd", {
+                        status: 206,
+                        headers: {
+                            "content-range": "bytes 2-3/4",
+                            etag: '"v1"',
+                            "last-modified": "Mon",
+                        },
+                    }),
+                );
+            const harness = await createHarness({
+                rangeSupported: true,
+                payloadRequest,
+                downloadedBytes: 2,
+                meta,
+            });
+
+            await harness.run();
+
+            expect(harness.repository.resetFileProgress).not.toHaveBeenCalled();
+            const headers = new Headers(payloadRequest.mock.calls[1]![1].headers);
+            expect(headers.get("range")).toBe("bytes=2-3");
+            expect(headers.get("if-range")).toBe(meta.etag ?? meta.lastModified);
+        },
+    );
+
+    it("keeps progress after a successful probe without validators", async () => {
+        const payloadRequest = vi
+            .fn()
+            .mockResolvedValueOnce(probe(4, ""))
+            .mockResolvedValueOnce(
+                new Response("cd", { status: 206, headers: { "content-range": "bytes 2-3/4" } }),
+            );
+        const harness = await createHarness({
+            rangeSupported: true,
+            payloadRequest,
+            downloadedBytes: 2,
+            meta: { etag: undefined },
+        });
+
+        await harness.run();
+
+        expect(harness.repository.resetFileProgress).not.toHaveBeenCalled();
+        expect(new Headers(payloadRequest.mock.calls[1]![1].headers).get("range")).toBe(
+            "bytes=2-3",
+        );
+    });
+
+    it("finalizes complete chunks after revalidation without fetching them again", async () => {
+        const payloadRequest = vi.fn().mockResolvedValue(probe(4, '"v1"'));
+        const harness = await createHarness({
+            rangeSupported: true,
+            payloadRequest,
+            chunkStatus: "completed",
+            downloadedBytes: 4,
+        });
+
+        await harness.run();
+
+        expect(payloadRequest).toHaveBeenCalledOnce();
+        expect(harness.register).not.toHaveBeenCalled();
+        expect(harness.finalizeFile).toHaveBeenCalledOnce();
+    });
+
     it("sends If-Range and request headers, then finalizes", async () => {
         const payloadRequest = vi.fn(async (_url: string, _init: { headers: HeadersInit }) =>
             partial("abcd"),
