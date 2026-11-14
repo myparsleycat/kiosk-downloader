@@ -33,6 +33,7 @@ import type {
     ZipEntryStoredMeta,
 } from "./types";
 
+import { ParsedTreeCache } from "../parsed-tree-cache";
 import { transferChunkLayoutMatches, transferChunkSizes } from "./transfer-it-crypto";
 import { parseWorkuploadFileSourceMeta, readRangeSupported } from "./types";
 import { buildZipEntrySegmentChunks, supportsZipEntryPoolDownload } from "./zip-segment-map";
@@ -118,7 +119,7 @@ function parseTree(value: string): DirNode {
     return JSON.parse(value) as DirNode;
 }
 
-function rowToCollection(row: DownloadCollectionRow): Collection {
+function rowToCollection(row: DownloadCollectionRow, tree: DirNode): Collection {
     return {
         shareId: row.shareId,
         name: row.name,
@@ -126,7 +127,7 @@ function rowToCollection(row: DownloadCollectionRow): Collection {
         segmentSize: row.segmentSize,
         passwordProtected: row.passwordPlain != null,
         provider: row.provider ?? "kiosk",
-        tree: parseTree(row.treeJson),
+        tree,
     };
 }
 
@@ -313,6 +314,8 @@ function isUnderFolderPath(filePath: string, folderPath: string) {
 }
 
 export class DownloadRepository {
+    private readonly treeCache = new ParsedTreeCache();
+
     public constructor(private readonly kd: KioskDownloader) {}
 
     public syncExpiredCollections() {
@@ -859,6 +862,7 @@ export class DownloadRepository {
 
     public deleteBundle(bundleId: string) {
         this.kd.lib.db.run(`DELETE FROM "download_bundle" WHERE "id" = ?`, [bundleId]);
+        this.treeCache.delete(bundleId);
     }
 
     public getCollection(collectionId: string) {
@@ -1640,6 +1644,7 @@ export class DownloadRepository {
 
     public deleteCollection(collectionId: string) {
         this.kd.lib.db.run(`DELETE FROM "download_collection" WHERE "id" = ?`, [collectionId]);
+        this.treeCache.delete(collectionId);
     }
 
     public recomputeCollectionStatus(collectionId: string) {
@@ -1971,7 +1976,10 @@ export class DownloadRepository {
 
         return {
             id: collection.id,
-            collection: rowToCollection(collection),
+            collection: rowToCollection(
+                collection,
+                this.treeCache.get(collection.id, collection.treeJson),
+            ),
             savePath: collection.savePath,
             progress,
             summary,
@@ -2056,7 +2064,7 @@ export class DownloadRepository {
                 segmentSize: collections[0]?.segmentSize ?? 16 * 1024 * 1024,
                 passwordProtected: bundle.passwordPlain != null,
                 provider: "extended",
-                tree: parseTree(bundle.treeJson),
+                tree: this.treeCache.get(bundle.id, bundle.treeJson),
             },
             savePath: bundle.savePath,
             progress,

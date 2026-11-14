@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import type { StartupResumeMode } from "@shared/settings";
 import type {
-    DirNode,
     TransferProgressSummary,
     UploadFileProgress,
     UploadItem,
@@ -19,15 +18,15 @@ import type {
     UploadFileRow,
 } from "./types";
 
+import { ParsedTreeCache } from "../parsed-tree-cache";
+
 function nowIso() {
     return new Date().toISOString();
 }
 
-function parseTree(value: string): DirNode {
-    return JSON.parse(value) as DirNode;
-}
-
 export class UploadRepository {
+    private readonly treeCache = new ParsedTreeCache();
+
     public constructor(private readonly kd: KioskDownloader) {}
 
     public restoreStartupState(mode: StartupResumeMode = "auto") {
@@ -448,6 +447,7 @@ export class UploadRepository {
 
     public deleteBundle(bundleId: string) {
         this.kd.lib.db.run(`DELETE FROM "upload_bundle" WHERE "id" = ?`, [bundleId]);
+        this.treeCache.delete(bundleId);
     }
 
     public getCollection(collectionId: string): UploadCollectionRow | null {
@@ -858,6 +858,7 @@ export class UploadRepository {
 
     public deleteCollection(collectionId: string) {
         this.kd.lib.db.run(`DELETE FROM "upload_collection" WHERE "id" = ?`, [collectionId]);
+        this.treeCache.delete(collectionId);
     }
 
     public recomputeCollectionStatus(collectionId: string) {
@@ -914,7 +915,7 @@ export class UploadRepository {
             passwordProtected: collection.passwordPlain != null,
             expires: collection.expires,
             shareLink: collection.shareLink,
-            tree: parseTree(collection.treeJson),
+            tree: this.treeCache.get(collection.id, collection.treeJson),
             progress,
             summary,
             status: collection.status,
@@ -1025,7 +1026,7 @@ export class UploadRepository {
             shareLink: null,
             shareValue: bundle.shareValue,
             shareKind: bundle.mode === "integrated" ? "extended" : "compatibility-list",
-            tree: parseTree(bundle.treeJson),
+            tree: this.treeCache.get(bundle.id, bundle.treeJson),
             progress,
             summary,
             status: activeStatus,

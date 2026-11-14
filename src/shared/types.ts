@@ -137,21 +137,23 @@ export interface TransferListSnapshot<T> {
     items: T[];
 }
 
-export interface TransferItemChange<T> {
-    revision: number;
+export interface TransferItemShape {
     id: string;
-    item: T | null;
+    progress: Record<string, unknown>;
 }
 
-export interface TransferProgressPatch<TProgress, TStatus> {
-    id: string;
-    progress: Record<string, TProgress>;
-    summary: TransferProgressSummary;
-    status: TStatus;
-    speedBps: number | null;
-    elapsedMs: number;
-    updatedAt: number;
+export interface TransferItemPatch<T extends TransferItemShape> {
+    /** A key whose value is undefined clears that optional field; structured clone keeps the key. */
+    fields: Partial<Omit<T, "id" | "progress">>;
+    progress?: Record<string, T["progress"][string]>;
+    removedProgress?: string[];
 }
+
+export type TransferItemChange<T extends TransferItemShape> = { revision: number; id: string } & (
+    | { kind: "upsert"; item: T }
+    | { kind: "patch"; patch: TransferItemPatch<T> }
+    | { kind: "remove" }
+);
 
 export type DownloadPauseReason = {
     kind: "megaQuota";
@@ -177,8 +179,6 @@ export interface DownloadItem {
     transferControl?: TransferControl;
     requestPoolUsage?: RequestPoolUsage;
 }
-
-export type DownloadProgressPatch = TransferProgressPatch<FileProgress, DownloadStatus>;
 
 export type DownloadFilter = "all" | "active" | "completed";
 
@@ -249,8 +249,6 @@ export interface UploadItem {
     requiresReplacement?: boolean;
     requestPoolUsage?: RequestPoolUsage;
 }
-
-export type UploadProgressPatch = TransferProgressPatch<UploadFileProgress, UploadStatus>;
 
 export interface CreateUploadPayload {
     tree: UploadTreeFile[];

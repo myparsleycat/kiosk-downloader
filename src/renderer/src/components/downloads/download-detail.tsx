@@ -51,8 +51,9 @@ export function DownloadDetail({
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
   const [errorDetails, setErrorDetails] = React.useState<FileTreeError[] | null>(null);
   const { runWithStopConfirmation, dialog: stopDialog } = useConfirmDownloadStop();
-  // Every download:changed event delivers a freshly deserialized tree; keep the previous
-  // reference while the structure is unchanged so sorting and row memoization are not redone.
+  // A change to any other collection field re-sends the whole collection with a freshly
+  // deserialized tree; keep the previous reference while the structure is unchanged so sorting
+  // and row memoization are not redone.
   const [tree, setTree] = React.useState(item?.collection.tree);
   if (item?.collection.tree !== tree && !isEqual(item?.collection.tree, tree)) {
     setTree(item?.collection.tree);

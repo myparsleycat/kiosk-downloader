@@ -68,6 +68,7 @@ import {
     type ExtendedSharePayload,
 } from "../extended-share";
 import { toOsProgressTransfer } from "../os-progress-bar";
+import { TransferItemPublisher } from "../transfer-item-publisher";
 import { showOpenDialog, showSaveDialog } from "../util";
 import { BundleReassemblyCoordinator } from "./bundle-reassembly-coordinator";
 import { DirectHttpClient } from "./direct-http-client";
@@ -148,7 +149,9 @@ export class DownloadService {
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
     private readonly bundleFinalizations = new Map<string, Promise<void>>();
     private unsubscribeRequestPoolUsage?: () => void;
-    private revision = 0;
+    private readonly publisher = new TransferItemPublisher<DownloadItem>((change) =>
+        this.kd.ipc.sendToMainWindow("download:changed", change),
+    );
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
@@ -1144,10 +1147,9 @@ export class DownloadService {
     }
 
     public async list() {
-        return {
-            revision: this.revision,
-            items: this.repository.listItems().map((item) => this.enrichItem(item)),
-        };
+        return this.publisher.snapshot(
+            this.repository.listItems().map((item) => this.enrichItem(item)),
+        );
     }
 
     public async pauseCollection(collectionId: string) {
@@ -1790,29 +1792,20 @@ export class DownloadService {
         if (collectionId) {
             const item = this.repository.getItem(collectionId);
             if (item) {
-                this.emitChanged(collectionId, this.enrichItem(item, options));
+                this.publisher.publish(this.enrichItem(item, options));
             }
             this.kd.service.transfer.syncMainWindowProgressBar();
             return;
         }
 
         for (const item of this.repository.listItems()) {
-            this.emitChanged(item.id, this.enrichItem(item, options));
+            this.publisher.publish(this.enrichItem(item, options));
         }
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
-    private emitChanged(id: string, item: DownloadItem | null) {
-        this.revision += 1;
-        this.kd.ipc.sendToMainWindow("download:changed", {
-            revision: this.revision,
-            id,
-            item,
-        });
-    }
-
     private async emitRemoved(id: string) {
-        this.emitChanged(id, null);
+        this.publisher.remove(id);
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 

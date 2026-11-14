@@ -41,10 +41,11 @@ export class IPC {
             window.webContents.isCrashed() ||
             window.webContents.isLoadingMainFrame()
         ) {
-            return;
+            return false;
         }
         try {
             window.webContents.send(channel, ...args);
+            return true;
         } catch (error) {
             if (
                 window.isDestroyed() ||
@@ -55,9 +56,10 @@ export class IPC {
                         "Render frame was disposed before WebFrameMain could be accessed",
                     ))
             ) {
-                return;
+                return false;
             }
             this.kd.logger.error({ channel, error }, "IPC:postMessageToWindow");
+            return false;
         }
     }
 
@@ -65,7 +67,7 @@ export class IPC {
         channel: K,
         ...args: Parameters<IpcEvents[K]>
     ) {
-        this.postMessageToWindow(this.kd.window.main.window, channel, ...args);
+        return this.postMessageToWindow(this.kd.window.main.window, channel, ...args);
     }
 
     public broadcast<K extends keyof IpcEvents>(channel: K, ...args: Parameters<IpcEvents[K]>) {

@@ -40,41 +40,81 @@ const item: DownloadItem = {
 };
 
 describe("transfer item changes", () => {
-    it("full item snapshot으로 기존 collection을 교체하고 새 collection을 추가한다", () => {
+    it("upsert로 기존 collection을 교체하고 새 collection을 추가한다", () => {
         const replacement: DownloadItem = { ...item, status: "paused" };
         const added: DownloadItem = { ...item, id: "download-b" };
 
         const replaced = applyTransferItemChange([item], {
             revision: 2,
             id: item.id,
+            kind: "upsert",
             item: replacement,
         });
         const result = applyTransferItemChange(replaced, {
             revision: 3,
             id: added.id,
+            kind: "upsert",
             item: added,
         });
 
         expect(result).toEqual([added, replacement]);
     });
 
-    it("item이 null이면 collection을 삭제한다", () => {
+    it("remove이면 collection을 삭제한다", () => {
         const result = applyTransferItemChange([item], {
             revision: 2,
             id: item.id,
-            item: null,
+            kind: "remove",
         });
 
         expect(result).toEqual([]);
     });
 
+    it("patch는 바뀐 필드와 진행률만 교체하고 나머지 참조를 유지한다", () => {
+        const progressed: FileProgress = { ...changed, downloaded: 8 };
+
+        const [result] = applyTransferItemChange([item], {
+            revision: 2,
+            id: item.id,
+            kind: "patch",
+            patch: { fields: { speedBps: undefined }, progress: { "b.txt": progressed } },
+        });
+
+        expect(result.speedBps).toBeUndefined();
+        expect(result.collection).toBe(item.collection);
+        expect(result.progress["a.txt"]).toBe(unchanged);
+        expect(result.progress["b.txt"]).toBe(progressed);
+    });
+
+    it("진행률 변경이 없는 patch는 progress 참조를 유지하고 removedProgress는 항목을 지운다", () => {
+        const [fieldsOnly] = applyTransferItemChange([item], {
+            revision: 2,
+            id: item.id,
+            kind: "patch",
+            patch: { fields: { status: "paused" } },
+        });
+        const [removed] = applyTransferItemChange([item], {
+            revision: 3,
+            id: item.id,
+            kind: "patch",
+            patch: { fields: {}, removedProgress: ["b.txt"] },
+        });
+
+        expect(fieldsOnly.progress).toBe(item.progress);
+        expect(Object.keys(removed.progress)).toEqual(["a.txt"]);
+    });
+
     it("list revision보다 새 이벤트만 revision 순서로 적용한다", () => {
-        const revisionThree = { ...item, status: "paused" as const, updatedAt: 3 };
         const revisionFour = { ...item, status: "downloading" as const, updatedAt: 4 };
         const changes: TransferItemChange<DownloadItem>[] = [
-            { revision: 4, id: item.id, item: revisionFour },
-            { revision: 1, id: item.id, item: { ...item, updatedAt: 1 } },
-            { revision: 3, id: item.id, item: revisionThree },
+            { revision: 4, id: item.id, kind: "upsert", item: revisionFour },
+            { revision: 1, id: item.id, kind: "upsert", item: { ...item, updatedAt: 1 } },
+            {
+                revision: 3,
+                id: item.id,
+                kind: "patch",
+                patch: { fields: { status: "paused", updatedAt: 3 } },
+            },
         ];
 
         const result = applyTransferItemChanges({ revision: 2, items: [item] }, changes);
@@ -84,9 +124,9 @@ describe("transfer item changes", () => {
 
     it("같거나 오래된 revision과 tombstone 뒤의 뒤늦은 이벤트를 무시한다", () => {
         const result = applyTransferItemChanges({ revision: 2, items: [item] }, [
-            { revision: 5, id: item.id, item: null },
-            { revision: 4, id: item.id, item: { ...item, updatedAt: 4 } },
-            { revision: 5, id: item.id, item: { ...item, updatedAt: 5 } },
+            { revision: 5, id: item.id, kind: "remove" },
+            { revision: 4, id: item.id, kind: "upsert", item: { ...item, updatedAt: 4 } },
+            { revision: 5, id: item.id, kind: "upsert", item: { ...item, updatedAt: 5 } },
         ]);
 
         expect(result).toEqual({ revision: 5, items: [] });
