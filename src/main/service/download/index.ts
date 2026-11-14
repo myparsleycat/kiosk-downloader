@@ -71,7 +71,12 @@ import { DirectHttpClient } from "./direct-http-client";
 import { reassembleExtendedFile } from "./extended-reassembly";
 import { KioApiClient } from "./kio-api-client";
 import { DownloadTransferMetrics } from "./metrics";
-import { PartFileWriter, getBundleTempDirName, getStagingPartPath } from "./part-file";
+import {
+    PartFileWriter,
+    getBundleTempDirName,
+    getPartDigestPath,
+    getStagingPartPath,
+} from "./part-file";
 import { DownloadRepository } from "./repository";
 import { DownloadScheduler } from "./scheduler";
 import {
@@ -274,7 +279,7 @@ export class DownloadService {
     }
 
     // Direct links often resolve to the same name ("download", "get.php"). Pick a free
-    // name the way browsers do so two downloads never share a .part or final file.
+    // name the way browsers do so downloads never share final or temporary files.
     private async claimDirectTarget(
         loaded: LoadedDirectCollection,
         savePath: string,
@@ -287,6 +292,17 @@ export class DownloadService {
         }
         const toFinalPath = (name: string, ascii: boolean, base = savePath) =>
             path.join(base, this.kd.lib.fs.getSafeRelativePath(name, { asciiFilenames: ascii }));
+        const getTargetPaths = (finalPath: string) => {
+            const partPath = `${finalPath}.part`;
+            const stagingPath = getStagingPartPath(partPath);
+            return [
+                finalPath,
+                partPath,
+                getPartDigestPath(partPath),
+                stagingPath,
+                getPartDigestPath(stagingPath),
+            ];
+        };
         const occupied = new Set(
             this.repository.listUnfinishedFileTargets().flatMap((target) => {
                 const finalPath = toFinalPath(
@@ -294,7 +310,7 @@ export class DownloadService {
                     target.asciiFilenames === 1,
                     target.savePath,
                 ).toLowerCase();
-                return [finalPath, `${finalPath}.part`];
+                return getTargetPaths(finalPath);
             }),
         );
         const originalName = entry.node.name;
@@ -302,14 +318,14 @@ export class DownloadService {
         const stem = originalName.slice(0, originalName.length - extension.length);
         for (let attempt = 0; ; attempt += 1) {
             const name = attempt === 0 ? originalName : `${stem} (${attempt})${extension}`;
-            const finalPath = toFinalPath(name, asciiFilenames);
-            const partPath = `${finalPath}.part`;
-            if (
-                occupied.has(finalPath.toLowerCase()) ||
-                occupied.has(partPath.toLowerCase()) ||
-                (await pathExists(finalPath)) ||
-                (await pathExists(partPath))
-            ) {
+            let collision = false;
+            for (const targetPath of getTargetPaths(toFinalPath(name, asciiFilenames))) {
+                if (occupied.has(targetPath.toLowerCase()) || (await pathExists(targetPath))) {
+                    collision = true;
+                    break;
+                }
+            }
+            if (collision) {
                 continue;
             }
             if (attempt === 0) {

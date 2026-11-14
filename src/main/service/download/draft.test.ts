@@ -157,11 +157,20 @@ describe("DownloadService prepared draft", () => {
         ["report.bin.part", "report.bin", "report (1).bin", false],
         ["folder/../REPORT.BIN", "report.bin.part", "report.bin (1).part", false],
         ["report.bin.part", "REPORT.bin", "REPORT (1).bin", false],
+        ["report.bin.part.crc", "report.bin", "report (1).bin", false],
+        ["report.bin", "report.bin.part.crc", "report.bin.part (1).crc", false],
+        ["report.bin.part.z", "report.bin", "report (1).bin", false],
+        ["report.bin", "report.bin.part.z", "report.bin.part (1).z", false],
+        ["report.bin.part.z.crc", "report.bin", "report (1).bin", false],
+        ["report.bin", "report.bin.part.z.crc", "report.bin.part.z (1).crc", false],
         ["report.bin", "report.bin", "report (1).bin", true],
         ["report.bin.part", "report.bin", "report (1).bin", true],
+        ["report.bin.part.crc", "report.bin", "report (1).bin", true],
+        ["report.bin.part.z", "report.bin", "report (1).bin", true],
+        ["report.bin.part.z.crc", "report.bin", "report (1).bin", true],
         ["other.bin", "report.bin", "report.bin", false],
     ])(
-        "avoids final/part collisions with %s for %s, selecting %s (on disk: %s)",
+        "avoids download target collisions with %s for %s, selecting %s (on disk: %s)",
         async (existing, name, expected, onDisk) => {
             const savePath = await fse.mkdtemp(path.join(os.tmpdir(), "direct-target-"));
             const { service } = createService();
