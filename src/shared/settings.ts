@@ -17,6 +17,7 @@ export interface AppSettings {
     "general.lastDownloadPath": string;
     "general.createCollectionSubfolder": boolean;
     "general.asciiFilenames": boolean;
+    "general.foldersFirst": boolean;
     "general.logLevel": SettingLogLevel;
     "general.theme": SettingTheme;
     "general.powerSaveBlockInTransfer": boolean;
@@ -120,6 +121,11 @@ export const APP_SETTINGS = {
         publicKey: "general.asciiFilenames",
         scope: "general",
         storageKey: "asciiFilenames",
+    },
+    "general.foldersFirst": {
+        publicKey: "general.foldersFirst",
+        scope: "general",
+        storageKey: "foldersFirst",
     },
     "general.logLevel": {
         publicKey: "general.logLevel",

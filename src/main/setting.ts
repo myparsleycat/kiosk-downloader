@@ -197,6 +197,12 @@ export class Setting {
                 fromStored: (value) => parseBooleanSetting(value, false),
                 toStored: (value) => String(value),
             },
+            "general.foldersFirst": {
+                definition: APP_SETTINGS["general.foldersFirst"],
+                getDefault: () => true,
+                fromStored: (value) => parseBooleanSetting(value, true),
+                toStored: (value) => String(value),
+            },
             "general.logLevel": {
                 definition: APP_SETTINGS["general.logLevel"],
                 getDefault: () => "error" as const,

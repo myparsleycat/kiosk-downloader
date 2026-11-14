@@ -1,11 +1,18 @@
-import { FileTree } from "@renderer/components/tree/file-tree";
+import {
+  FILE_TREE_RIGHT_COLS,
+  FILE_TREE_ROW_INSET,
+  FileTree,
+  fileTreeGridTemplateColumns,
+} from "@renderer/components/tree/file-tree";
 import { Badge } from "@renderer/components/ui/badge";
+import { Checkbox } from "@renderer/components/ui/checkbox";
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
+import { useSortedTree } from "@renderer/hooks/use-sorted-tree";
 import {
   countFiles,
+  getTreeSelectionState,
   type SortDir,
   type SortField,
-  sortTree,
   summarizeSelection,
 } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
@@ -19,12 +26,18 @@ import {
   LockIcon,
 } from "lucide-react";
 
+// The sort header lines up with root rows by summing every inset that sits in front of them.
+const LIST_PADDING = 8;
+const SECTION_BORDER = 1;
+const SECTION_PADDING = 8;
+
 export function DraftTreePanel({
   items,
   sortField,
   sortDir,
   onSort,
   onToggle,
+  onSetAllSelected,
   onExpandZip,
   onRename,
 }: {
@@ -33,6 +46,7 @@ export function DraftTreePanel({
   sortDir: SortDir;
   onSort: (field: SortField) => void;
   onToggle: (item: NewDownloadItem, key: string) => void;
+  onSetAllSelected: (itemKeys: string[], selected: boolean) => void;
   onExpandZip: (item: NewDownloadItem, zipPath: string, fileId: string) => void;
   onRename: (item: NewDownloadItem, key: string, kind: "file" | "dir" | "zip") => void;
 }) {
@@ -40,20 +54,27 @@ export function DraftTreePanel({
     return <EmptyState />;
   }
 
-  const summary = items.reduce(
-    (acc, item) => {
-      const tree = itemDisplayTree(item);
-      if (!tree) {
-        return acc;
-      }
-      const selection = summarizeSelection(item.selected, tree);
-      return {
-        count: acc.count + selection.count,
-        files: acc.files + countFiles(tree),
-      };
-    },
+  const readyTrees = items.flatMap((item) => {
+    const tree = itemDisplayTree(item);
+    return tree ? [{ item, tree }] : [];
+  });
+  const summary = readyTrees.reduce(
+    (acc, ready) => ({
+      count: acc.count + summarizeSelection(ready.item.selected, ready.tree).count,
+      files: acc.files + countFiles(ready.tree),
+    }),
     { count: 0, files: 0 },
   );
+  const selectableTrees = readyTrees.filter((ready) => ready.tree.entries.length > 0);
+  const selectionStates = selectableTrees.map((ready) =>
+    getTreeSelectionState(ready.item.selected, ready.tree),
+  );
+  const allSelected =
+    selectionStates.length > 0 && selectionStates.every((state) => state === true)
+      ? true
+      : selectionStates.some((state) => state !== false)
+        ? "indeterminate"
+        : false;
 
   return (
     <>
@@ -65,9 +86,25 @@ export function DraftTreePanel({
           <span className="tabular-nums">{summary.files} 파일</span>
         </div>
       </div>
-      <SortHeader field={sortField} dir={sortDir} onSort={onSort} />
+      <SortHeader
+        field={sortField}
+        dir={sortDir}
+        onSort={onSort}
+        checked={allSelected}
+        disabled={selectableTrees.length === 0}
+        framed={items.length > 1}
+        onToggleAll={() =>
+          onSetAllSelected(
+            selectableTrees.map((ready) => ready.item.key),
+            allSelected !== true,
+          )
+        }
+      />
       <ScrollArea className="flex-1">
-        <div className={items.length > 1 ? "flex flex-col gap-4 p-2" : "p-2"}>
+        <div
+          className={items.length > 1 ? "flex flex-col gap-4" : undefined}
+          style={{ padding: LIST_PADDING }}
+        >
           {items.map((item) => (
             <DraftTreeSection
               key={item.key}
@@ -76,6 +113,7 @@ export function DraftTreePanel({
               sortField={sortField}
               sortDir={sortDir}
               onToggle={(key) => onToggle(item, key)}
+              onSetAllSelected={(selected) => onSetAllSelected([item.key], selected)}
               onExpandZip={(zipPath, fileId) => onExpandZip(item, zipPath, fileId)}
               onRename={(key, kind) => onRename(item, key, kind)}
             />
@@ -92,6 +130,7 @@ function DraftTreeSection({
   sortField,
   sortDir,
   onToggle,
+  onSetAllSelected,
   onExpandZip,
   onRename,
 }: {
@@ -100,6 +139,7 @@ function DraftTreeSection({
   sortField: SortField;
   sortDir: SortDir;
   onToggle: (key: string) => void;
+  onSetAllSelected: (selected: boolean) => void;
   onExpandZip: (zipPath: string, fileId: string) => void;
   onRename: (key: string, kind: "file" | "dir" | "zip") => void;
 }) {
@@ -107,10 +147,11 @@ function DraftTreeSection({
   const title = item.preparation.status === "ready" ? item.preparation.collection.name : item.url;
   const selectedSummary = tree ? summarizeSelection(item.selected, tree) : { count: 0, bytes: 0 };
   const files = tree ? countFiles(tree) : 0;
-  const sorted = tree && sortDir !== "none" ? sortTree(tree, sortField, sortDir) : tree;
+  const sorted = useSortedTree(tree, sortField, sortDir);
+  const selectionState = tree ? getTreeSelectionState(item.selected, tree) : false;
   const body =
     item.preparation.status === "ready" && sorted ? (
-      <div className={framed ? "p-2" : undefined}>
+      <div style={framed ? { padding: SECTION_PADDING } : undefined}>
         {item.preparation.collection.provider === "extended" && (
           <p className="mb-2 px-1 text-[11px] text-muted-foreground">
             확장 공유의 ZIP은 완성 파일로 다운로드되며 내부 목록은 미리 열 수 없습니다.
@@ -151,11 +192,19 @@ function DraftTreeSection({
   }
 
   return (
-    <section className="overflow-hidden rounded-lg border">
+    <section className="overflow-hidden rounded-lg border" style={{ borderWidth: SECTION_BORDER }}>
       <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-        <p className="min-w-0 truncate text-xs font-medium" title={title}>
-          {title}
-        </p>
+        <div className="flex min-w-0 items-center gap-2">
+          {tree ? (
+            <SelectAllCheckbox
+              checked={selectionState}
+              onToggle={() => onSetAllSelected(selectionState !== true)}
+            />
+          ) : null}
+          <p className="min-w-0 truncate text-xs font-medium" title={title}>
+            {title}
+          </p>
+        </div>
         {tree ? (
           <p className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
             {selectedSummary.count}/{files}
@@ -167,18 +216,58 @@ function DraftTreeSection({
   );
 }
 
+function SelectAllCheckbox({
+  checked,
+  disabled,
+  onToggle,
+}: {
+  checked: boolean | "indeterminate";
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  const label = checked === true ? "전체 해제" : "전체 선택";
+  return (
+    <Checkbox
+      checked={checked === true}
+      indeterminate={checked === "indeterminate"}
+      disabled={disabled}
+      onCheckedChange={onToggle}
+      aria-label={label}
+      title={label}
+      className="after:hidden"
+    />
+  );
+}
+
 function SortHeader({
   field,
   dir,
   onSort,
+  checked,
+  disabled,
+  framed,
+  onToggleAll,
 }: {
   field: SortField;
   dir: SortDir;
   onSort: (field: SortField) => void;
+  checked: boolean | "indeterminate";
+  disabled: boolean;
+  framed: boolean;
+  onToggleAll: () => void;
 }) {
   return (
-    <div className="grid items-center gap-x-1 border-b px-2 py-1 text-xs text-muted-foreground grid-cols-[auto_minmax(0,1fr)_4rem]">
+    <div
+      className="grid items-center gap-x-1 border-b py-1 text-xs text-muted-foreground"
+      style={{
+        gridTemplateColumns: fileTreeGridTemplateColumns(FILE_TREE_RIGHT_COLS.selection),
+        paddingInline:
+          LIST_PADDING + FILE_TREE_ROW_INSET + (framed ? SECTION_BORDER + SECTION_PADDING : 0),
+      }}
+    >
       <span className="flex items-center gap-1">
+        <span className="size-4 shrink-0" />
+        <SelectAllCheckbox checked={checked} disabled={disabled} onToggle={onToggleAll} />
         <span className="size-4 shrink-0" />
       </span>
       <SortButton

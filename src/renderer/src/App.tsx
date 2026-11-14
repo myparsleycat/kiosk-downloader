@@ -30,6 +30,7 @@ import {
 } from "./hooks/use-transfer-items";
 import { useAppNavigation } from "./stores/app-navigation";
 import { useDownloadTreeExpanded } from "./stores/download-tree-expanded";
+import { subscribeFileListSettings } from "./stores/file-list-settings";
 import { subscribeMegaStatus } from "./stores/mega-status";
 import { shouldLoadPastedShare, useNewDownloadDraft } from "./stores/new-download-draft";
 import { useUpdaterStore } from "./stores/updater";
@@ -139,6 +140,8 @@ function MainComponent() {
   }, []);
 
   React.useEffect(() => subscribeMegaStatus(), []);
+
+  React.useEffect(() => subscribeFileListSettings(), []);
 
   React.useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {

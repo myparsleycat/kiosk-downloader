@@ -109,11 +109,25 @@ export function shouldLoadPastedShare(items: NewDownloadItem[], url: string) {
     return items.length !== 1 || items[0].url !== url;
 }
 
+// Keeps the renamed tree referentially stable across renders so memoized sorting and
+// selection state survive unrelated updates such as checkbox toggles.
+const displayTreeCache = new WeakMap<
+    NewDownloadItem["renames"],
+    { source: DirNode; tree: DirNode }
+>();
+
 export function itemDisplayTree(item: NewDownloadItem) {
     if (item.preparation.status !== "ready") {
         return null;
     }
-    return applyRenamesToTree(item.preparation.collection.tree, item.renames);
+    const source = item.preparation.collection.tree;
+    const cached = displayTreeCache.get(item.renames);
+    if (cached?.source === source) {
+        return cached.tree;
+    }
+    const tree = applyRenamesToTree(source, item.renames);
+    displayTreeCache.set(item.renames, { source, tree });
+    return tree;
 }
 
 function updateItem(

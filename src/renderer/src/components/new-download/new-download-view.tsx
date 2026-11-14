@@ -19,6 +19,7 @@ import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { useNewDownloadSession } from "@renderer/hooks/use-new-download-session";
 import {
   type Collection,
+  collectAllPaths,
   countFiles,
   dirTotalSize,
   type SortDir,
@@ -81,6 +82,7 @@ export function NewDownloadView({
   const setItemHeaders = useNewDownloadDraft((state) => state.setItemHeaders);
   const setItemPreparation = useNewDownloadDraft((state) => state.setItemPreparation);
   const updateItemSelected = useNewDownloadDraft((state) => state.updateItemSelected);
+  const setItemSelected = useNewDownloadDraft((state) => state.setItemSelected);
   const renameItemNode = useNewDownloadDraft((state) => state.renameItemNode);
   const {
     applyUrlInput,
@@ -397,6 +399,14 @@ export function NewDownloadView({
             const tree = itemDisplayTree(item);
             if (!tree) return;
             updateItemSelected(item.key, (prev) => toggleTreeSelection(prev, key, tree));
+          }}
+          onSetAllSelected={(itemKeys, selected) => {
+            const targetKeys = new Set(itemKeys);
+            for (const item of useNewDownloadDraft.getState().items) {
+              const tree = targetKeys.has(item.key) ? itemDisplayTree(item) : null;
+              if (!tree) continue;
+              setItemSelected(item.key, selected ? collectAllPaths(tree) : new Set());
+            }
           }}
           onExpandZip={(item, zipPath, fileId) => {
             if (item.preparation.status !== "ready") return;

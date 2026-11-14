@@ -72,6 +72,7 @@ const SETTING_KEYS = [
   "general.runInBackground",
   "general.createCollectionSubfolder",
   "general.asciiFilenames",
+  "general.foldersFirst",
   "general.powerSaveBlockInTransfer",
   "general.shutdownAfterTransfer",
   "general.autoUpdateMode",
@@ -102,6 +103,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "general.runInBackground": true,
   "general.createCollectionSubfolder": true,
   "general.asciiFilenames": false,
+  "general.foldersFirst": true,
   "general.powerSaveBlockInTransfer": true,
   "general.shutdownAfterTransfer": false,
   "general.autoUpdateMode": "auto",
@@ -533,6 +535,24 @@ export function SettingsView() {
                           checked={settings["general.asciiFilenames"]}
                           onCheckedChange={(value) =>
                             void setSetting("general.asciiFilenames", value)
+                          }
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="파일 목록" />
+                  <Section>
+                    <SettingRow
+                      title="폴더 먼저 표시"
+                      description="컬렉션 파일 목록에서 폴더와 ZIP을 파일보다 먼저 표시합니다. 끄면 모든 항목을 같은 기준으로 함께 나열합니다."
+                      control={
+                        <Switch
+                          checked={settings["general.foldersFirst"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("general.foldersFirst", value)
                           }
                         />
                       }

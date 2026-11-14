@@ -12,12 +12,13 @@ import { Progress, ProgressLabel, ProgressValue } from "@renderer/components/ui/
 import { ScrollArea } from "@renderer/components/ui/scroll-area";
 import { Separator } from "@renderer/components/ui/separator";
 import { useConfirmDownloadStop } from "@renderer/hooks/use-confirm-download-stop";
+import { useSortedTree } from "@renderer/hooks/use-sorted-tree";
 import type { DownloadItem, SortDir, SortField } from "@renderer/lib/types";
-import { sortTree } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { isCollectionExpiresNever } from "@shared/download-errors";
 import { usesRangeDependentControl } from "@shared/share-url";
 import { formatSize, formatSpeed, formatTime } from "@shared/utils";
+import { isEqual } from "es-toolkit";
 import {
   ArrowDownIcon,
   ArrowUpDownIcon,
@@ -50,12 +51,13 @@ export function DownloadDetail({
   const [sortDir, setSortDir] = React.useState<SortDir>("none");
   const [errorDetails, setErrorDetails] = React.useState<FileTreeError[] | null>(null);
   const { runWithStopConfirmation, dialog: stopDialog } = useConfirmDownloadStop();
-  const tree = item?.collection.tree;
-
-  const sortedTree = React.useMemo(
-    () => (tree && sortDir !== "none" ? sortTree(tree, sortField, sortDir) : tree),
-    [tree, sortField, sortDir],
-  );
+  // Every download:changed event delivers a freshly deserialized tree; keep the previous
+  // reference while the structure is unchanged so sorting and row memoization are not redone.
+  const [tree, setTree] = React.useState(item?.collection.tree);
+  if (item?.collection.tree !== tree && !isEqual(item?.collection.tree, tree)) {
+    setTree(item?.collection.tree);
+  }
+  const sortedTree = useSortedTree(tree, sortField, sortDir);
 
   const handleSortClick = (field: SortField) => {
     if (field === sortField) {

@@ -82,6 +82,8 @@ export const FILE_TREE_RIGHT_COLS: Record<FileTreeProps["mode"], string[]> = {
   progress: ["5.5rem", "10rem", "5rem", "2.5rem"],
 };
 
+export const FILE_TREE_ROW_INSET = 8;
+
 export function fileTreeGridTemplateColumns(rightCols: readonly string[]) {
   return `auto minmax(0, 1fr) ${rightCols.join(" ")}`;
 }
@@ -127,7 +129,7 @@ interface TreeNodeProps {
 }
 
 function TreeNode({ entry, depth, pathStack, rootKey, props, dirSummaries }: TreeNodeProps) {
-  const indent = depth * 16 + 8;
+  const indent = depth * 16 + FILE_TREE_ROW_INSET;
   const rightCols = FILE_TREE_RIGHT_COLS[props.mode];
 
   if (entry.kind === "file") {
@@ -794,12 +796,13 @@ function TreeRow({
   return (
     <div
       className={cn(
-        "grid h-7 items-center gap-x-1 rounded-md pr-2 hover:bg-muted/50",
+        "grid h-7 items-center gap-x-1 rounded-md hover:bg-muted/50",
         "data-[hovered]:bg-muted",
         expandable && "cursor-pointer",
       )}
       style={{
         paddingLeft: indent,
+        paddingRight: FILE_TREE_ROW_INSET,
         gridTemplateColumns: fileTreeGridTemplateColumns(rightCols),
       }}
       onClick={expandable ? onExpand : undefined}
