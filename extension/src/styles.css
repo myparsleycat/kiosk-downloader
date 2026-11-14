@@ -1,0 +1,7 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../../src/renderer/src/theme.css";
+
+@source "../../src/renderer/src/components/ui";
+@source "../../src/renderer/src/components/settings/setting-layout.tsx";
+@source "../../src/renderer/src/components/tree/file-tree.tsx";

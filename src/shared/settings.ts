@@ -15,6 +15,7 @@ export interface AppSettings {
     "general.runOnStartup": boolean;
     "general.runInBackground": boolean;
     "general.lastDownloadPath": string;
+    "general.defaultDownloadPath": string;
     "general.createCollectionSubfolder": boolean;
     "general.asciiFilenames": boolean;
     "general.foldersFirst": boolean;
@@ -25,6 +26,8 @@ export interface AppSettings {
     "general.autoUpdateMode": AutoUpdateMode;
     "general.autoTryCollectionPasswords": boolean;
     "general.collectionPasswordList": string[];
+    "general.browserExtension": boolean;
+    "general.browserExtensionAllowedIds": string[];
     "transfer.requestPoolSize": number;
     "transfer.maxChunkRetries": number;
     "transfer.uploadMaxChunkRetries": number;
@@ -85,6 +88,9 @@ export const BANDWIDTH_LIMIT_MIBPS_DEFAULT = 0;
 
 export const COLLECTION_PASSWORD_LIST_MAX = 10;
 
+export const BROWSER_EXTENSION_ID_PATTERN = /^[a-p]{32}$/;
+export const BROWSER_EXTENSION_ALLOWED_IDS_MAX = 20;
+
 export type SettingKey = keyof AppSettings;
 
 export type SettingScope = "general" | "transfer" | "network";
@@ -111,6 +117,11 @@ export const APP_SETTINGS = {
         publicKey: "general.lastDownloadPath",
         scope: "general",
         storageKey: "lastDownloadPath",
+    },
+    "general.defaultDownloadPath": {
+        publicKey: "general.defaultDownloadPath",
+        scope: "general",
+        storageKey: "defaultDownloadPath",
     },
     "general.createCollectionSubfolder": {
         publicKey: "general.createCollectionSubfolder",
@@ -161,6 +172,16 @@ export const APP_SETTINGS = {
         publicKey: "general.collectionPasswordList",
         scope: "general",
         storageKey: "collectionPasswordList",
+    },
+    "general.browserExtension": {
+        publicKey: "general.browserExtension",
+        scope: "general",
+        storageKey: "browserExtension",
+    },
+    "general.browserExtensionAllowedIds": {
+        publicKey: "general.browserExtensionAllowedIds",
+        scope: "general",
+        storageKey: "browserExtensionAllowedIds",
     },
     "transfer.requestPoolSize": {
         publicKey: "transfer.requestPoolSize",

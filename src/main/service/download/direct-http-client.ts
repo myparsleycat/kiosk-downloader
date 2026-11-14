@@ -6,6 +6,7 @@ import type { DirectRequestHeaders, DirNode } from "@shared/types";
 import type { KioskDownloader } from "../..";
 import type { DirectFileSourceMeta, LoadedDirectCollection } from "./types";
 
+import { DEFAULT_CHROME_MAJOR_VERSION } from "../../lib/http";
 import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
 import { parseRetryAfterMs } from "../mega/mega-api";
 
@@ -142,7 +143,7 @@ export class DirectHttpClient {
             const sameOrigin = new URL(current).origin === cookieOrigin;
             const response = await this.kd.http.payloadRequest(current, {
                 method: "GET",
-                headers: buildDirectHeaders(options, sameOrigin),
+                headers: buildDirectHeaders(current, options, sameOrigin),
                 redirect: "manual",
                 signal: options.signal,
             });
@@ -237,8 +238,23 @@ export function hasDirectValidatorChanged(
     );
 }
 
-function buildDirectHeaders(options: DirectRequestOptions, sameOrigin: boolean) {
-    const headers: Record<string, string> = { "Accept-Encoding": "identity" };
+function buildDirectHeaders(url: string, options: DirectRequestOptions, sameOrigin: boolean) {
+    const headers: Record<string, string> = {
+        Accept: "*/*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        // Byte ranges and stored sizes must refer to the uncompressed representation.
+        "Accept-Encoding": "identity",
+        // Match Undici's fetch mode rather than claiming a document navigation.
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+    };
+    // An arbitrary caller-supplied UA may describe a different browser or platform.
+    if (new URL(url).protocol === "https:" && !options.headers?.userAgent) {
+        headers["Sec-CH-UA"] =
+            `"Google Chrome";v="${DEFAULT_CHROME_MAJOR_VERSION}", "Chromium";v="${DEFAULT_CHROME_MAJOR_VERSION}", "Not)A;Brand";v="24"`;
+        headers["Sec-CH-UA-Mobile"] = "?0";
+        headers["Sec-CH-UA-Platform"] = '"Windows"';
+    }
     if (options.headers?.referer) headers.Referer = options.headers.referer;
     if (options.headers?.userAgent) headers["User-Agent"] = options.headers.userAgent;
     if (options.headers?.cookie && sameOrigin) headers.Cookie = options.headers.cookie;

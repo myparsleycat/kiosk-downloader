@@ -1,6 +1,7 @@
 export type { IpcHandlers } from "./types.gen";
 
 import type { AppSettings, SettingKey } from "./settings";
+import type { DownloadProvider } from "./share-url";
 import type { UpdaterStatus } from "./updater";
 
 export interface AppStatus {
@@ -67,7 +68,7 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
-export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload" | "direct" | "mega";
+export type { DownloadProvider };
 
 export interface DirectRequestHeaders {
     referer?: string;
@@ -413,4 +414,5 @@ export type IpcEvents = {
     "updater:update-available": () => void;
     "updater:update-downloaded": () => void;
     "mega:accountChanged": (account: MegaAccountState) => void;
+    "browserExtension:requestsAvailable": () => void;
 };

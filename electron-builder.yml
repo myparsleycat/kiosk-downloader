@@ -12,6 +12,10 @@ files:
     - "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
 asarUnpack:
     - resources/**
+protocols:
+    - name: Kiosk Downloader
+      schemes:
+          - kioskdl
 win:
     target:
         - nsis

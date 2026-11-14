@@ -104,12 +104,21 @@ type LoadedExtendedCollection = {
     manifest: ExtendedSharePayload;
 };
 
+// The app's new-download view discards all of its drafts at once; drafts prepared for the browser
+// extension popover live in their own scope so those discards cannot invalidate them.
+export type DraftScope = "app" | "extension";
+const DRAFT_SCOPES: readonly DraftScope[] = ["app", "extension"];
+// Popovers can close without discarding (tab closed, page navigated), so cap what they leave behind.
+const MAX_EXTENSION_DRAFTS = 20;
+
 type PreparedDownloadDraft = {
     id: string;
     sourceInput: string;
     password?: string;
     asciiFilenames: boolean;
     correlationId: string;
+    scope: DraftScope;
+    savePath?: string;
     loaded: LoadedCollection | LoadedExtendedCollection;
 };
 
@@ -143,9 +152,12 @@ export class DownloadService {
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
     private readonly preparedDrafts = new Map<string, PreparedDownloadDraft>();
-    private readonly prepareControllers = new Map<string, AbortController>();
+    private readonly prepareControllers = new Map<
+        string,
+        { controller: AbortController; scope: DraftScope }
+    >();
     private readonly prepareLimit = pLimit(DOWNLOAD_PREPARE_CONCURRENCY);
-    private prepareEpoch = 0;
+    private readonly prepareEpochs: Record<DraftScope, number> = { app: 0, extension: 0 };
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
     private readonly bundleFinalizations = new Map<string, Promise<void>>();
     private unsubscribeRequestPoolUsage?: () => void;
@@ -290,7 +302,7 @@ export class DownloadService {
             clearTimeout(this.megaQuotaResumeTimer);
             this.megaQuotaResumeTimer = null;
         }
-        this.abortAllPrepares();
+        this.abortPrepares();
         this.preparedDrafts.clear();
         this.unsubscribeRequestPoolUsage?.();
         this.scheduler.destroy();
@@ -368,7 +380,10 @@ export class DownloadService {
         }
     }
 
-    public async prepare(payload: PrepareDownloadPayload): Promise<PrepareDownloadResult> {
+    public async prepare(
+        payload: PrepareDownloadPayload,
+        scope: DraftScope = "app",
+    ): Promise<PrepareDownloadResult> {
         const sourceInput = payload.url.trim();
         const parsed = tryParseDownloadUrl(sourceInput);
         if (!parsed && !sourceInput.startsWith(EXTENDED_SHARE_PREFIX)) {
@@ -380,11 +395,11 @@ export class DownloadService {
             return { status: "failed", code: "invalidUrl", message: directHeaders.error };
         }
 
-        const epoch = this.prepareEpoch;
+        const epoch = this.prepareEpochs[scope];
         const correlationId = payload.correlationId ?? randomUUID();
         const controller = new AbortController();
-        this.prepareControllers.get(correlationId)?.abort();
-        this.prepareControllers.set(correlationId, controller);
+        this.prepareControllers.get(correlationId)?.controller.abort();
+        this.prepareControllers.set(correlationId, { controller, scope });
 
         try {
             return await this.prepareLimit(() =>
@@ -394,24 +409,30 @@ export class DownloadService {
                     epoch,
                     controller,
                     correlationId,
+                    scope,
                 ),
             );
         } finally {
-            if (this.prepareControllers.get(correlationId) === controller) {
+            if (this.prepareControllers.get(correlationId)?.controller === controller) {
                 this.prepareControllers.delete(correlationId);
             }
         }
     }
 
+    /** Without a draft id, discards every draft of the app's new-download view (not extension drafts). */
     public discardDraft(payload: { draftId?: string }) {
         if (!payload.draftId) {
-            this.abortAllPrepares();
-            this.preparedDrafts.clear();
+            this.abortPrepares("app");
+            for (const [id, draft] of this.preparedDrafts) {
+                if (draft.scope === "app") {
+                    this.preparedDrafts.delete(id);
+                }
+            }
             return;
         }
-        const controller = this.prepareControllers.get(payload.draftId);
-        if (controller) {
-            controller.abort();
+        const pending = this.prepareControllers.get(payload.draftId);
+        if (pending) {
+            pending.controller.abort();
             this.prepareControllers.delete(payload.draftId);
         }
         this.preparedDrafts.delete(payload.draftId);
@@ -609,6 +630,14 @@ export class DownloadService {
         );
     }
 
+    public getExtensionDraftSavePath(draftId: string) {
+        const draft = this.requirePreparedDraft(draftId);
+        if (draft.scope !== "extension" || !draft.savePath) {
+            throw new Error("Prepared extension download draft is no longer available.");
+        }
+        return draft.savePath;
+    }
+
     private requirePreparedDraft(draftId: string) {
         const draft = this.preparedDrafts.get(draftId);
         if (!draft) {
@@ -621,12 +650,15 @@ export class DownloadService {
         this.preparedDrafts.delete(draftId);
     }
 
-    private abortAllPrepares() {
-        this.prepareEpoch += 1;
-        for (const controller of this.prepareControllers.values()) {
-            controller.abort();
+    private abortPrepares(scope?: DraftScope) {
+        for (const each of scope ? [scope] : DRAFT_SCOPES) {
+            this.prepareEpochs[each] += 1;
         }
-        this.prepareControllers.clear();
+        for (const [id, pending] of this.prepareControllers) {
+            if (scope && pending.scope !== scope) continue;
+            pending.controller.abort();
+            this.prepareControllers.delete(id);
+        }
     }
 
     private async prepareDraft(
@@ -635,8 +667,9 @@ export class DownloadService {
         epoch: number,
         controller: AbortController,
         correlationId: string,
+        scope: DraftScope,
     ): Promise<PrepareDownloadResult> {
-        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+        if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
             return {
                 status: "failed",
                 code: "remoteFailure",
@@ -646,7 +679,7 @@ export class DownloadService {
 
         const asciiFilenames =
             payload.asciiFilenames ?? (await this.kd.setting.get("general.asciiFilenames"));
-        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+        if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
             return {
                 status: "failed",
                 code: "remoteFailure",
@@ -664,7 +697,7 @@ export class DownloadService {
             const loaded = sourceInput.startsWith(EXTENDED_SHARE_PREFIX)
                 ? await this.loadExtendedCollection(loadPayload)
                 : await this.loadCollectionUnlocked(loadPayload, asciiFilenames);
-            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                 throw new DOMException("The operation was aborted.", "AbortError");
             }
             return { loaded, password };
@@ -694,7 +727,7 @@ export class DownloadService {
                     }
                     let matched: Awaited<ReturnType<typeof attempt>> | null = null;
                     for (const candidate of settings["general.collectionPasswordList"]) {
-                        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+                        if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                             throw new DOMException("The operation was aborted.", "AbortError");
                         }
                         try {
@@ -718,7 +751,9 @@ export class DownloadService {
                 }
             }
 
-            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            const savePath =
+                scope === "extension" ? await this.kd.setting.getDownloadSavePath() : undefined;
+            if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                 return {
                     status: "failed",
                     code: "remoteFailure",
@@ -733,8 +768,18 @@ export class DownloadService {
                 password: prepared.password,
                 asciiFilenames,
                 correlationId,
+                scope,
+                savePath,
                 loaded: prepared.loaded,
             });
+            if (scope === "extension") {
+                const extensionIds = [...this.preparedDrafts.values()]
+                    .filter((draft) => draft.scope === "extension")
+                    .map((draft) => draft.id);
+                for (const staleId of extensionIds.slice(0, -MAX_EXTENSION_DRAFTS)) {
+                    this.preparedDrafts.delete(staleId);
+                }
+            }
             const collection = prepared.loaded.collection;
             return {
                 status: "ready",
@@ -745,7 +790,7 @@ export class DownloadService {
                         : collection,
             };
         } catch (error) {
-            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                 return {
                     status: "failed",
                     code: "remoteFailure",
@@ -1548,11 +1593,10 @@ export class DownloadService {
             },
         );
 
-        const lastDownloadPath = await this.kd.setting.get("general.lastDownloadPath");
         const folderResult = await showOpenDialog({
             title: "저장 폴더 선택",
             properties: ["openDirectory", "createDirectory"],
-            defaultPath: lastDownloadPath || undefined,
+            defaultPath: (await this.kd.setting.getDownloadSavePath()) || undefined,
         });
         if (folderResult.canceled || folderResult.filePaths.length === 0) {
             return null;

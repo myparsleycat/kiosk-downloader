@@ -1,5 +1,8 @@
+import { createServer } from "node:http";
+
 import { describe, expect, it, vi } from "vitest";
 
+import { HTTP, plainUndiciFetch } from "../../lib/http";
 import {
     DIRECT_CHUNK_SIZE,
     DirectHttpClient,
@@ -45,6 +48,97 @@ describe("DirectHttpClient.probe", () => {
         const headers = requestHeaders(payloadRequest.mock.calls[0]!);
         expect(headers.get("range")).toBe("bytes=0-0");
         expect(headers.get("accept-encoding")).toBe("identity");
+        const defaults = await new HTTP({} as never).getHeaders("https://example.com/a.bin");
+        const chromeVersion = /Chrome\/(\d+)/.exec(defaults["User-Agent"])?.[1];
+        expect(chromeVersion).toBeDefined();
+        expect(headers.get("sec-ch-ua")).toContain(`"Chromium";v="${chromeVersion}"`);
+        expect(headers.get("sec-ch-ua")).toContain(`"Google Chrome";v="${chromeVersion}"`);
+        expect(headers.get("sec-ch-ua-mobile")).toBe("?0");
+        expect(headers.get("sec-ch-ua-platform")).toBe('"Windows"');
+    });
+
+    it.each([
+        { url: "http://example.com/a.bin", userAgent: undefined },
+        { url: "https://example.com/a.bin", userAgent: "custom/1.0" },
+    ])("omits default Client Hints for $url with UA $userAgent", async ({ url, userAgent }) => {
+        const payloadRequest = vi.fn(async () => new Response("x"));
+        await createClient(payloadRequest).open(url, {
+            headers: { userAgent, referer: "https://example.com/page" },
+        });
+
+        const headers = requestHeaders(payloadRequest.mock.calls[0]!);
+        expect(headers.has("sec-ch-ua")).toBe(false);
+        expect(headers.has("sec-ch-ua-mobile")).toBe(false);
+        expect(headers.has("sec-ch-ua-platform")).toBe(false);
+        expect(headers.get("user-agent")).toBe(userAgent ?? null);
+        expect(headers.get("referer")).toBe("https://example.com/page");
+        expect(headers.has("sec-fetch-site")).toBe(false);
+    });
+
+    it("rebuilds Client Hints for each redirect's protocol", async () => {
+        const payloadRequest = vi
+            .fn()
+            .mockResolvedValueOnce(
+                new Response(null, {
+                    status: 302,
+                    headers: { location: "http://example.com/file" },
+                }),
+            )
+            .mockResolvedValueOnce(
+                new Response(null, {
+                    status: 302,
+                    headers: { location: "https://cdn.example.com/file" },
+                }),
+            )
+            .mockResolvedValueOnce(new Response("x"));
+        await createClient(payloadRequest).open("https://example.com/start", {});
+
+        expect(
+            payloadRequest.mock.calls.map((call) => requestHeaders(call).has("sec-ch-ua")),
+        ).toEqual([true, false, true]);
+    });
+
+    it("sends the fetch profile through the real Undici transport", async () => {
+        const server = createServer((request, response) => {
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify(request.headers));
+        });
+        const http = new HTTP({} as never);
+        const payloadRequest = vi.fn(
+            (url: string, options: Parameters<HTTP["payloadRequest"]>[1]) =>
+                http.payloadRequest(url, { ...options, fetch: plainUndiciFetch }),
+        );
+
+        try {
+            await new Promise<void>((resolve, reject) => {
+                server.once("error", reject);
+                server.listen(0, "127.0.0.1", resolve);
+            });
+            const address = server.address();
+            if (!address || typeof address === "string") throw new Error("Expected a TCP address");
+            const opened = await createClient(payloadRequest).open(
+                `http://127.0.0.1:${address.port}/file`,
+                { range: "bytes=0-0", ifRange: '"v1"' },
+            );
+            const headers = (await opened.response.json()) as Record<string, string>;
+            expect(headers["user-agent"]).toMatch(/Chrome\/\d+/);
+            expect(headers["accept"]).toBe("*/*");
+            expect(headers["accept-language"]).toBe("ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7");
+            expect(headers["sec-fetch-dest"]).toBe("empty");
+            expect(headers["sec-fetch-mode"]).toBe("cors");
+            expect(headers["sec-fetch-site"]).toBeUndefined();
+            expect(headers["range"]).toBe("bytes=0-0");
+            expect(headers["if-range"]).toBe('"v1"');
+            expect(headers["accept-encoding"].split(",").map((value) => value.trim())).toEqual(
+                expect.arrayContaining(["identity"]),
+            );
+            expect(headers["accept-encoding"]).not.toMatch(/gzip|deflate|br|zstd/);
+        } finally {
+            await http.destroy();
+            await new Promise<void>((resolve, reject) =>
+                server.close((error) => (error ? reject(error) : resolve())),
+            );
+        }
     });
 
     it("falls back to a single stream when the server ignores Range", async () => {

@@ -1,3 +1,4 @@
+import type { BrowserExtensionService } from "@main/service/browser-extension";
 import type { DownloadService } from "@main/service/download";
 import type { MegaAccountService } from "@main/service/mega";
 import type { Updater } from "@main/service/updater";
@@ -8,6 +9,8 @@ import type { AppSettings, SettingKey } from "./settings";
 import type { ExpandPathsResult, TitleBarOverlaySyncOptions } from "./types";
 
 export type IpcHandlers = {
+    "browserExtension:getStatus": BrowserExtensionService["getStatus"];
+    "browserExtension:takeRequests": BrowserExtensionService["takeRequests"];
     "download:create": DownloadService["create"];
     "download:discardDraft": DownloadService["discardDraft"];
     "download:exportCollection": DownloadService["exportCollection"];

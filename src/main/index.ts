@@ -16,6 +16,7 @@ import { logCaughtError } from "./lib/logged-error";
 import { Tray } from "./lib/tray";
 import { Utils } from "./lib/utils";
 import { Logger } from "./logger";
+import { BrowserExtensionService } from "./service/browser-extension";
 import { DownloadService } from "./service/download";
 import { MegaAccountService } from "./service/mega";
 import { StartupCleanupService } from "./service/startup-cleanup";
@@ -63,6 +64,7 @@ export class KioskDownloader {
         startupCleanup: StartupCleanupService;
         updater: Updater;
         mega: MegaAccountService;
+        browserExtension: BrowserExtensionService;
     };
 
     public constructor() {
@@ -87,6 +89,7 @@ export class KioskDownloader {
             upload: new UploadService(this),
             updater: new Updater(this),
             mega: new MegaAccountService(this),
+            browserExtension: new BrowserExtensionService(this),
         };
         this.service.download.bindRequestPoolUsage();
         this.service.upload.bindRequestPoolUsage();
@@ -181,6 +184,7 @@ export class KioskDownloader {
             ["mega-restore", () => this.service.mega.restoreSession()],
             ["download-restore", () => this.service.download.restoreStartupState()],
             ["upload-restore", () => this.service.upload.restoreStartupState()],
+            ["browser-extension", () => this.service.browserExtension.start()],
         ] as const) {
             try {
                 await restore();
@@ -257,6 +261,7 @@ app.on("before-quit", () => {
         kd.service.download.destroy();
         kd.service.upload.destroy();
         kd.service.mega.destroy();
+        void kd.service.browserExtension.stop();
     } catch (error) {
         kd.logger.error(error, "App:before-quit");
     }

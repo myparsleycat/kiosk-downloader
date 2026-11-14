@@ -1,4 +1,5 @@
 import { collectAllPaths, selectExpandedZipEntries, summarizeSelection } from "@renderer/lib/types";
+import { useAppNavigation } from "@renderer/stores/app-navigation";
 import {
     applyZipEntriesResult,
     getStartableDraftItems,
@@ -30,6 +31,7 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
     );
     const setAsciiFilenames = useNewDownloadDraft((state) => state.setAsciiFilenames);
     const replaceItems = useNewDownloadDraft((state) => state.replaceItems);
+    const appendItems = useNewDownloadDraft((state) => state.appendItems);
     const setItemPreparation = useNewDownloadDraft((state) => state.setItemPreparation);
     const setItemSelected = useNewDownloadDraft((state) => state.setItemSelected);
     const updateItemSelected = useNewDownloadDraft((state) => state.updateItemSelected);
@@ -52,6 +54,7 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
     const [zipPasswordInput, setZipPasswordInput] = React.useState("");
 
     const sessionRef = React.useRef(0);
+    const commitDiscardRef = React.useRef<Promise<unknown>>(Promise.resolve());
     const loadGenerationRef = React.useRef(new Map<string, number>());
 
     React.useEffect(() => {
@@ -67,28 +70,44 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
         [resetDraft],
     );
 
-    React.useEffect(
-        () =>
-            window.api.on("setting:update", ({ key, value }) => {
-                if (key === "general.createCollectionSubfolder" && typeof value === "boolean") {
-                    setCreateCollectionSubfolder(value);
-                    return;
-                }
-                if (key === "general.asciiFilenames" && typeof value === "boolean") {
-                    setAsciiFilenames(value);
-                    return;
-                }
-                // Never replace a path the user may be reviewing for drafts already in progress.
-                if (
-                    key === "general.lastDownloadPath" &&
-                    typeof value === "string" &&
-                    useNewDownloadDraft.getState().items.length === 0
-                ) {
-                    setSavePath(value);
-                }
-            }),
-        [setAsciiFilenames, setCreateCollectionSubfolder, setSavePath],
-    );
+    React.useEffect(() => {
+        let savePathRequest = 0;
+        return window.api.on("setting:update", ({ key, value }) => {
+            if (key === "general.createCollectionSubfolder" && typeof value === "boolean") {
+                setCreateCollectionSubfolder(value);
+                return;
+            }
+            if (key === "general.asciiFilenames" && typeof value === "boolean") {
+                setAsciiFilenames(value);
+                return;
+            }
+            if (key !== "general.defaultDownloadPath" && key !== "general.lastDownloadPath") {
+                return;
+            }
+            // Either key alone cannot tell whether a manual default overrides the last
+            // used path, so resolve from both stored values. Only the latest request may
+            // apply, since responses to back-to-back updates can arrive out of order.
+            const request = ++savePathRequest;
+            void window.api
+                .invoke("setting:getMany", [
+                    "general.defaultDownloadPath",
+                    "general.lastDownloadPath",
+                ] as const)
+                .then((values) => {
+                    if (request !== savePathRequest) return;
+                    // Never replace a path the user may be reviewing for drafts already in progress.
+                    if (useNewDownloadDraft.getState().items.length > 0) return;
+                    setSavePath(
+                        values["general.defaultDownloadPath"] || values["general.lastDownloadPath"],
+                    );
+                })
+                .catch((error) => {
+                    toast.error("저장 경로를 불러오지 못했습니다", {
+                        description: getIpcErrorCause(error),
+                    });
+                });
+        });
+    }, [setAsciiFilenames, setCreateCollectionSubfolder, setSavePath]);
 
     React.useEffect(
         () =>
@@ -194,15 +213,8 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
         [hydrateSettings, setItemPreparation, setItemSelected],
     );
 
-    const commitUrls = React.useCallback(
-        async (urls: string[]) => {
-            const session = ++sessionRef.current;
-            await window.api.invoke("download:discardDraft", {});
-            if (session !== sessionRef.current) {
-                return;
-            }
-            replaceItems(urls);
-            const draftItems = useNewDownloadDraft.getState().items;
+    const loadItems = React.useCallback(
+        async (draftItems: NewDownloadItem[]) => {
             let cursor = 0;
             const workerCount = Math.min(DOWNLOAD_PREPARE_CONCURRENCY, draftItems.length);
             await Promise.all(
@@ -218,8 +230,47 @@ export function useNewDownloadSession({ onCreated }: { onCreated: (downloadId: s
                 }),
             );
         },
-        [loadCollection, replaceItems],
+        [loadCollection],
     );
+
+    const commitUrls = React.useCallback(
+        async (urls: string[]) => {
+            const session = ++sessionRef.current;
+            const discard = window.api.invoke("download:discardDraft", {});
+            commitDiscardRef.current = discard;
+            await discard;
+            if (session !== sessionRef.current) {
+                return;
+            }
+            replaceItems(urls);
+            await loadItems(useNewDownloadDraft.getState().items);
+        },
+        [loadItems, replaceItems],
+    );
+
+    const appendBrowserExtensionRequests = React.useCallback(async () => {
+        const requests = await window.api.invoke("browserExtension:takeRequests");
+        if (requests.length === 0) {
+            return;
+        }
+        useAppNavigation.getState().setTab("new");
+        // A commit in flight replaces the whole list once its discard settles, and the discard
+        // aborts app prepares; appending after it keeps these links and their loads intact.
+        // A failed discard belongs to that commit; these links are appended regardless.
+        await commitDiscardRef.current.catch(() => undefined);
+        await loadItems(appendItems(requests));
+    }, [appendItems, loadItems]);
+
+    React.useEffect(() => {
+        const append = () =>
+            void appendBrowserExtensionRequests().catch((error) =>
+                toast.error("브라우저 확장 프로그램 요청을 불러오지 못했습니다", {
+                    description: getIpcErrorCause(error),
+                }),
+            );
+        append();
+        return window.api.on("browserExtension:requestsAvailable", append);
+    }, [appendBrowserExtensionRequests]);
 
     const applyUrlInput = React.useCallback(
         (value: string, options?: { commit?: boolean }) => {

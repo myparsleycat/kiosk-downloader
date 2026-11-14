@@ -97,6 +97,7 @@ export async function plainUndiciFetch(
 }
 
 const DEFAULT_TIMEOUT_MS = 100_000;
+export const DEFAULT_CHROME_MAJOR_VERSION = "149";
 
 // Mirrors the network-error detection of the previous ky layer (is-network-error)
 // so provider operations can decide whether their own operation is safe to retry.
@@ -368,7 +369,7 @@ export class HTTP {
 
     public async getHeaders(_url: string) {
         return {
-            "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36`,
+            "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_MAJOR_VERSION}.0.0.0 Safari/537.36`,
         };
     }
 

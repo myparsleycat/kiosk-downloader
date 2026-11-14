@@ -75,12 +75,15 @@ export function applyZipEntriesResult(
     };
 }
 
-export function createDownloadDraftItem(url: string): NewDownloadItem {
+export function createDownloadDraftItem(
+    url: string,
+    headers: DirectRequestHeaders = {},
+): NewDownloadItem {
     return {
         key: crypto.randomUUID(),
         url,
         password: "",
-        headers: {},
+        headers,
         preparation: { status: "preparing" },
         selected: new Set(),
         zipPasswords: {},
@@ -155,6 +158,8 @@ type NewDownloadDraftActions = {
     setCreateCollectionSubfolder: (createCollectionSubfolder: boolean) => void;
     setAsciiFilenames: (asciiFilenames: boolean) => void;
     replaceItems: (urls: string[]) => void;
+    /** Adds entries whose URL is not already in the draft and returns the added items. */
+    appendItems: (entries: { url: string; headers?: DirectRequestHeaders }[]) => NewDownloadItem[];
     setItemPassword: (key: string, password: string) => void;
     setItemHeaders: (key: string, headers: DirectRequestHeaders) => void;
     setItemPreparation: (key: string, preparation: DownloadPreparationState) => void;
@@ -202,6 +207,19 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
             commitRequestedUrl: null,
             items: urls.map((itemUrl) => createDownloadDraftItem(itemUrl)),
         }),
+
+    appendItems: (entries) => {
+        const seen = new Set(get().items.map((item) => item.url));
+        const added = entries.flatMap((entry) => {
+            if (seen.has(entry.url)) return [];
+            seen.add(entry.url);
+            return [createDownloadDraftItem(entry.url, entry.headers)];
+        });
+        if (added.length === 0) return added;
+        const items = [...get().items, ...added];
+        set({ items, url: items.length === 1 ? items[0].url : "", commitRequestedUrl: null });
+        return added;
+    },
 
     setItemPassword: (key, password) =>
         set({ items: updateItem(get().items, key, (item) => ({ ...item, password })) }),
@@ -320,13 +338,14 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
         if (get().settingsHydrated) return;
 
         const values = await window.api.invoke("setting:getMany", [
+            "general.defaultDownloadPath",
             "general.lastDownloadPath",
             "general.createCollectionSubfolder",
             "general.asciiFilenames",
         ]);
 
         set({
-            savePath: values["general.lastDownloadPath"] ?? "",
+            savePath: values["general.defaultDownloadPath"] || values["general.lastDownloadPath"],
             createCollectionSubfolder: values["general.createCollectionSubfolder"] ?? true,
             asciiFilenames: values["general.asciiFilenames"] ?? false,
             settingsHydrated: true,

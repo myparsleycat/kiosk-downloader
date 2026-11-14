@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import {
     APP_SETTINGS,
     type AppSettings,
@@ -6,6 +8,8 @@ import {
     BANDWIDTH_LIMIT_MIBPS_DEFAULT,
     BANDWIDTH_LIMIT_MIBPS_MAX,
     BANDWIDTH_LIMIT_MIBPS_MIN,
+    BROWSER_EXTENSION_ALLOWED_IDS_MAX,
+    BROWSER_EXTENSION_ID_PATTERN,
     CHUNK_RETRY_DEFAULT,
     CHUNK_RETRY_MAX,
     CHUNK_RETRY_MIN,
@@ -134,6 +138,31 @@ export function normalizeCollectionPasswordList(value: string[]) {
     return result;
 }
 
+function parseBrowserExtensionAllowedIds(value: string | null | undefined): string[] {
+    if (value == null || value === "") {
+        return [];
+    }
+
+    try {
+        const parsed: unknown = JSON.parse(value);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+        return normalizeBrowserExtensionAllowedIds(
+            parsed.filter((item) => typeof item === "string"),
+        );
+    } catch {
+        return [];
+    }
+}
+
+// Pairing appends the newly approved ID, so keep the most recent entries when over the limit.
+function normalizeBrowserExtensionAllowedIds(value: string[]) {
+    return [...new Set(value.filter((id) => BROWSER_EXTENSION_ID_PATTERN.test(id)))].slice(
+        -BROWSER_EXTENSION_ALLOWED_IDS_MAX,
+    );
+}
+
 export class Setting {
     private kd: KioskDownloader;
     private settingSpecs: MainSettingSpecMap | null = null;
@@ -184,6 +213,18 @@ export class Setting {
                 fromStored: (value) => value?.trim() || app.getPath("downloads"),
                 toStored: (value) => value,
                 normalize: normalizeDownloadPath,
+            },
+            "general.defaultDownloadPath": {
+                definition: APP_SETTINGS["general.defaultDownloadPath"],
+                getDefault: () => "",
+                fromStored: (value) => value ?? "",
+                toStored: (value) => value,
+                // setting:set accepts renderer input; a relative path would make every
+                // browser-extension download fail the absolute-path check in create().
+                normalize: (value) => {
+                    const trimmed = value.trim();
+                    return path.isAbsolute(trimmed) ? trimmed : "";
+                },
             },
             "general.createCollectionSubfolder": {
                 definition: APP_SETTINGS["general.createCollectionSubfolder"],
@@ -264,6 +305,22 @@ export class Setting {
                 fromStored: parseCollectionPasswordList,
                 toStored: (value) => JSON.stringify(value),
                 normalize: normalizeCollectionPasswordList,
+            },
+            "general.browserExtension": {
+                definition: APP_SETTINGS["general.browserExtension"],
+                getDefault: () => true,
+                fromStored: (value) => parseBooleanSetting(value, true),
+                toStored: (value) => String(value),
+                afterSet: async (enabled) => {
+                    await this.kd.service.browserExtension.setEnabled(enabled);
+                },
+            },
+            "general.browserExtensionAllowedIds": {
+                definition: APP_SETTINGS["general.browserExtensionAllowedIds"],
+                getDefault: () => [],
+                fromStored: parseBrowserExtensionAllowedIds,
+                toStored: (value) => JSON.stringify(value),
+                normalize: normalizeBrowserExtensionAllowedIds,
             },
             "transfer.requestPoolSize": {
                 definition: APP_SETTINGS["transfer.requestPoolSize"],
@@ -494,6 +551,13 @@ export class Setting {
         );
 
         return Object.fromEntries(entries) as { [P in K[number]]: AppSettings[P] };
+    }
+
+    public async getDownloadSavePath() {
+        return (
+            (await this.get("general.defaultDownloadPath")) ||
+            (await this.get("general.lastDownloadPath"))
+        );
     }
 
     public async set<K extends SettingKey>(key: K, value: AppSettings[K]): Promise<AppSettings[K]> {

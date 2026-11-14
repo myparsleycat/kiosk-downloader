@@ -122,6 +122,7 @@ function createService(passwords: string[] = []) {
                 if (key === "transfer.startTransfersPaused") return false;
                 throw new Error(`Unexpected setting: ${key}`);
             }),
+            getDownloadSavePath: vi.fn(async () => SAVE_PATH),
             getMany: vi.fn(async () => ({
                 "general.autoTryCollectionPasswords": true,
                 "general.collectionPasswordList": passwords,
@@ -660,6 +661,36 @@ describe("DownloadService prepared draft", () => {
 
         service.discardDraft({});
         expect(internals(service).preparedDrafts.size).toBe(0);
+    });
+
+    it("keeps extension drafts, prepared or in flight, when the app discards its drafts", async () => {
+        const { service } = createService();
+        let releasePending: () => void = () => undefined;
+        const load = vi
+            .spyOn(internals(service), "loadCollectionUnlocked")
+            .mockResolvedValueOnce(loadedCollection())
+            .mockResolvedValueOnce(loadedCollection())
+            .mockImplementationOnce(
+                async () =>
+                    await new Promise<LoadedCollection>((resolve) => {
+                        releasePending = () => resolve(loadedCollection());
+                    }),
+            );
+        const app = await service.prepare({ url: URL });
+        const extension = await service.prepare({ url: URL }, "extension");
+        const pending = service.prepare({ url: URL }, "extension");
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+        if (app.status !== "ready" || extension.status !== "ready") {
+            throw new Error("Expected two prepared drafts");
+        }
+
+        service.discardDraft({});
+        releasePending();
+
+        const drafts = internals(service).preparedDrafts;
+        expect(drafts.has(app.draftId)).toBe(false);
+        expect(drafts.has(extension.draftId)).toBe(true);
+        await expect(pending).resolves.toMatchObject({ status: "ready" });
     });
 
     it("does not remove a sibling draft when create finishes", async () => {

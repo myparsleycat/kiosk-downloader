@@ -1,3 +1,4 @@
+import { Section, SectionTitle, SettingRow } from "@renderer/components/settings/setting-layout";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -23,6 +24,7 @@ import { Switch } from "@renderer/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@renderer/components/ui/tabs";
 import { type SettingsSection, useAppNavigation } from "@renderer/stores/app-navigation";
 import { useUpdaterStore } from "@renderer/stores/updater";
+import type { BrowserExtensionServerStatus } from "@shared/browser-extension";
 import { getIpcErrorCause } from "@shared/download-errors";
 import {
   type AppSettings,
@@ -70,6 +72,7 @@ import { toast } from "sonner";
 const SETTING_KEYS = [
   "general.runOnStartup",
   "general.runInBackground",
+  "general.defaultDownloadPath",
   "general.createCollectionSubfolder",
   "general.asciiFilenames",
   "general.foldersFirst",
@@ -92,6 +95,8 @@ const SETTING_KEYS = [
   "transfer.downloadBandwidthLimitMibps",
   "transfer.uploadBandwidthLimitMibps",
   "network.forceIpv4",
+  "general.browserExtension",
+  "general.browserExtensionAllowedIds",
 ] as const;
 
 type SettingsState = {
@@ -101,6 +106,7 @@ type SettingsState = {
 const DEFAULT_SETTINGS: SettingsState = {
   "general.runOnStartup": false,
   "general.runInBackground": true,
+  "general.defaultDownloadPath": "",
   "general.createCollectionSubfolder": true,
   "general.asciiFilenames": false,
   "general.foldersFirst": true,
@@ -123,6 +129,8 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "network.forceIpv4": true,
+  "general.browserExtension": true,
+  "general.browserExtensionAllowedIds": [],
 };
 
 const chunkRetryOptions = rangeOptions(CHUNK_RETRY_MIN, CHUNK_RETRY_MAX);
@@ -492,6 +500,20 @@ export function SettingsView() {
                 </div>
 
                 <div className="flex flex-col gap-1">
+                  <SectionTitle title="브라우저 확장 프로그램" />
+                  <Section>
+                    <BrowserExtensionSetting
+                      enabled={settings["general.browserExtension"]}
+                      allowedIds={settings["general.browserExtensionAllowedIds"]}
+                      onEnabledChange={(value) => setSetting("general.browserExtension", value)}
+                      onAllowedIdsChange={(value) =>
+                        void setSetting("general.browserExtensionAllowedIds", value)
+                      }
+                    />
+                  </Section>
+                </div>
+
+                <div className="flex flex-col gap-1">
                   <SectionTitle title="외관" />
                   <Section>
                     <SettingRow
@@ -515,6 +537,10 @@ export function SettingsView() {
                 <div className="flex flex-col gap-1">
                   <SectionTitle title="저장" />
                   <Section>
+                    <DefaultDownloadPathSetting
+                      value={settings["general.defaultDownloadPath"]}
+                      onChange={(value) => void setSetting("general.defaultDownloadPath", value)}
+                    />
                     <SettingRow
                       title="컬렉션 이름 하위 폴더 생성"
                       description="최상위 항목이 두 개 이상일 때만 저장 경로 아래에 컬렉션 이름으로 하위 폴더를 만듭니다."
@@ -891,39 +917,60 @@ function SettingSelect<T extends string>({
   );
 }
 
-function SectionTitle({ title }: { title: string }) {
-  return (
-    <h3 className="cn-font-heading px-1 pb-2 text-sm font-medium text-muted-foreground">{title}</h3>
-  );
-}
-
-function Section({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col border-l border-foreground/20 pl-4">
-      {React.Children.toArray(children).map((child, i, arr) => (
-        <React.Fragment key={i}>{child}</React.Fragment>
-      ))}
-    </div>
-  );
-}
-
-function SettingRow({
-  title,
-  description,
-  control,
+function DefaultDownloadPathSetting({
+  value,
+  onChange,
 }: {
-  title: string;
-  description: string;
-  control: React.ReactNode;
+  value: string;
+  onChange: (value: string) => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 p-3.5">
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <Label className="text-sm">{title}</Label>
-        <span className="text-xs text-muted-foreground">{description}</span>
-      </div>
-      <div className="shrink-0">{control}</div>
-    </div>
+    <SettingRow
+      title="기본 저장 경로"
+      description={
+        value ||
+        "설정하지 않으면 마지막으로 사용한 경로를 사용합니다. 처음에는 OS 다운로드 폴더를 사용합니다."
+      }
+      control={
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void window.api
+                .invoke("util:showOpenDialog", {
+                  properties: ["openDirectory", "createDirectory"],
+                  ...(value ? { defaultPath: value } : {}),
+                })
+                .then((result) => {
+                  if (!result.canceled && result.filePaths.length > 0) {
+                    onChange(result.filePaths[0]);
+                  }
+                })
+                .catch((error) => {
+                  toast.error("폴더 선택 창을 열지 못했습니다", {
+                    description: error instanceof Error ? error.message : String(error),
+                  });
+                });
+            }}
+          >
+            변경
+          </Button>
+          {value && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="기본 저장 경로 해제"
+              onClick={() => onChange("")}
+            >
+              <XIcon className="size-3.5" />
+            </Button>
+          )}
+        </div>
+      }
+    />
   );
 }
 
@@ -1112,6 +1159,83 @@ function MegaAccountSettings() {
         </div>
       </form>
     </Section>
+  );
+}
+
+function BrowserExtensionSetting({
+  enabled,
+  allowedIds,
+  onEnabledChange,
+  onAllowedIdsChange,
+}: {
+  enabled: boolean;
+  allowedIds: string[];
+  onEnabledChange: (value: boolean) => Promise<void>;
+  onAllowedIdsChange: (value: string[]) => void;
+}) {
+  const [status, setStatus] = React.useState<BrowserExtensionServerStatus | null>(null);
+
+  const refreshStatus = React.useCallback(() => {
+    window.api
+      .invoke("browserExtension:getStatus")
+      .then(setStatus)
+      .catch((error) => {
+        toast.error("브라우저 확장 연동 상태를 불러오지 못했습니다", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, []);
+
+  React.useEffect(refreshStatus, [refreshStatus]);
+
+  const statusText = !status?.enabled
+    ? (status?.error ?? "연동이 꺼져 있습니다.")
+    : `127.0.0.1:${status.port}에서 연결을 받고 있습니다.`;
+
+  return (
+    <>
+      <SettingRow
+        title="브라우저 확장 연동"
+        description={`kioex 확장 프로그램에서 보낸 링크를 받습니다. ${statusText}`}
+        control={
+          <Switch
+            checked={enabled}
+            onCheckedChange={(value) => void onEnabledChange(value).then(refreshStatus)}
+          />
+        }
+      />
+      <div className="flex flex-col gap-2 p-3.5">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <Label className="text-sm">허용된 확장 프로그램</Label>
+          <span className="text-xs text-muted-foreground">
+            처음 연결할 때 승인한 확장 프로그램 ID입니다. 삭제하면 다음 연결 시 다시 승인을
+            요청합니다.
+          </span>
+        </div>
+        {allowedIds.length === 0 ? (
+          <span className="text-xs text-muted-foreground">없음</span>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {allowedIds.map((id) => (
+              <div key={id} className="flex items-center gap-1.5">
+                <code className="flex-1 truncate rounded-md bg-muted px-2 py-1.5 text-xs">
+                  {id}
+                </code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="shrink-0"
+                  onClick={() => onAllowedIdsChange(allowedIds.filter((entry) => entry !== id))}
+                >
+                  <XIcon className="size-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

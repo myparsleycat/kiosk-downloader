@@ -123,9 +123,67 @@ jobs:
                       dist/*.yml
                   if-no-files-found: error
 
+    build-extension:
+        name: Build browser extension
+        needs: version
+        if: needs.version.outputs.should_release == 'true'
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: 12
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  cache: pnpm
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            # manifest.config.ts reads the manifest version from extension/package.json.
+            - name: Set extension version
+              env:
+                  VERSION: ${{ needs.version.outputs.version }}
+              shell: bash
+              run: |
+                  node -e "
+                    const fs = require('node:fs');
+                    const pkg = JSON.parse(fs.readFileSync('extension/package.json', 'utf8'));
+                    pkg.version = process.env.VERSION;
+                    fs.writeFileSync('extension/package.json', JSON.stringify(pkg, null, 2) + '\n');
+                  "
+
+            - name: Build extension
+              run: pnpm --filter kioex build
+
+            # manifest.json must sit at the archive root for Chrome Web Store uploads and unpacked loading.
+            - name: Package extension
+              env:
+                  VERSION: ${{ needs.version.outputs.version }}
+              shell: bash
+              run: |
+                  test -f extension/dist/manifest.json
+                  mkdir -p extension-artifacts
+                  (cd extension/dist && zip -r -X "../../extension-artifacts/kioex-${VERSION}.zip" .)
+                  unzip -l "extension-artifacts/kioex-${VERSION}.zip"
+
+            - name: Upload extension artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: extension
+                  path: extension-artifacts/*.zip
+                  if-no-files-found: error
+
     release:
         name: Publish GitHub Release
-        needs: [version, build]
+        needs: [version, build, build-extension]
         if: needs.version.outputs.should_release == 'true'
         runs-on: ubuntu-latest
 

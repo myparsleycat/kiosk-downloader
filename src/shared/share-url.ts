@@ -1,6 +1,7 @@
-import type { DownloadProvider } from "./types";
+// Defined here rather than in ./types so the browser extension can import this module without
+// pulling in the generated IPC types.
+export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload" | "direct" | "mega";
 
-export type { DownloadProvider };
 export type WorkuploadShareKind = "file" | "archive";
 export type MegaLinkKind = "file" | "folder";
 export type MegaLink =

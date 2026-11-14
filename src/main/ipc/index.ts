@@ -3,6 +3,7 @@ import { BrowserWindow } from "electron";
 
 import type { KioskDownloader } from "../index";
 
+import { registerBrowserExtensionHandlers } from "./handlers/browser-extension";
 import { registerDownloadHandlers } from "./handlers/download";
 import { registerMegaHandlers } from "./handlers/mega";
 import { registerSettingHandlers } from "./handlers/setting";
@@ -27,6 +28,7 @@ export class IPC {
         registerUpdaterHandlers(this.kd);
         registerUtilHandlers();
         registerWindowHandlers(this.kd);
+        registerBrowserExtensionHandlers(this.kd);
     }
 
     public postMessageToWindow<K extends keyof IpcEvents>(
