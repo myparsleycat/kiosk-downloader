@@ -26,6 +26,8 @@ const LAUNCH_WAIT_MS = 15_000;
 const LAUNCH_POLL_MS = 500;
 
 let cachedPort: number | null = null;
+let activePairingWaits = 0;
+let lastDeepLinkAt = 0;
 
 export async function getConnection(): Promise<AppConnection> {
     const ports = cachedPort
@@ -57,8 +59,11 @@ export async function requestPairing(): Promise<AppConnection> {
     return getConnection();
 }
 
-export async function sendItems(items: BrowserExtensionRequestItem[]): Promise<SendResult> {
-    const result = await requestApp("/requests", { items });
+export async function sendItems(
+    items: BrowserExtensionRequestItem[],
+    tabId?: number,
+): Promise<SendResult> {
+    const result = await requestApp("/requests", { items }, undefined, tabId);
     return result.ok ? { ok: true } : result;
 }
 
@@ -67,7 +72,7 @@ export function sendItemsLaunchingApp(
     items: BrowserExtensionRequestItem[],
     tabId: number | undefined,
 ): Promise<SendResult> {
-    return runLaunchingApp(() => sendItems(items), tabId);
+    return runLaunchingApp(() => sendItems(items, tabId), tabId);
 }
 
 export async function prepareShare(
@@ -116,6 +121,7 @@ async function requestApp(
     path: string,
     body: unknown,
     minProtocol = BROWSER_EXTENSION_PAIRING_PROTOCOL,
+    tabId?: number,
 ): Promise<{ ok: true; response: Response } | AppFailure> {
     const connection = await getConnection();
     if (connection.state === "offline") {
@@ -125,28 +131,49 @@ async function requestApp(
         return { ok: false, reason: "outdated" };
     }
     if (connection.state === "pairingRequired") {
-        const paired = await pairWithApp(connection.port);
+        const paired = await pairWithApp(connection.port, false, tabId);
         if (!paired.ok) return paired;
     }
     return readAppResponse(await postJson(connection.port, path, body));
 }
 
-async function pairWithApp(port: number, retryDenied = false): Promise<SendResult> {
+async function pairWithApp(port: number, retryDenied = false, tabId?: number): Promise<SendResult> {
     const result = await readAppResponse(await postJson(port, "/pair", { retryDenied }));
     if (!result.ok) return result;
     if (result.response.status !== 202) return { ok: true };
 
-    const deadline = Date.now() + REQUEST_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-        await delay(PAIRING_POLL_MS);
-        // Extension API activity keeps this finite approval wait alive in the service worker.
-        await chrome.runtime.getPlatformInfo();
-        const ping = await pingPort(port);
-        if (!ping) return { ok: false, reason: "offline" };
-        if (ping.paired) return { ok: true };
-        if (ping.pairingDenied) return { ok: false, reason: "pairingDenied" };
+    // Windows keeps a background app behind the foreground browser, so the approval dialog would
+    // open out of sight. Launching the deep link lets the browser hand foreground rights to the
+    // running app through its single-instance handoff. Concurrent waits share one prompt, and an
+    // app that launchApp just started already holds foreground rights, so neither opens it again.
+    const raise = activePairingWaits === 0 && Date.now() - lastDeepLinkAt >= LAUNCH_WAIT_MS;
+    activePairingWaits++;
+    try {
+        if (raise && (await chrome.runtime.getPlatformInfo()).os === "win") {
+            // Best effort: without it the dialog still opens, only possibly behind the browser.
+            await openDeepLink(tabId).catch((error: unknown) =>
+                console.warn("[kioex] failed to bring Kiosk Downloader forward", { error }),
+            );
+        }
+
+        const deadline = Date.now() + REQUEST_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            await delay(PAIRING_POLL_MS);
+            // Extension API activity keeps this finite approval wait alive in the service worker.
+            await chrome.runtime.getPlatformInfo();
+            const ping = await pingPort(port);
+            if (!ping) return { ok: false, reason: "offline" };
+            if (ping.paired) return { ok: true };
+            if (ping.pairingDenied) return { ok: false, reason: "pairingDenied" };
+        }
+        return {
+            ok: false,
+            reason: "failed",
+            message: "앱의 연결 승인 대기 시간이 초과되었습니다.",
+        };
+    } finally {
+        activePairingWaits--;
     }
-    return { ok: false, reason: "failed", message: "앱의 연결 승인 대기 시간이 초과되었습니다." };
 }
 
 async function readAppResponse(
@@ -170,13 +197,9 @@ async function readAppResponse(
 }
 
 export async function launchApp(tabId: number | undefined): Promise<AppConnection> {
-    const targetTabId = tabId ?? (await findActiveTabId());
-    if (targetTabId === undefined) {
+    if (!(await openDeepLink(tabId))) {
         return { state: "offline" };
     }
-    // Navigating a tab to the custom scheme hands it to the OS (after the browser's own
-    // confirmation prompt) and leaves the page loaded in that tab untouched.
-    await chrome.tabs.update(targetTabId, { url: DEEP_LINK_OPEN_URL });
 
     const deadline = Date.now() + LAUNCH_WAIT_MS;
     while (Date.now() < deadline) {
@@ -185,6 +208,16 @@ export async function launchApp(tabId: number | undefined): Promise<AppConnectio
         if (connection.state !== "offline") return connection;
     }
     return { state: "offline" };
+}
+
+async function openDeepLink(tabId: number | undefined) {
+    lastDeepLinkAt = Date.now();
+    const targetTabId = tabId ?? (await findActiveTabId());
+    if (targetTabId === undefined) return false;
+    // Navigating a tab to the custom scheme hands it to the OS (after the browser's own
+    // confirmation prompt) and leaves the page loaded in that tab untouched.
+    await chrome.tabs.update(targetTabId, { url: DEEP_LINK_OPEN_URL });
+    return true;
 }
 
 async function findActiveTabId() {

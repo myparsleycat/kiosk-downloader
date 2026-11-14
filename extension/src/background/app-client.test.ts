@@ -1,4 +1,4 @@
-import { BROWSER_EXTENSION_APP_NAME } from "@shared/browser-extension";
+import { BROWSER_EXTENSION_APP_NAME, DEEP_LINK_OPEN_URL } from "@shared/browser-extension";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { getConnection, sendItems } from "./app-client";
@@ -28,8 +28,14 @@ it("waits for approval through short requests before sending links", async () =>
     vi.useFakeTimers();
     let approved = false;
     let result: Awaited<ReturnType<typeof sendItems>> | undefined;
-    const getPlatformInfo = vi.fn(async () => ({}));
-    vi.stubGlobal("chrome", { runtime: { getPlatformInfo } });
+    const getPlatformInfo = vi.fn(async () => ({ os: "win" }));
+    const updateTab = vi.fn(async () => {
+        throw new Error("tab closed");
+    });
+    vi.stubGlobal("chrome", {
+        runtime: { getPlatformInfo },
+        tabs: { query: async () => [{ id: 7 }], update: updateTab },
+    });
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
         const route = new URL(new Request(input).url).pathname;
         if (route.endsWith("/ping"))
@@ -54,6 +60,7 @@ it("waits for approval through short requests before sending links", async () =>
         false,
     );
     expect(getPlatformInfo).toHaveBeenCalled();
+    expect(updateTab).toHaveBeenCalledExactlyOnceWith(7, { url: DEEP_LINK_OPEN_URL });
 
     approved = true;
     await vi.advanceTimersByTimeAsync(1000);
