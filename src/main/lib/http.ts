@@ -27,6 +27,16 @@ async function loadUndici() {
     return undiciModulePromise;
 }
 
+/** Strips credentials, query and hash, which may carry signatures or tokens. */
+export function toLogUrl(url: string) {
+    const logUrl = new URL(url);
+    logUrl.username = "";
+    logUrl.password = "";
+    logUrl.search = "";
+    logUrl.hash = "";
+    return logUrl.href;
+}
+
 function getDirectDispatcher(forceIpv4: boolean) {
     const key = forceIpv4 ? "direct:ipv4" : "direct:auto";
     const existing = dispatcherCache.get(key);
@@ -87,6 +97,7 @@ export async function plainUndiciFetch(
 }
 
 const DEFAULT_TIMEOUT_MS = 100_000;
+export const DEFAULT_CHROME_MAJOR_VERSION = "149";
 
 // Mirrors the network-error detection of the previous ky layer (is-network-error)
 // so provider operations can decide whether their own operation is safe to retry.
@@ -125,7 +136,7 @@ export type PayloadRequestOptions = BaseRequestOptions & {
 
 export class TimeoutError extends Error {
     public constructor(request: Request) {
-        super(`Request timed out: ${request.method} ${request.url}`);
+        super(`Request timed out: ${request.method} ${toLogUrl(request.url)}`);
         this.name = "TimeoutError";
     }
 }
@@ -167,8 +178,8 @@ export class ProxyResolutionError extends Error {
     public constructor(url: string, proxyResult?: string, cause?: unknown) {
         super(
             proxyResult
-                ? `No supported proxy directive was resolved for ${url}: ${proxyResult}`
-                : `Failed to resolve a proxy for ${url}`,
+                ? `No supported proxy directive was resolved for ${toLogUrl(url)}: ${proxyResult}`
+                : `Failed to resolve a proxy for ${toLogUrl(url)}`,
             cause === undefined ? undefined : { cause },
         );
         this.name = "ProxyResolutionError";
@@ -358,7 +369,7 @@ export class HTTP {
 
     public async getHeaders(_url: string) {
         return {
-            "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36`,
+            "User-Agent": `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_MAJOR_VERSION}.0.0.0 Safari/537.36`,
         };
     }
 
@@ -385,13 +396,8 @@ export class HTTP {
             options.timeout === false
                 ? undefined
                 : setTimeout(() => {
-                      const logUrl = new URL(url);
-                      logUrl.username = "";
-                      logUrl.password = "";
-                      logUrl.search = "";
-                      logUrl.hash = "";
                       controller.abort(
-                          new TimeoutError(new Request(logUrl, { method: options.method })),
+                          new TimeoutError(new Request(toLogUrl(url), { method: options.method })),
                       );
                   }, options.timeout ?? DEFAULT_TIMEOUT_MS);
         const cancelUnreadBody = () => {
@@ -436,7 +442,9 @@ export class HTTP {
     ) {
         const headers = new Headers(options.headers);
         for (const [key, value] of Object.entries(await this.getHeaders(url))) {
-            headers.set(key, value);
+            if (!headers.has(key)) {
+                headers.set(key, value);
+            }
         }
         const timeoutMs =
             options.timeout === false ? undefined : (options.timeout ?? DEFAULT_TIMEOUT_MS);

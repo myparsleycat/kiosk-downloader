@@ -1,8 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TransferScheduler } from "../transfer-request-pool";
-import { TransferChunkPool, type TransferFileRegistration } from "./transfer-chunk-pool";
+import {
+    createTransferRangeSource,
+    type MegaCdnSpec,
+    transferItCdnSpec,
+} from "./mega-cdn-download-runner";
+import {
+    type ChunkRangeSource,
+    readRangeBody,
+    TransferChunkPool,
+    type TransferFileRegistration,
+} from "./transfer-chunk-pool";
 import { TRANSFER_RATE_LIMIT_ERROR } from "./transfer-it-api-client";
+
+// Set by the latest createHarness() so registration() builds a source bound to its mocks.
+let createSource: (overrides?: Partial<MegaCdnSpec>) => ChunkRangeSource;
 
 function createHarness(payloadRequest: ReturnType<typeof vi.fn>) {
     const requestPool = new TransferScheduler(8);
@@ -22,18 +35,32 @@ function createHarness(payloadRequest: ReturnType<typeof vi.fn>) {
             url: "https://cdn.test/file",
         }),
     );
-    const pool = new TransferChunkPool({
-        kd: {
-            http: { payloadRequest },
-            logger,
-            service: {
-                transfer: {
-                    downloadBandwidth: { take: vi.fn(async () => undefined) },
-                    requestPool,
-                },
+    const kd = {
+        http: { payloadRequest },
+        logger,
+        service: {
+            transfer: {
+                downloadBandwidth: { take: vi.fn(async () => undefined) },
+                requestPool,
             },
-        } as never,
-        api: { getDownloadUrl } as never,
+        },
+    };
+    createSource = (overrides = {}) =>
+        createTransferRangeSource({
+            kd: kd as never,
+            collection: { id: "collection", shareId: "share" } as never,
+            nodeKey: Buffer.alloc(32),
+            spec: {
+                ...transferItCdnSpec(
+                    { getDownloadUrl } as never,
+                    { id: "collection", shareId: "share" } as never,
+                    { id: "file", remoteId: "remote" } as never,
+                ),
+                ...overrides,
+            },
+        });
+    const pool = new TransferChunkPool({
+        kd: kd as never,
         repository: repository as never,
         metrics: {
             registerFile: vi.fn(),
@@ -63,7 +90,7 @@ function registration(chunkCount = 1): TransferFileRegistration {
     return {
         collection: { id: "collection", shareId: "share" },
         file: { id: "file", remoteId: "remote", downloadedBytes: 0 },
-        nodeKey: Buffer.alloc(32),
+        source: createSource(),
         partWriter: {
             writeChunkFromStream: async (
                 _offset: number,
@@ -191,6 +218,24 @@ describe("TransferChunkPool", () => {
         );
     });
 
+    it("pauses instead of retrying when a quota-limited CDN reports 509", async () => {
+        const payloadRequest = vi.fn(
+            async () => new Response(null, { status: 509, headers: { "x-mega-time-left": "120" } }),
+        );
+        const { pool, repository } = createHarness(payloadRequest);
+        pool.start(8);
+        const item = registration();
+        const onQuotaExceeded = vi.fn(() => item.controller.abort());
+        item.source = createSource({ onQuotaExceeded });
+
+        await expect(pool.register(item)).resolves.toBe("paused");
+        expect(onQuotaExceeded).toHaveBeenCalledWith(
+            expect.objectContaining({ name: "MegaQuotaExceededError", timeLeftMs: 120_000 }),
+        );
+        expect(payloadRequest).toHaveBeenCalledTimes(1);
+        expect(repository.markChunkError).not.toHaveBeenCalled();
+    });
+
     it("includes CDN error bodies in unclassified HTTP failures", async () => {
         const payloadRequest = vi.fn(
             async () =>
@@ -286,4 +331,42 @@ it("aborts a sibling CDN lookup when another chunk fails", async () => {
     await expect(pool.register(item)).resolves.toBe("failed");
     expect(getDownloadUrl).toHaveBeenCalledTimes(2);
     expect(item.controller.signal.aborted).toBe(true);
+});
+
+it("fails a chunk without retrying when the source reports a fatal error", async () => {
+    const { pool } = createHarness(vi.fn());
+    const fatal = new Error("remote changed");
+    let attempts = 0;
+    const item = registration();
+    item.source = {
+        provider: "direct",
+        providerId: "direct-download",
+        cohortKey: "direct:test",
+        isFatal: (error) => error === fatal,
+        // oxlint-disable-next-line require-yield
+        async *openRange() {
+            attempts += 1;
+            throw fatal;
+        },
+    };
+
+    const outcome = pool.register(item);
+    pool.start(1);
+    await expect(outcome).resolves.toBe("failed");
+    expect(attempts).toBe(1);
+});
+
+it("skips already-written bytes when a ranged request is answered with 200", async () => {
+    const chunks: Uint8Array[] = [];
+    for await (const bytes of readRangeBody(new Response("abcdefgh", { status: 200 }), {
+        requestStart: 3,
+        skip: 3,
+        expected: 4,
+        label: "test",
+        signal: new AbortController().signal,
+        takeBandwidth: async () => undefined,
+    })) {
+        chunks.push(bytes);
+    }
+    expect(Buffer.concat(chunks).toString()).toBe("defg");
 });

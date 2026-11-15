@@ -158,12 +158,8 @@ export class PartFileWriter {
                 return hasLegacyRange(partPath, chunk);
             }
 
-            const chunkBuffer = Buffer.alloc(chunk.size);
-            const readResult = await partHandle.read(chunkBuffer, 0, chunk.size, chunk.offset);
-            if (readResult.bytesRead !== chunk.size) {
-                return false;
-            }
-            return toUnsignedCrc32(chunkBuffer) === expectedDigest;
+            const crc = await readRangeCrc(partHandle, chunk.offset, chunk.size);
+            return crc !== null && crc >>> 0 === expectedDigest;
         } finally {
             await partHandle.close();
         }
@@ -207,25 +203,12 @@ export class PartFileWriter {
         if (!this.handle) {
             throw new Error("Part file is not open.");
         }
-
-        let crc = 0;
-        let readOffset = offset;
-        let remaining = length;
-        const buffer = Buffer.allocUnsafe(Math.min(remaining, 1024 * 1024));
-
-        while (remaining > 0) {
-            const toRead = Math.min(remaining, buffer.length);
-            const result = await this.handle.read(buffer, 0, toRead, readOffset);
-            if (result.bytesRead !== toRead) {
-                throw new Error(
-                    `Part file is shorter than resume offset: expected ${toRead}B at ${readOffset}, got ${result.bytesRead}B.`,
-                );
-            }
-            crc = crc32(buffer.subarray(0, toRead), crc);
-            readOffset += toRead;
-            remaining -= toRead;
+        const crc = await readRangeCrc(this.handle, offset, length);
+        if (crc === null) {
+            throw new Error(
+                `Part file is shorter than resume offset: expected ${length}B at ${offset}.`,
+            );
         }
-
         return crc;
     }
 }
@@ -265,8 +248,21 @@ async function hasLegacyRange(partPath: string, chunk: ChunkRange) {
     }
 }
 
-function toUnsignedCrc32(buffer: Buffer) {
-    return crc32(buffer) >>> 0;
+// Chunks can span a whole file (servers without Range support), so CRC them in bounded
+// blocks: a single read is capped at 2 GiB and a file-sized buffer would exhaust memory.
+async function readRangeCrc(handle: FileHandle, offset: number, length: number) {
+    const buffer = Buffer.allocUnsafe(Math.min(length, 1024 * 1024));
+    let crc = 0;
+    for (let done = 0; done < length;) {
+        const toRead = Math.min(length - done, buffer.length);
+        const result = await handle.read(buffer, 0, toRead, offset + done);
+        if (result.bytesRead !== toRead) {
+            return null;
+        }
+        crc = crc32(buffer.subarray(0, toRead), crc);
+        done += toRead;
+    }
+    return crc;
 }
 
 function takePendingBatch(pending: Uint8Array[], bytes: number) {

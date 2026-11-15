@@ -9,7 +9,7 @@ import {
     rewritePathSet,
     validateNodeName,
 } from "@shared/tree-rename";
-import type { DirNode, ListZipEntriesResult } from "@shared/types";
+import type { DirectRequestHeaders, DirNode, ListZipEntriesResult } from "@shared/types";
 import { setZipEntries } from "@shared/zip-tree";
 import { create } from "zustand";
 
@@ -24,6 +24,8 @@ export type NewDownloadItem = {
     key: string;
     url: string;
     password: string;
+    /** Only sent for direct URLs. */
+    headers: DirectRequestHeaders;
     preparation: DownloadPreparationState;
     selected: Set<string>;
     zipPasswords: Record<string, string>;
@@ -73,11 +75,15 @@ export function applyZipEntriesResult(
     };
 }
 
-export function createDownloadDraftItem(url: string): NewDownloadItem {
+export function createDownloadDraftItem(
+    url: string,
+    headers: DirectRequestHeaders = {},
+): NewDownloadItem {
     return {
         key: crypto.randomUUID(),
         url,
         password: "",
+        headers,
         preparation: { status: "preparing" },
         selected: new Set(),
         zipPasswords: {},
@@ -106,11 +112,25 @@ export function shouldLoadPastedShare(items: NewDownloadItem[], url: string) {
     return items.length !== 1 || items[0].url !== url;
 }
 
+// Keeps the renamed tree referentially stable across renders so memoized sorting and
+// selection state survive unrelated updates such as checkbox toggles.
+const displayTreeCache = new WeakMap<
+    NewDownloadItem["renames"],
+    { source: DirNode; tree: DirNode }
+>();
+
 export function itemDisplayTree(item: NewDownloadItem) {
     if (item.preparation.status !== "ready") {
         return null;
     }
-    return applyRenamesToTree(item.preparation.collection.tree, item.renames);
+    const source = item.preparation.collection.tree;
+    const cached = displayTreeCache.get(item.renames);
+    if (cached?.source === source) {
+        return cached.tree;
+    }
+    const tree = applyRenamesToTree(source, item.renames);
+    displayTreeCache.set(item.renames, { source, tree });
+    return tree;
 }
 
 function updateItem(
@@ -123,6 +143,8 @@ function updateItem(
 
 type NewDownloadDraftState = {
     url: string;
+    /** Direct URLs only load once explicitly committed (paste or Enter), never while typing. */
+    commitRequestedUrl: string | null;
     items: NewDownloadItem[];
     savePath: string;
     createCollectionSubfolder: boolean;
@@ -131,12 +153,15 @@ type NewDownloadDraftState = {
 };
 
 type NewDownloadDraftActions = {
-    setUrl: (url: string) => void;
+    setUrl: (url: string, options?: { commit?: boolean }) => void;
     setSavePath: (savePath: string) => void;
     setCreateCollectionSubfolder: (createCollectionSubfolder: boolean) => void;
     setAsciiFilenames: (asciiFilenames: boolean) => void;
     replaceItems: (urls: string[]) => void;
+    /** Adds entries whose URL is not already in the draft and returns the added items. */
+    appendItems: (entries: { url: string; headers?: DirectRequestHeaders }[]) => NewDownloadItem[];
     setItemPassword: (key: string, password: string) => void;
+    setItemHeaders: (key: string, headers: DirectRequestHeaders) => void;
     setItemPreparation: (key: string, preparation: DownloadPreparationState) => void;
     setItemSelected: (key: string, selected: Set<string>) => void;
     updateItemSelected: (key: string, updater: (selected: Set<string>) => Set<string>) => void;
@@ -157,6 +182,7 @@ type NewDownloadDraftStore = NewDownloadDraftState & NewDownloadDraftActions;
 
 const draftDefaults = {
     url: "",
+    commitRequestedUrl: null,
     items: [],
     savePath: "",
     createCollectionSubfolder: true,
@@ -167,7 +193,7 @@ const draftDefaults = {
 export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => ({
     ...draftDefaults,
 
-    setUrl: (url) => set({ url }),
+    setUrl: (url, options) => set({ url, commitRequestedUrl: options?.commit ? url.trim() : null }),
 
     setSavePath: (savePath) => set({ savePath }),
 
@@ -178,11 +204,28 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
     replaceItems: (urls) =>
         set({
             url: urls.length === 1 ? urls[0] : "",
+            commitRequestedUrl: null,
             items: urls.map((itemUrl) => createDownloadDraftItem(itemUrl)),
         }),
 
+    appendItems: (entries) => {
+        const seen = new Set(get().items.map((item) => item.url));
+        const added = entries.flatMap((entry) => {
+            if (seen.has(entry.url)) return [];
+            seen.add(entry.url);
+            return [createDownloadDraftItem(entry.url, entry.headers)];
+        });
+        if (added.length === 0) return added;
+        const items = [...get().items, ...added];
+        set({ items, url: items.length === 1 ? items[0].url : "", commitRequestedUrl: null });
+        return added;
+    },
+
     setItemPassword: (key, password) =>
         set({ items: updateItem(get().items, key, (item) => ({ ...item, password })) }),
+
+    setItemHeaders: (key, headers) =>
+        set({ items: updateItem(get().items, key, (item) => ({ ...item, headers })) }),
 
     setItemPreparation: (key, preparation) =>
         set({
@@ -286,6 +329,7 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
     resetDraft: () =>
         set({
             url: "",
+            commitRequestedUrl: null,
             items: [],
             settingsHydrated: false,
         }),
@@ -294,13 +338,14 @@ export const useNewDownloadDraft = create<NewDownloadDraftStore>((set, get) => (
         if (get().settingsHydrated) return;
 
         const values = await window.api.invoke("setting:getMany", [
+            "general.defaultDownloadPath",
             "general.lastDownloadPath",
             "general.createCollectionSubfolder",
             "general.asciiFilenames",
         ]);
 
         set({
-            savePath: values["general.lastDownloadPath"] ?? "",
+            savePath: values["general.defaultDownloadPath"] || values["general.lastDownloadPath"],
             createCollectionSubfolder: values["general.createCollectionSubfolder"] ?? true,
             asciiFilenames: values["general.asciiFilenames"] ?? false,
             settingsHydrated: true,

@@ -3,7 +3,9 @@ import { BrowserWindow } from "electron";
 
 import type { KioskDownloader } from "../index";
 
+import { registerBrowserExtensionHandlers } from "./handlers/browser-extension";
 import { registerDownloadHandlers } from "./handlers/download";
+import { registerMegaHandlers } from "./handlers/mega";
 import { registerSettingHandlers } from "./handlers/setting";
 import { registerUpdaterHandlers } from "./handlers/updater";
 import { registerUploadHandlers } from "./handlers/upload";
@@ -22,9 +24,11 @@ export class IPC {
         registerDownloadHandlers(this.kd);
         registerUploadHandlers(this.kd);
         registerSettingHandlers(this.kd);
+        registerMegaHandlers(this.kd);
         registerUpdaterHandlers(this.kd);
         registerUtilHandlers();
         registerWindowHandlers(this.kd);
+        registerBrowserExtensionHandlers(this.kd);
     }
 
     public postMessageToWindow<K extends keyof IpcEvents>(
@@ -39,10 +43,11 @@ export class IPC {
             window.webContents.isCrashed() ||
             window.webContents.isLoadingMainFrame()
         ) {
-            return;
+            return false;
         }
         try {
             window.webContents.send(channel, ...args);
+            return true;
         } catch (error) {
             if (
                 window.isDestroyed() ||
@@ -53,9 +58,10 @@ export class IPC {
                         "Render frame was disposed before WebFrameMain could be accessed",
                     ))
             ) {
-                return;
+                return false;
             }
             this.kd.logger.error({ channel, error }, "IPC:postMessageToWindow");
+            return false;
         }
     }
 
@@ -63,7 +69,7 @@ export class IPC {
         channel: K,
         ...args: Parameters<IpcEvents[K]>
     ) {
-        this.postMessageToWindow(this.kd.window.main.window, channel, ...args);
+        return this.postMessageToWindow(this.kd.window.main.window, channel, ...args);
     }
 
     public broadcast<K extends keyof IpcEvents>(channel: K, ...args: Parameters<IpcEvents[K]>) {

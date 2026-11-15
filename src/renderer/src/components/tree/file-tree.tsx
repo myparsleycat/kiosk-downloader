@@ -29,6 +29,7 @@ import type {
 import { getSelectionCheckState, dirTotalSize } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
 import { useDownloadTreeExpanded } from "@renderer/stores/download-tree-expanded";
+import { usesRangeDependentControl } from "@shared/share-url";
 import { formatSize, formatSpeed } from "@shared/utils";
 import {
   ArchiveIcon,
@@ -81,6 +82,8 @@ export const FILE_TREE_RIGHT_COLS: Record<FileTreeProps["mode"], string[]> = {
   progress: ["5.5rem", "10rem", "5rem", "2.5rem"],
 };
 
+export const FILE_TREE_ROW_INSET = 8;
+
 export function fileTreeGridTemplateColumns(rightCols: readonly string[]) {
   return `auto minmax(0, 1fr) ${rightCols.join(" ")}`;
 }
@@ -126,7 +129,7 @@ interface TreeNodeProps {
 }
 
 function TreeNode({ entry, depth, pathStack, rootKey, props, dirSummaries }: TreeNodeProps) {
-  const indent = depth * 16 + 8;
+  const indent = depth * 16 + FILE_TREE_ROW_INSET;
   const rightCols = FILE_TREE_RIGHT_COLS[props.mode];
 
   if (entry.kind === "file") {
@@ -257,7 +260,9 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
     status === "error"
       ? [{ path: selectionKey, message: prog?.error ?? "오류 정보가 없습니다." }]
       : [];
-  const transferControl = provider === "workupload" ? prog?.transferControl : ("pause" as const);
+  const transferControl = usesRangeDependentControl(provider)
+    ? prog?.transferControl
+    : ("pause" as const);
 
   return (
     <TreeRow
@@ -290,7 +295,7 @@ const ProgressFileRow = React.memo(function ProgressFileRow({
             }
             pct={pct}
             transferControl={transferControl}
-            workupload={provider === "workupload"}
+            rangeDependent={usesRangeDependentControl(provider)}
             onClick={errors.length > 0 ? () => onError?.(errors) : undefined}
           />
         </div>,
@@ -791,12 +796,13 @@ function TreeRow({
   return (
     <div
       className={cn(
-        "grid h-7 items-center gap-x-1 rounded-md pr-2 hover:bg-muted/50",
+        "grid h-7 items-center gap-x-1 rounded-md hover:bg-muted/50",
         "data-[hovered]:bg-muted",
         expandable && "cursor-pointer",
       )}
       style={{
         paddingLeft: indent,
+        paddingRight: FILE_TREE_ROW_INSET,
         gridTemplateColumns: fileTreeGridTemplateColumns(rightCols),
       }}
       onClick={expandable ? onExpand : undefined}
@@ -849,13 +855,13 @@ function StatusPill({
   pct,
   onClick,
   transferControl,
-  workupload,
+  rangeDependent,
 }: {
   status: string;
   pct: number;
   onClick?: () => void;
   transferControl?: "pause" | "stop";
-  workupload?: boolean;
+  rangeDependent?: boolean;
 }) {
   const label =
     status === "completed_elsewhere"
@@ -867,7 +873,7 @@ function StatusPill({
           : status === "downloading"
             ? `${pct.toFixed(0)}%`
             : status === "paused"
-              ? transferControl === "stop" || (workupload && !transferControl)
+              ? transferControl === "stop" || (rangeDependent && !transferControl)
                 ? "정지"
                 : "일시정지"
               : status === "error"

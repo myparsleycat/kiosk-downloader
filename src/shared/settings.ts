@@ -15,8 +15,10 @@ export interface AppSettings {
     "general.runOnStartup": boolean;
     "general.runInBackground": boolean;
     "general.lastDownloadPath": string;
+    "general.defaultDownloadPath": string;
     "general.createCollectionSubfolder": boolean;
     "general.asciiFilenames": boolean;
+    "general.foldersFirst": boolean;
     "general.logLevel": SettingLogLevel;
     "general.theme": SettingTheme;
     "general.powerSaveBlockInTransfer": boolean;
@@ -24,6 +26,8 @@ export interface AppSettings {
     "general.autoUpdateMode": AutoUpdateMode;
     "general.autoTryCollectionPasswords": boolean;
     "general.collectionPasswordList": string[];
+    "general.browserExtension": boolean;
+    "general.browserExtensionAllowedIds": string[];
     "transfer.requestPoolSize": number;
     "transfer.maxChunkRetries": number;
     "transfer.uploadMaxChunkRetries": number;
@@ -34,6 +38,7 @@ export interface AppSettings {
     "transfer.uploadStartupResumeMode": StartupResumeMode;
     "transfer.downloadBandwidthLimitMibps": number;
     "transfer.uploadBandwidthLimitMibps": number;
+    "transfer.megaQuotaAutoResume": boolean;
     "network.forceIpv4": boolean;
 }
 
@@ -54,7 +59,9 @@ export type TransferProviderRequestId =
     | "kiosk-upload"
     | "kiosk-download"
     | "workupload-download"
-    | "transfer-it-download";
+    | "transfer-it-download"
+    | "mega-download"
+    | "direct-download";
 
 export const STREAM_WRITE_BATCH_BYTES_OPTIONS = [
     256 * 1024,
@@ -80,6 +87,9 @@ export const BANDWIDTH_LIMIT_MIBPS_MAX = 1024;
 export const BANDWIDTH_LIMIT_MIBPS_DEFAULT = 0;
 
 export const COLLECTION_PASSWORD_LIST_MAX = 10;
+
+export const BROWSER_EXTENSION_ID_PATTERN = /^[a-p]{32}$/;
+export const BROWSER_EXTENSION_ALLOWED_IDS_MAX = 20;
 
 export type SettingKey = keyof AppSettings;
 
@@ -108,6 +118,11 @@ export const APP_SETTINGS = {
         scope: "general",
         storageKey: "lastDownloadPath",
     },
+    "general.defaultDownloadPath": {
+        publicKey: "general.defaultDownloadPath",
+        scope: "general",
+        storageKey: "defaultDownloadPath",
+    },
     "general.createCollectionSubfolder": {
         publicKey: "general.createCollectionSubfolder",
         scope: "general",
@@ -117,6 +132,11 @@ export const APP_SETTINGS = {
         publicKey: "general.asciiFilenames",
         scope: "general",
         storageKey: "asciiFilenames",
+    },
+    "general.foldersFirst": {
+        publicKey: "general.foldersFirst",
+        scope: "general",
+        storageKey: "foldersFirst",
     },
     "general.logLevel": {
         publicKey: "general.logLevel",
@@ -152,6 +172,16 @@ export const APP_SETTINGS = {
         publicKey: "general.collectionPasswordList",
         scope: "general",
         storageKey: "collectionPasswordList",
+    },
+    "general.browserExtension": {
+        publicKey: "general.browserExtension",
+        scope: "general",
+        storageKey: "browserExtension",
+    },
+    "general.browserExtensionAllowedIds": {
+        publicKey: "general.browserExtensionAllowedIds",
+        scope: "general",
+        storageKey: "browserExtensionAllowedIds",
     },
     "transfer.requestPoolSize": {
         publicKey: "transfer.requestPoolSize",
@@ -202,6 +232,11 @@ export const APP_SETTINGS = {
         publicKey: "transfer.uploadBandwidthLimitMibps",
         scope: "transfer",
         storageKey: "transfer.uploadBandwidthLimitMibps",
+    },
+    "transfer.megaQuotaAutoResume": {
+        publicKey: "transfer.megaQuotaAutoResume",
+        scope: "transfer",
+        storageKey: "transfer.megaQuotaAutoResume",
     },
     "network.forceIpv4": {
         publicKey: "network.forceIpv4",

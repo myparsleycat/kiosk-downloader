@@ -8,7 +8,14 @@
   },
   "overrides": [
     {
-      "files": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx"]
+      "files": [
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "src/**/*.js",
+        "src/**/*.jsx",
+        "extension/src/**/*.ts",
+        "extension/src/**/*.tsx"
+      ]
     }
   ],
   "settings": {

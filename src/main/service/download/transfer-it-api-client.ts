@@ -3,35 +3,33 @@ import {
     COLLECTION_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
 import { tryParseTransferUrl } from "@shared/share-url";
-import type { DirNode, FileNode, LoadCollectionPayload, TreeEntry } from "@shared/types";
+import type { LoadCollectionPayload } from "@shared/types";
 import { toErrorMessage } from "@shared/utils";
 import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
 import type { DownloadCollectionRow, LoadedTransferCollection } from "./types";
 
-import { formatHttpError, snapshotFailedResponse } from "../../lib/http-error";
-import { TransferRateLimitError } from "../transfer-request-pool";
+import {
+    assertMegaResult,
+    megaErrorMessage,
+    type MegaApiRequestOptions,
+    requestMegaApi,
+} from "../mega/mega-api";
+import { buildMegaTree, type MegaNode } from "./mega-node-tree";
 import {
     COLLECTION_EXPIRES_NEVER,
     TRANSFER_SEGMENT_SIZE,
     base64urlDecode,
-    base64urlEncode,
     decodeTransferTitle,
-    decryptNodeAttr,
     deriveTransferPassword,
 } from "./transfer-it-crypto";
 
-const API_BASE = "https://bt7.api.mega.co.nz/cs";
-
-type MegaNode = {
-    h: string;
-    p: string;
-    t: number;
-    a?: string;
-    k?: string;
-    s?: number;
-};
+const API_OPTIONS = {
+    apiBase: "https://bt7.api.mega.co.nz/cs",
+    origin: "https://transfer.it",
+    label: "Transfer",
+} satisfies Partial<MegaApiRequestOptions>;
 
 type XiResponse = {
     pw?: number;
@@ -43,73 +41,12 @@ type XiResponse = {
 export const TRANSFER_RATE_LIMIT_ERROR =
     "Transfer 서버가 다운로드 요청을 제한했습니다. 잠시 후 다시 시도해 주세요.";
 
-export function parseTransferRetryAfterMs(value: string | null) {
-    if (!value) {
-        return undefined;
-    }
-    const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-        return seconds * 1000;
-    }
-    const date = Date.parse(value);
-    if (Number.isNaN(date)) {
-        return undefined;
-    }
-    return Math.max(0, date - Date.now());
-}
-
 function extractTransferId(url: string) {
     const xh = tryParseTransferUrl(url);
     if (!xh) {
         throw new Error("Invalid transfer.it share URL.");
     }
     return xh;
-}
-
-function megaErrorMessage(code: number) {
-    switch (code) {
-        case -2:
-            return "Invalid transfer arguments.";
-        case -3:
-            return "Transfer API temporarily unavailable. Retry later.";
-        case -4:
-            return "Transfer rate limited. Retry later.";
-        case -6:
-            return "Too many transfer requests.";
-        case -8:
-            return "Transfer has expired.";
-        case -9:
-            return "Transfer not found.";
-        case -11:
-            return "Transfer access denied.";
-        case -14:
-            return COLLECTION_INVALID_PASSWORD_ERROR;
-        case -16:
-            return "Transfer is blocked.";
-        case -17:
-            return "Transfer bandwidth quota exceeded.";
-        case -19:
-            return "Too many transfer connections.";
-        default:
-            return `Transfer API error (${code}).`;
-    }
-}
-
-function assertMegaResult(value: unknown, stage: string) {
-    if (typeof value === "number" && value < 0) {
-        if (value === -17) {
-            throw new TransferRateLimitError();
-        }
-        throw new Error(megaErrorMessage(value));
-    }
-    if (value == null) {
-        throw new Error(`Transfer ${stage} failed: empty response.`);
-    }
-    return value;
-}
-
-function sanitizeName(name: string) {
-    return name.replace(/[\\/:*?"<>|]/g, "_") || "unknown";
 }
 
 export class TransferItApiClient {
@@ -143,6 +80,7 @@ export class TransferItApiClient {
         const fResp = assertMegaResult(
             await this.megaApi({ a: "f", c: 1, r: 1 }, query, payload.signal),
             "f",
+            API_OPTIONS,
         ) as {
             f?: MegaNode[];
         };
@@ -150,7 +88,15 @@ export class TransferItApiClient {
             throw new Error("Transfer file list failed.");
         }
 
-        const { tree, nodeKeys, rootName } = this.buildTree(fResp.f, xi.z);
+        const { tree, nodeKeys, rootName } = buildMegaTree(fResp.f, {
+            excludeHandle: xi.z,
+            resolveNodeKey: (node) => (node.k ? base64urlDecode(node.k) : null),
+            onNodeError: (nodeHandle, error) =>
+                this.kd.logger.error(
+                    { nodeHandle, message: toErrorMessage(error) },
+                    "TransferItApiClient:decryptNode",
+                ),
+        });
         const name = decodeTransferTitle(xi.t, rootName || xh);
 
         return {
@@ -191,10 +137,11 @@ export class TransferItApiClient {
         const g = assertMegaResult(
             await this.megaApi({ a: "g", n: nodeHandle, g: 1, ssl: 2 }, query, signal),
             "g",
+            API_OPTIONS,
         ) as { e?: number; g?: string; s?: number };
 
         if (typeof g.e === "number") {
-            throw new Error(megaErrorMessage(g.e));
+            throw new Error(megaErrorMessage(g.e, API_OPTIONS.label));
         }
         if (typeof g.g !== "string" || !/^https?:\/\//i.test(g.g)) {
             throw new Error("Transfer CDN URL missing.");
@@ -203,7 +150,11 @@ export class TransferItApiClient {
     }
 
     private async xi(xh: string, signal?: AbortSignal) {
-        const xi = assertMegaResult(await this.megaApi({ a: "xi", xh }, {}, signal), "xi");
+        const xi = assertMegaResult(
+            await this.megaApi({ a: "xi", xh }, {}, signal),
+            "xi",
+            API_OPTIONS,
+        );
         if (!xi || typeof xi !== "object") {
             throw new Error("Transfer info failed.");
         }
@@ -217,167 +168,14 @@ export class TransferItApiClient {
     ) {
         return await this.controlPlane(async () => {
             signal?.throwIfAborted();
-            const qs = new URLSearchParams(query).toString();
-            const url = `${API_BASE}?${qs}`;
-            const body = JSON.stringify([payload]);
-
-            return await this.kd.http.consumeControlResponse(
-                url,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "text/plain;charset=UTF-8",
-                        Origin: "https://transfer.it",
-                        Referer: "https://transfer.it/",
-                    },
-                    body,
-                    signal,
-                },
-                async (response) => {
-                    if (response.status === 402) {
-                        await response.body?.cancel().catch(() => undefined);
-                        throw new Error("Transfer API requires Hashcash challenge (HTTP 402).");
-                    }
-                    if (response.status === 509) {
-                        const retryAfterMs = parseTransferRetryAfterMs(
-                            response.headers.get("retry-after"),
-                        );
-                        await response.body?.cancel().catch(() => undefined);
-                        throw new TransferRateLimitError(retryAfterMs);
-                    }
-                    if (!response.ok) {
-                        throw new Error(
-                            formatHttpError("Transfer API", await snapshotFailedResponse(response)),
-                        );
-                    }
-
-                    const raw = await response.text();
-                    signal?.throwIfAborted();
-                    let parsed: unknown;
-                    try {
-                        parsed = JSON.parse(raw);
-                    } catch (error) {
-                        throw new Error(`Transfer API bad JSON: ${toErrorMessage(error)}`);
-                    }
-
-                    if (!Array.isArray(parsed)) {
-                        throw new Error(
-                            `Unexpected Transfer API response: ${JSON.stringify(parsed)}`,
-                        );
-                    }
-                    return parsed[0];
-                },
-            );
+            return await requestMegaApi(this.kd.http, payload, {
+                ...API_OPTIONS,
+                query,
+                signal,
+                rateLimitMessage: TRANSFER_RATE_LIMIT_ERROR,
+                solveHashcash: (challenge, hashcashSignal) =>
+                    this.kd.service.mega.solveHashcash(challenge, hashcashSignal),
+            });
         });
-    }
-
-    private buildTree(nodes: MegaNode[], zipHandle: string | undefined) {
-        const byHandle = new Map<string, MegaNode & { name: string; keyB64?: string }>();
-        const nodeKeys = new Map<string, string>();
-        let rootName = "";
-
-        for (const node of nodes) {
-            if (zipHandle && node.h === zipHandle) {
-                continue;
-            }
-
-            let name = "unknown";
-            let keyB64: string | undefined;
-            if (typeof node.k === "string" && node.k) {
-                try {
-                    const keyBytes = base64urlDecode(node.k);
-                    keyB64 = base64urlEncode(keyBytes);
-                    if (node.a) {
-                        const attr = decryptNodeAttr(node.a, keyBytes);
-                        if (attr?.n) {
-                            name = sanitizeName(attr.n);
-                        }
-                    }
-                    if (node.t === 0) {
-                        if (keyBytes.length !== 32) {
-                            throw new Error(`Invalid file key length for node ${node.h}.`);
-                        }
-                        nodeKeys.set(node.h, keyB64);
-                    }
-                } catch (error) {
-                    this.kd.logger.error(
-                        { nodeHandle: node.h, message: toErrorMessage(error) },
-                        "TransferItApiClient:decryptNode",
-                    );
-                }
-            }
-
-            byHandle.set(node.h, { ...node, name, keyB64 });
-            if (node.p === "" && node.t === 1) {
-                rootName = name;
-            }
-        }
-
-        const childrenOf = (parent: string) =>
-            [...byHandle.values()].filter((node) => node.p === parent);
-
-        const buildDir = (dirNode: MegaNode & { name: string }): DirNode => {
-            const entries: TreeEntry[] = [];
-            for (const child of childrenOf(dirNode.h)) {
-                if (child.t === 1) {
-                    entries.push({ kind: "dir", node: buildDir(child) });
-                    continue;
-                }
-                if (child.t === 0) {
-                    const file: FileNode = {
-                        type: "file",
-                        id: child.h,
-                        name: child.name,
-                        size: typeof child.s === "number" ? child.s : 0,
-                    };
-                    entries.push({ kind: "file", node: file });
-                }
-            }
-            return {
-                type: "dir",
-                id: dirNode.h,
-                name: dirNode.name,
-                entries,
-            };
-        };
-
-        const root = [...byHandle.values()].find((node) => node.p === "" && node.t === 1);
-        if (root) {
-            // Virtual root name must be "" so FileTree / selection keys match kio.ac.
-            return {
-                tree: { ...buildDir(root), name: "" },
-                nodeKeys,
-                rootName: root.name || rootName,
-            };
-        }
-
-        // Flat transfer with no explicit root folder: synthesize a root.
-        const entries: TreeEntry[] = [];
-        for (const child of childrenOf("")) {
-            if (child.t === 1) {
-                entries.push({ kind: "dir", node: buildDir(child) });
-            } else if (child.t === 0) {
-                entries.push({
-                    kind: "file",
-                    node: {
-                        type: "file",
-                        id: child.h,
-                        name: child.name,
-                        size: typeof child.s === "number" ? child.s : 0,
-                    },
-                });
-            }
-        }
-
-        return {
-            tree: {
-                type: "dir" as const,
-                id: "root",
-                name: "",
-                entries,
-            },
-            nodeKeys,
-            rootName,
-        };
     }
 }

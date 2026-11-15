@@ -1,5 +1,6 @@
 packages:
   - '.'
+  - 'extension'
 
 allowBuilds:
   cbor-extract: true

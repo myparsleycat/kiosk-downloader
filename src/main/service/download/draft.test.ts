@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -6,7 +7,8 @@ import {
     ZIP_PASSWORD_REQUIRED_ERROR,
 } from "@shared/download-errors";
 import type { TreeEntry, ZipNode } from "@shared/types";
-import { describe, expect, it, vi } from "vitest";
+import fse from "fs-extra";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { KioskDownloader } from "../..";
 import type { LoadedCollection } from "./types";
@@ -34,8 +36,12 @@ type DownloadServiceInternals = {
     preparedDrafts: Map<string, { id: string; loaded: LoadedCollection }>;
     repository: {
         insertDownload: ReturnType<typeof vi.fn>;
+        listUnfinishedFileTargets: ReturnType<typeof vi.fn>;
     };
-    scheduler: { schedule: ReturnType<typeof vi.fn> };
+    scheduler: {
+        schedule: ReturnType<typeof vi.fn>;
+        resumeCollection: ReturnType<typeof vi.fn>;
+    };
     emitUpdate: ReturnType<typeof vi.fn>;
     getEnrichedItem: ReturnType<typeof vi.fn>;
 };
@@ -116,6 +122,7 @@ function createService(passwords: string[] = []) {
                 if (key === "transfer.startTransfersPaused") return false;
                 throw new Error(`Unexpected setting: ${key}`);
             }),
+            getDownloadSavePath: vi.fn(async () => SAVE_PATH),
             getMany: vi.fn(async () => ({
                 "general.autoTryCollectionPasswords": true,
                 "general.collectionPasswordList": passwords,
@@ -128,6 +135,7 @@ function createService(passwords: string[] = []) {
             db: {},
             fs: {
                 sanitizeDownloadPathSegment: vi.fn((value: string) => value),
+                getSafeRelativePath: vi.fn((value: string) => value),
             },
         },
         service: {
@@ -147,6 +155,97 @@ function internals(service: DownloadService) {
 }
 
 describe("DownloadService prepared draft", () => {
+    it.each([
+        ["report.bin", "report.bin", "report (1).bin", false],
+        ["report.bin", "report.bin.part", "report.bin (1).part", false],
+        ["report.bin.part", "report.bin", "report (1).bin", false],
+        ["folder/../REPORT.BIN", "report.bin.part", "report.bin (1).part", false],
+        ["report.bin.part", "REPORT.bin", "REPORT (1).bin", false],
+        ["report.bin.part.crc", "report.bin", "report (1).bin", false],
+        ["report.bin", "report.bin.part.crc", "report.bin.part (1).crc", false],
+        ["report.bin.part.z", "report.bin", "report (1).bin", false],
+        ["report.bin", "report.bin.part.z", "report.bin.part (1).z", false],
+        ["report.bin.part.z.crc", "report.bin", "report (1).bin", false],
+        ["report.bin", "report.bin.part.z.crc", "report.bin.part.z (1).crc", false],
+        ["report.bin", "report.bin", "report (1).bin", true],
+        ["report.bin.part", "report.bin", "report (1).bin", true],
+        ["report.bin.part.crc", "report.bin", "report (1).bin", true],
+        ["report.bin.part.z", "report.bin", "report (1).bin", true],
+        ["report.bin.part.z.crc", "report.bin", "report (1).bin", true],
+        ["other.bin", "report.bin", "report.bin", false],
+    ])(
+        "avoids download target collisions with %s for %s, selecting %s (on disk: %s)",
+        async (existing, name, expected, onDisk) => {
+            const savePath = await fse.mkdtemp(path.join(os.tmpdir(), "direct-target-"));
+            const { service } = createService();
+            try {
+                const loaded = loadedCollection();
+                vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue({
+                    provider: "direct",
+                    collection: {
+                        ...loaded.collection,
+                        provider: "direct",
+                        name,
+                        tree: {
+                            ...loaded.collection.tree,
+                            entries: [
+                                {
+                                    kind: "file",
+                                    node: { type: "file", id: "remote", name, size: 1 },
+                                },
+                            ],
+                        },
+                    },
+                    rootId: "root",
+                    passwordProtected: false,
+                    fileMeta: { rangeSupported: true },
+                });
+                const prepared = await service.prepare({ url: "https://example.com/file" });
+                if (prepared.status !== "ready") throw new Error("Expected a prepared draft");
+                const state = internals(service);
+                state.repository.listUnfinishedFileTargets = vi.fn(() =>
+                    onDisk ? [] : [{ savePath, path: existing, asciiFilenames: 0 }],
+                );
+                if (onDisk) await fse.writeFile(path.join(savePath, existing), "existing");
+                state.repository.insertDownload = vi.fn(() => "created");
+                state.scheduler.schedule = vi.fn(async () => undefined);
+                state.emitUpdate = vi.fn(async () => undefined);
+                state.getEnrichedItem = vi.fn(() => ({ id: "created" }));
+
+                await service.create({
+                    draftId: prepared.draftId,
+                    savePath,
+                    selectedPaths: [name],
+                });
+
+                expect(state.repository.insertDownload).toHaveBeenCalledWith(
+                    expect.objectContaining({
+                        loaded: expect.objectContaining({
+                            collection: expect.objectContaining({
+                                name: expected,
+                                tree: expect.objectContaining({
+                                    entries: [
+                                        expect.objectContaining({
+                                            node: expect.objectContaining({ name: expected }),
+                                        }),
+                                    ],
+                                }),
+                            }),
+                        }),
+                        selectedPaths: [expected],
+                    }),
+                );
+                if (onDisk)
+                    expect(await fse.readFile(path.join(savePath, existing), "utf8")).toBe(
+                        "existing",
+                    );
+            } finally {
+                service.destroy();
+                await fse.remove(savePath);
+            }
+        },
+    );
+
     it("tries automatic password candidates sequentially without logging rejected candidates", async () => {
         const { service, logger } = createService(["wrong", "right"]);
         let active = 0;
@@ -564,6 +663,36 @@ describe("DownloadService prepared draft", () => {
         expect(internals(service).preparedDrafts.size).toBe(0);
     });
 
+    it("keeps extension drafts, prepared or in flight, when the app discards its drafts", async () => {
+        const { service } = createService();
+        let releasePending: () => void = () => undefined;
+        const load = vi
+            .spyOn(internals(service), "loadCollectionUnlocked")
+            .mockResolvedValueOnce(loadedCollection())
+            .mockResolvedValueOnce(loadedCollection())
+            .mockImplementationOnce(
+                async () =>
+                    await new Promise<LoadedCollection>((resolve) => {
+                        releasePending = () => resolve(loadedCollection());
+                    }),
+            );
+        const app = await service.prepare({ url: URL });
+        const extension = await service.prepare({ url: URL }, "extension");
+        const pending = service.prepare({ url: URL }, "extension");
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+        if (app.status !== "ready" || extension.status !== "ready") {
+            throw new Error("Expected two prepared drafts");
+        }
+
+        service.discardDraft({});
+        releasePending();
+
+        const drafts = internals(service).preparedDrafts;
+        expect(drafts.has(app.draftId)).toBe(false);
+        expect(drafts.has(extension.draftId)).toBe(true);
+        await expect(pending).resolves.toMatchObject({ status: "ready" });
+    });
+
     it("does not remove a sibling draft when create finishes", async () => {
         const { service } = createService();
         vi.spyOn(internals(service), "loadCollectionUnlocked").mockResolvedValue(
@@ -590,5 +719,82 @@ describe("DownloadService prepared draft", () => {
 
         expect(state.preparedDrafts.has(first.draftId)).toBe(false);
         expect(state.preparedDrafts.has(second.draftId)).toBe(true);
+    });
+});
+
+describe("DownloadService Mega quota auto-resume", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it("resumes quota-paused collections when due, only while the setting is on", async () => {
+        vi.useFakeTimers({ now: 0 });
+        const { service, kd } = createService();
+        let enabled = false;
+        (kd.setting as unknown as { get: ReturnType<typeof vi.fn> }).get.mockImplementation((async (
+            key: string,
+        ) => (key === "transfer.megaQuotaAutoResume" ? enabled : false)) as never);
+        let paused = [
+            {
+                id: "mega",
+                name: "Mega",
+                pauseReasonJson: JSON.stringify({
+                    kind: "megaQuota",
+                    pausedAt: 0,
+                    resumeAt: 60_000,
+                }),
+            },
+        ];
+        const resume = vi.fn(() => {
+            paused = [];
+        });
+        (service as unknown as { repository: object }).repository = {
+            listMegaQuotaPausedCollections: () => paused,
+            resumeCollection: resume,
+        };
+        const scheduled = vi
+            .spyOn(internals(service).scheduler, "resumeCollection")
+            .mockImplementation(() => undefined);
+        internals(service).emitUpdate = vi.fn(async () => undefined);
+
+        await service.scheduleMegaQuotaResume();
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(resume).not.toHaveBeenCalled();
+
+        enabled = true;
+        await service.scheduleMegaQuotaResume();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(resume).toHaveBeenCalledExactlyOnceWith("mega", false, { preserveUserPauses: true });
+        expect(scheduled).toHaveBeenCalledExactlyOnceWith("mega");
+        expect(internals(service).emitUpdate).toHaveBeenCalledExactlyOnceWith("mega");
+        service.destroy();
+    });
+
+    it("does not resume before the quota wait has passed", async () => {
+        vi.useFakeTimers({ now: 0 });
+        const { service, kd } = createService();
+        (kd.setting as unknown as { get: ReturnType<typeof vi.fn> }).get.mockImplementation(
+            (async () => true) as never,
+        );
+        const resume = vi.fn();
+        (service as unknown as { repository: object }).repository = {
+            listMegaQuotaPausedCollections: () => [
+                {
+                    id: "mega",
+                    name: "Mega",
+                    pauseReasonJson: JSON.stringify({
+                        kind: "megaQuota",
+                        pausedAt: 0,
+                        resumeAt: 60_000,
+                    }),
+                },
+            ],
+            resumeCollection: resume,
+        };
+
+        await service.scheduleMegaQuotaResume();
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(resume).not.toHaveBeenCalled();
+        service.destroy();
     });
 });

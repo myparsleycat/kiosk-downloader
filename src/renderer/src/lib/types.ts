@@ -345,12 +345,18 @@ function pruneEmptyAncestors(key: string, selected: Set<string>) {
 export type SortField = "name" | "size";
 export type SortDir = "none" | "desc" | "asc";
 
-export function sortTree(root: DirNode, field: SortField, dir: SortDir): DirNode {
-    if (dir === "none") return root;
+const KIND_RANK: Record<TreeEntry["kind"], number> = { dir: 0, zip: 1, file: 2 };
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+export function sortTree(
+    root: DirNode,
+    field: SortField,
+    dir: SortDir,
+    foldersFirst: boolean,
+): DirNode {
+    if (dir === "none" && !foldersFirst) return root;
 
     const sign = dir === "asc" ? 1 : -1;
-    const compareName = (a: { name: string }, b: { name: string }) =>
-        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) * sign;
 
     const entrySize = (entry: TreeEntry): number => {
         if (entry.kind === "file") return (entry.node as FileNode).size;
@@ -361,51 +367,56 @@ export function sortTree(root: DirNode, field: SortField, dir: SortDir): DirNode
         return dirTotalSize(entry.node as DirNode);
     };
 
-    const sortNode = (node: DirNode): DirNode => {
-        const dirs: TreeEntry[] = [];
-        const zips: TreeEntry[] = [];
-        const files: TreeEntry[] = [];
-        for (const entry of node.entries) {
-            if (entry.kind === "dir") dirs.push(entry);
-            else if (entry.kind === "zip") zips.push(entry);
-            else files.push(entry);
+    const compareField = (left: TreeEntry, right: TreeEntry) => {
+        if (dir === "none") return 0;
+        if (field === "name") {
+            return nameCollator.compare(left.node.name, right.node.name) * sign;
         }
-
-        const compare =
-            field === "name"
-                ? (left: TreeEntry, right: TreeEntry) => compareName(left.node, right.node)
-                : (left: TreeEntry, right: TreeEntry) =>
-                      (entrySize(left) - entrySize(right)) * sign;
-        dirs.sort(compare);
-        zips.sort(compare);
-        files.sort(compare);
-
-        const entries = [
-            ...dirs.map((e) => ({ kind: "dir" as const, node: sortNode(e.node as DirNode) })),
-            ...zips.map((e) => {
-                const zip = e.node as ZipNode;
-                if (!zip.entries) {
-                    return e;
-                }
-                return {
-                    kind: "zip" as const,
-                    node: {
-                        ...zip,
-                        entries: sortNode({
-                            type: "dir",
-                            id: zip.id,
-                            name: zip.name,
-                            entries: zip.entries,
-                        }).entries,
-                    },
-                };
-            }),
-            ...files,
-        ];
-
-        const { type, id, name } = node;
-        return { type, id, name, entries };
+        return (entrySize(left) - entrySize(right)) * sign;
     };
 
-    return sortNode(root);
+    const compare = (left: TreeEntry, right: TreeEntry) =>
+        (foldersFirst ? KIND_RANK[left.kind] - KIND_RANK[right.kind] : 0) ||
+        compareField(left, right);
+
+    const sortEntries = (entries: TreeEntry[]): TreeEntry[] =>
+        [...entries].sort(compare).map((entry) => {
+            if (entry.kind === "dir") {
+                const child = entry.node as DirNode;
+                return { kind: "dir", node: { ...child, entries: sortEntries(child.entries) } };
+            }
+            if (entry.kind === "zip") {
+                const zip = entry.node as ZipNode;
+                return zip.entries
+                    ? { kind: "zip", node: { ...zip, entries: sortEntries(zip.entries) } }
+                    : entry;
+            }
+            return entry;
+        });
+
+    return { ...root, entries: sortEntries(root.entries) };
+}
+
+const selectionStateCache = new WeakMap<
+    Set<string>,
+    { root: DirNode; state: boolean | "indeterminate" }
+>();
+
+export function getTreeSelectionState(
+    selected: Set<string>,
+    root: DirNode,
+): boolean | "indeterminate" {
+    const cached = selectionStateCache.get(selected);
+    if (cached?.root === root) {
+        return cached.state;
+    }
+    const paths = collectAllPaths(root);
+    const state =
+        paths.size > 0 && [...paths].every((path) => selected.has(path))
+            ? true
+            : selected.size > 0
+              ? "indeterminate"
+              : false;
+    selectionStateCache.set(selected, { root, state });
+    return state;
 }

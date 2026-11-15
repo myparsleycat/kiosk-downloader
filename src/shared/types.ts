@@ -1,6 +1,7 @@
 export type { IpcHandlers } from "./types.gen";
 
 import type { AppSettings, SettingKey } from "./settings";
+import type { DownloadProvider } from "./share-url";
 import type { UpdaterStatus } from "./updater";
 
 export interface AppStatus {
@@ -67,7 +68,13 @@ export interface TreeEntry {
 
 export type CollectionTree = DirNode;
 
-export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload";
+export type { DownloadProvider };
+
+export interface DirectRequestHeaders {
+    referer?: string;
+    cookie?: string;
+    userAgent?: string;
+}
 
 export type TransferControl = "pause" | "stop";
 
@@ -131,21 +138,31 @@ export interface TransferListSnapshot<T> {
     items: T[];
 }
 
-export interface TransferItemChange<T> {
-    revision: number;
+export interface TransferItemShape {
     id: string;
-    item: T | null;
+    progress: Record<string, unknown>;
 }
 
-export interface TransferProgressPatch<TProgress, TStatus> {
-    id: string;
-    progress: Record<string, TProgress>;
-    summary: TransferProgressSummary;
-    status: TStatus;
-    speedBps: number | null;
-    elapsedMs: number;
-    updatedAt: number;
+export interface TransferItemPatch<T extends TransferItemShape> {
+    /** A key whose value is undefined clears that optional field; structured clone keeps the key. */
+    fields: Partial<Omit<T, "id" | "progress">>;
+    progress?: Record<string, T["progress"][string]>;
+    removedProgress?: string[];
 }
+
+export type TransferItemChange<T extends TransferItemShape> = { revision: number; id: string } & (
+    | { kind: "upsert"; item: T }
+    | { kind: "patch"; patch: TransferItemPatch<T> }
+    | { kind: "remove" }
+);
+
+export type DownloadPauseReason = {
+    kind: "megaQuota";
+    /** ms epoch */
+    pausedAt: number;
+    /** ms epoch when the quota is available again; null when the server did not say. */
+    resumeAt: number | null;
+};
 
 export interface DownloadItem {
     id: string;
@@ -159,11 +176,10 @@ export interface DownloadItem {
     createdAt: number;
     updatedAt: number;
     error?: string;
+    pauseReason?: DownloadPauseReason;
     transferControl?: TransferControl;
     requestPoolUsage?: RequestPoolUsage;
 }
-
-export type DownloadProgressPatch = TransferProgressPatch<FileProgress, DownloadStatus>;
 
 export type DownloadFilter = "all" | "active" | "completed";
 
@@ -235,8 +251,6 @@ export interface UploadItem {
     requestPoolUsage?: RequestPoolUsage;
 }
 
-export type UploadProgressPatch = TransferProgressPatch<UploadFileProgress, UploadStatus>;
-
 export interface CreateUploadPayload {
     tree: UploadTreeFile[];
     options: UploadOptions;
@@ -251,6 +265,8 @@ export interface PrepareDownloadPayload {
     password?: string;
     asciiFilenames?: boolean;
     correlationId?: string;
+    /** Only used by direct URLs. */
+    headers?: DirectRequestHeaders;
 }
 
 export type LoadCollectionPayload = Omit<PrepareDownloadPayload, "correlationId">;
@@ -271,6 +287,8 @@ export interface CreateDownloadPayload {
     zipPasswords?: Record<string, string>;
     /** original relative node path → new basename (applied after collection load) */
     renames?: Record<string, string>;
+    /** Direct URLs only: headers edited after preparation replace the prepared ones. */
+    headers?: DirectRequestHeaders;
 }
 
 export interface ListZipEntriesPayload {
@@ -355,6 +373,29 @@ export type UploadSegmentDedupSnapshot = {
     uploadedBytes: number;
 };
 
+export type MegaAccountState =
+    | { loggedIn: false; persistent: boolean }
+    | {
+          loggedIn: true;
+          persistent: boolean;
+          email: string;
+          name?: string;
+          /** MEGA `utype`: 0 free, 1-4 Pro tiers, 100 business, 101 Pro Flexi. */
+          proLevel: number;
+          transferUsedBytes?: number;
+          transferMaxBytes?: number;
+      };
+
+export type MegaLoginPayload = {
+    email: string;
+    password: string;
+    mfaCode?: string;
+};
+
+export type MegaLoginResult =
+    | { status: "ok"; account: MegaAccountState }
+    | { status: "mfaRequired" };
+
 export type IpcEvents = {
     "window:blur": () => void;
     "window:focus": () => void;
@@ -372,4 +413,6 @@ export type IpcEvents = {
     "updater:status-changed": (status: UpdaterStatus) => void;
     "updater:update-available": () => void;
     "updater:update-downloaded": () => void;
+    "mega:accountChanged": (account: MegaAccountState) => void;
+    "browserExtension:requestsAvailable": () => void;
 };

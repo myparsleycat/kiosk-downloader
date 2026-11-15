@@ -16,7 +16,9 @@ import { logCaughtError } from "./lib/logged-error";
 import { Tray } from "./lib/tray";
 import { Utils } from "./lib/utils";
 import { Logger } from "./logger";
+import { BrowserExtensionService } from "./service/browser-extension";
 import { DownloadService } from "./service/download";
+import { MegaAccountService } from "./service/mega";
 import { StartupCleanupService } from "./service/startup-cleanup";
 import { TransferService } from "./service/transfer";
 import { Updater } from "./service/updater";
@@ -33,7 +35,11 @@ if (IS_ELECTRON) {
     app?.commandLine.appendSwitch("disable-pinch");
 }
 
-const dbPath = !app.isPackaged ? DB_FILE_NAME : path.join(app.getPath("userData"), "data.db");
+// Protocol launches start with the browser's working directory, so the dev database is anchored to
+// the app directory instead of the current directory.
+const dbPath = app.isPackaged
+    ? path.join(app.getPath("userData"), "data.db")
+    : path.join(app.getAppPath(), DB_FILE_NAME);
 
 export class KioskDownloader {
     public readonly ipc: IPC;
@@ -61,6 +67,8 @@ export class KioskDownloader {
         upload: UploadService;
         startupCleanup: StartupCleanupService;
         updater: Updater;
+        mega: MegaAccountService;
+        browserExtension: BrowserExtensionService;
     };
 
     public constructor() {
@@ -84,6 +92,8 @@ export class KioskDownloader {
             download: new DownloadService(this),
             upload: new UploadService(this),
             updater: new Updater(this),
+            mega: new MegaAccountService(this),
+            browserExtension: new BrowserExtensionService(this),
         };
         this.service.download.bindRequestPoolUsage();
         this.service.upload.bindRequestPoolUsage();
@@ -173,9 +183,12 @@ export class KioskDownloader {
 
         // A bad persisted row must not keep the app from opening: the window is already up, so
         // log the failure and let the user remove the offending item from the UI.
+        // Mega first so downloads resumed on startup already use the account session.
         for (const [restoreStage, restore] of [
+            ["mega-restore", () => this.service.mega.restoreSession()],
             ["download-restore", () => this.service.download.restoreStartupState()],
             ["upload-restore", () => this.service.upload.restoreStartupState()],
+            ["browser-extension", () => this.service.browserExtension.start()],
         ] as const) {
             try {
                 await restore();
@@ -188,6 +201,12 @@ export class KioskDownloader {
     }
 }
 
+// A second launch (a shortcut or a protocol link) only forwards its arguments to the running
+// instance, so it exits before KioskDownloader opens the database and starts its services.
+if (!app.requestSingleInstanceLock()) {
+    process.exit(0);
+}
+
 export const kd = new KioskDownloader();
 
 process.on("unhandledRejection", (reason) => {
@@ -195,13 +214,6 @@ process.on("unhandledRejection", (reason) => {
 });
 
 void app.whenReady().then(() => {
-    const gotTheLock = app.requestSingleInstanceLock();
-
-    if (!gotTheLock) {
-        app.quit();
-        return;
-    }
-
     app.on("second-instance", async (_event, _commandLine, _workingDirectory) => {
         try {
             let mainWindow = kd.window.main.window;
@@ -251,6 +263,8 @@ app.on("before-quit", () => {
     try {
         kd.service.download.destroy();
         kd.service.upload.destroy();
+        kd.service.mega.destroy();
+        void kd.service.browserExtension.stop();
     } catch (error) {
         kd.logger.error(error, "App:before-quit");
     }

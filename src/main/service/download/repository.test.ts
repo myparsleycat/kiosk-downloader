@@ -1,11 +1,14 @@
+import { COLLECTION_EXPIRES_NEVER } from "@shared/download-errors";
 import type { DirNode, DownloadTransferPayload } from "@shared/types";
 import { DOWNLOAD_TRANSFER_KIND, DOWNLOAD_TRANSFER_VERSION } from "@shared/types";
 import { describe, expect, it } from "vitest";
 
 import type { KioskDownloader } from "../..";
+import type { CreateDownloadRecord } from "./types";
 
 import { DatabaseClient } from "../../lib/db/client";
-import { DownloadRepository, flattenDownloadTree } from "./repository";
+import { FS } from "../../lib/fs";
+import { DownloadRepository, flattenDownloadTree, parsePauseReason } from "./repository";
 import { TRANSFER_CHUNK_SIZE, transferChunkSizes } from "./transfer-it-crypto";
 
 describe("flattenDownloadTree", () => {
@@ -75,7 +78,9 @@ describe("flattenDownloadTree", () => {
 async function createRepository() {
     const db = new DatabaseClient(":memory:");
     await db.reconcile();
-    const repo = new DownloadRepository({ lib: { db } } as KioskDownloader);
+    const repo = new DownloadRepository({
+        lib: { db, fs: new FS({} as KioskDownloader) },
+    } as KioskDownloader);
     return { db, repo };
 }
 
@@ -1186,6 +1191,122 @@ async function createResumeRepository() {
     return { db, repo };
 }
 
+describe("DownloadRepository pause reasons", () => {
+    const reason = { kind: "megaQuota" as const, pausedAt: 1_000, resumeAt: 61_000 };
+
+    async function createMegaPausedRepository() {
+        const { db, repo } = await createResumeRepository();
+        db.run(`UPDATE "download_collection" SET "provider" = 'mega' WHERE "id" = 'resume'`);
+        repo.pauseCollection("resume", reason);
+        return repo;
+    }
+
+    it("keeps a quota pause reason until the collection runs again", async () => {
+        const repo = await createMegaPausedRepository();
+        expect(parsePauseReason(repo.getCollection("resume")!.pauseReasonJson)).toEqual(reason);
+        expect(repo.listMegaQuotaPausedCollections().map((row) => row.id)).toEqual(["resume"]);
+
+        repo.markCollectionStatus("resume", "paused");
+        expect(repo.listMegaQuotaPausedCollections()).toHaveLength(1);
+
+        repo.markCollectionStatus("resume", "downloading");
+        expect(repo.getCollection("resume")!.pauseReasonJson).toBeNull();
+    });
+
+    it("drops the reason on a user pause or an explicit resume", async () => {
+        const paused = await createMegaPausedRepository();
+        paused.pauseCollection("resume");
+        expect(paused.listMegaQuotaPausedCollections()).toHaveLength(0);
+
+        const resumed = await createMegaPausedRepository();
+        resumed.resumeCollection("resume", false);
+        expect(resumed.getCollection("resume")!.pauseReasonJson).toBeNull();
+    });
+
+    it("preserves manually paused files and their chunks when recovering from quota", async () => {
+        const repo = await createMegaPausedRepository();
+        const manual = { file: repo.getFile("manual"), chunks: repo.listChunks("manual") };
+
+        repo.resumeCollection("resume", false, { preserveUserPauses: true });
+
+        expect(repo.getCollection("resume")).toMatchObject({
+            status: "queued",
+            pauseReasonJson: null,
+        });
+        expect(repo.getFile("active")).toMatchObject({ status: "pending", pausedByUser: 0 });
+        expect(repo.getFile("manual")).toEqual(manual.file);
+        expect(repo.listChunks("manual")).toEqual(manual.chunks);
+    });
+});
+
+describe("DownloadRepository Mega target paths", () => {
+    function record(names: string[], asciiFilenames: boolean): CreateDownloadRecord {
+        return {
+            loaded: {
+                provider: "mega",
+                rootId: "root",
+                passwordProtected: false,
+                nodeKeys: new Map(
+                    names.map((_, index) => [
+                        String(index),
+                        Buffer.alloc(32).toString("base64url"),
+                    ]),
+                ),
+                collection: {
+                    shareId: "share",
+                    name: "Mega",
+                    provider: "mega",
+                    passwordProtected: false,
+                    expires: COLLECTION_EXPIRES_NEVER,
+                    segmentSize: TRANSFER_CHUNK_SIZE,
+                    tree: {
+                        type: "dir",
+                        id: "root",
+                        name: "",
+                        entries: names.map((name, index) => ({
+                            kind: "file",
+                            node: { type: "file", id: String(index), name, size: 10 },
+                        })),
+                    },
+                },
+            },
+            url: "https://mega.nz/folder/share",
+            savePath: "/tmp",
+            selectedPaths: names,
+            asciiFilenames,
+        };
+    }
+
+    it.each([
+        ["a", "a.", false],
+        ["a", " a ", false],
+        ["é", "e", true],
+    ] as const)(
+        "rejects colliding targets %s and %s (ASCII: %s) before inserting",
+        async (first, second, ascii) => {
+            const { repo } = await createRepository();
+
+            expect(() => repo.insertDownload(record([first, second], ascii))).toThrow(
+                "collide after sanitization",
+            );
+            expect(repo.listItems()).toEqual([]);
+        },
+    );
+
+    it("checks imported file paths instead of trusting their tree names", async () => {
+        const { repo } = await createRepository();
+        const id = repo.insertDownload(record(["first", "second"], false));
+        const payload = repo.buildTransferPayload(id);
+        payload.files[0]!.path = "folder/a";
+        payload.files[1]!.path = "folder./a";
+
+        expect(() => repo.insertImportedDownload(payload, "/tmp")).toThrow(
+            "collide after sanitization",
+        );
+        expect(repo.listItems()).toHaveLength(1);
+    });
+});
+
 describe("DownloadRepository explicit resume", () => {
     it.each([false, true])(
         "retries failed and paused selected files after collection pause (force=%s)",
@@ -1288,5 +1409,114 @@ describe("DownloadRepository explicit resume", () => {
         expect(repo.getFile("failed")).toMatchObject({ status: "pending" });
         expect(repo.hasErroredChunk("failed")).toBe(false);
         expect(repo.getFile("complete")).toMatchObject({ status: "completed" });
+    });
+});
+
+describe("DownloadRepository direct URL persistence", () => {
+    function insertDirect(
+        repo: DownloadRepository,
+        options: { rangeSupported: boolean; size: number; segmentSize: number },
+    ) {
+        return repo.insertDownload({
+            loaded: {
+                provider: "direct",
+                rootId: "file-id",
+                passwordProtected: false,
+                requestHeaders: { referer: "https://example.com/", cookie: "a=b" },
+                fileMeta: {
+                    rangeSupported: options.rangeSupported,
+                    finalUrl: "https://cdn.example.com/file.bin",
+                    etag: '"v1"',
+                },
+                collection: {
+                    shareId: "example.com",
+                    name: "file.bin",
+                    expires: COLLECTION_EXPIRES_NEVER,
+                    segmentSize: options.segmentSize,
+                    passwordProtected: false,
+                    provider: "direct",
+                    tree: {
+                        type: "dir",
+                        id: "file-id",
+                        name: "",
+                        entries: [
+                            {
+                                kind: "file",
+                                node: {
+                                    type: "file",
+                                    id: "file-id",
+                                    name: "file.bin",
+                                    size: options.size,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+            url: "https://example.com/file.bin",
+            requestHeaders: { referer: "https://example.com/", cookie: "a=b" },
+            savePath: "/tmp",
+            selectedPaths: ["file.bin"],
+            asciiFilenames: false,
+        });
+    }
+
+    it("stores request headers and splits Range-capable files into segment chunks", async () => {
+        const { repo } = await createRepository();
+        const collectionId = insertDirect(repo, { rangeSupported: true, size: 10, segmentSize: 4 });
+
+        expect(JSON.parse(repo.getCollection(collectionId)!.requestHeadersJson!)).toEqual({
+            referer: "https://example.com/",
+            cookie: "a=b",
+        });
+        const file = repo.listFiles(collectionId)[0]!;
+        expect(JSON.parse(file.sourceMetaJson!)).toEqual({
+            rangeSupported: true,
+            finalUrl: "https://cdn.example.com/file.bin",
+            etag: '"v1"',
+        });
+        expect(repo.listChunks(file.id).map((chunk) => [chunk.offset, chunk.size])).toEqual([
+            [0, 4],
+            [4, 4],
+            [8, 2],
+        ]);
+        repo.markFileStatus(file.id, "downloading");
+        repo.markCollectionStatus(collectionId, "downloading");
+        const item = repo.getItem(collectionId)!;
+        expect(item.collection).not.toHaveProperty("requestHeadersJson");
+        expect(item.transferControl).toBe("pause");
+    });
+
+    it("uses one chunk and stop control when Range is unsupported", async () => {
+        const { repo } = await createRepository();
+        const collectionId = insertDirect(repo, {
+            rangeSupported: false,
+            size: 10,
+            segmentSize: 10,
+        });
+        const file = repo.listFiles(collectionId)[0]!;
+        expect(repo.listChunks(file.id)).toMatchObject([{ chunkIndex: 0, offset: 0, size: 10 }]);
+        repo.markFileStatus(file.id, "downloading");
+        repo.markCollectionStatus(collectionId, "downloading");
+        expect(repo.getItem(collectionId)?.transferControl).toBe("stop");
+    });
+
+    it("applies a changed remote size to the file, tree and chunk layout", async () => {
+        const { repo } = await createRepository();
+        const collectionId = insertDirect(repo, { rangeSupported: true, size: 10, segmentSize: 4 });
+        const file = repo.listFiles(collectionId)[0]!;
+
+        repo.resetFileProgress(file.id);
+        repo.updateDirectRemote(file.id, {
+            size: 6,
+            segmentSize: 6,
+            sourceMetaJson: JSON.stringify({ rangeSupported: false }),
+        });
+
+        const collection = repo.getCollection(collectionId)!;
+        expect(collection.segmentSize).toBe(6);
+        expect(JSON.parse(collection.treeJson).entries[0].node.size).toBe(6);
+        expect(repo.getFile(file.id)!.size).toBe(6);
+        expect(repo.listChunks(file.id)).toMatchObject([{ offset: 0, size: 6 }]);
     });
 });

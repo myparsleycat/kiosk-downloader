@@ -76,7 +76,7 @@ function names(entries: TreeEntry[], kind: TreeEntry["kind"]) {
 
 describe("sortTree", () => {
     it("uses the name comparator for every entry group and nested zip entries", () => {
-        const sorted = sortTree(root, "name", "asc");
+        const sorted = sortTree(root, "name", "asc", true);
 
         expect(names(sorted.entries, "dir")).toEqual(["dir2", "dir10"]);
         expect(names(sorted.entries, "zip")).toEqual(["zip2.zip", "zip10.zip"]);
@@ -89,14 +89,40 @@ describe("sortTree", () => {
     });
 
     it("uses aggregate size for directories and expanded zips", () => {
-        const sorted = sortTree(root, "size", "desc");
+        const sorted = sortTree(root, "size", "desc", true);
 
         expect(names(sorted.entries, "dir")).toEqual(["dir10", "dir2"]);
         expect(names(sorted.entries, "zip")).toEqual(["zip10.zip", "zip2.zip"]);
         expect(names(sorted.entries, "file")).toEqual(["file2.bin", "file10.bin"]);
     });
 
-    it("returns the original tree when sorting is disabled", () => {
-        expect(sortTree(root, "name", "none")).toBe(root);
+    it("sorts every entry kind together when folders are not listed first", () => {
+        const sorted = sortTree(root, "size", "desc", false);
+
+        expect(sorted.entries.map((entry) => entry.node.name)).toEqual([
+            "zip10.zip",
+            "dir10",
+            "zip2.zip",
+            "file2.bin",
+            "file10.bin",
+            "dir2",
+        ]);
+    });
+
+    it("groups folders first while keeping the original order when sorting is disabled", () => {
+        const sorted = sortTree(root, "name", "none", true);
+
+        expect(sorted.entries.map((entry) => entry.node.name)).toEqual([
+            "dir2",
+            "dir10",
+            "zip2.zip",
+            "zip10.zip",
+            "file10.bin",
+            "file2.bin",
+        ]);
+    });
+
+    it("returns the original tree when sorting and folder grouping are disabled", () => {
+        expect(sortTree(root, "name", "none", false)).toBe(root);
     });
 });

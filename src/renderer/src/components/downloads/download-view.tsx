@@ -13,6 +13,7 @@ import { useRemoveTransfer } from "@renderer/hooks/use-remove-transfer";
 import { isBulkPausable, isBulkStartable, runBulkItemActions } from "@renderer/lib/bulk-transfer";
 import type { DownloadFilter, DownloadItem } from "@renderer/lib/types";
 import { cn } from "@renderer/lib/utils";
+import { usesRangeDependentControl } from "@shared/share-url";
 import {
   DownloadIcon,
   FilterIcon,
@@ -292,24 +293,26 @@ export function DownloadView({
                       <FolderOpenIcon />
                       폴더 열기
                     </ContextMenuItem>
-                    {item.status !== "completed" && item.collection.provider !== "extended" && (
-                      <ContextMenuItem
-                        onClick={() =>
-                          runAction(async () => {
-                            const result = await window.api.invoke(
-                              "download:exportCollection",
-                              item.id,
-                            );
-                            if (result) {
-                              toast.success("컬렉션을 내보냈습니다");
-                            }
-                          })
-                        }
-                      >
-                        <ShareIcon />
-                        내보내기
-                      </ContextMenuItem>
-                    )}
+                    {item.status !== "completed" &&
+                      item.collection.provider !== "extended" &&
+                      item.collection.provider !== "direct" && (
+                        <ContextMenuItem
+                          onClick={() =>
+                            runAction(async () => {
+                              const result = await window.api.invoke(
+                                "download:exportCollection",
+                                item.id,
+                              );
+                              if (result) {
+                                toast.success("컬렉션을 내보냈습니다");
+                              }
+                            })
+                          }
+                        >
+                          <ShareIcon />
+                          내보내기
+                        </ContextMenuItem>
+                      )}
                     <ContextMenuSeparator />
                     <ContextMenuItem
                       variant="destructive"
@@ -337,5 +340,5 @@ export function DownloadView({
 }
 
 function collectionTransferControl(item: DownloadItem) {
-  return item.collection.provider === "workupload" ? item.transferControl : "pause";
+  return usesRangeDependentControl(item.collection.provider) ? item.transferControl : "pause";
 }

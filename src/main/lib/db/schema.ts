@@ -49,7 +49,7 @@ export type TableSpec = {
     foreignKeys?: TableForeignKeySpec[];
 };
 
-export const APP_SCHEMA_VERSION = 8;
+export const APP_SCHEMA_VERSION = 10;
 
 export const TABLE_SPECS: TableSpec[] = [
     {
@@ -129,6 +129,8 @@ export const TABLE_SPECS: TableSpec[] = [
             },
             { name: "bundle_id", type: "TEXT" },
             { name: "ordinal", type: "INTEGER", notNull: true, defaultSql: "0" },
+            { name: "request_headers_json", type: "TEXT" },
+            { name: "pause_reason_json", type: "TEXT" },
         ],
         indexes: [
             { name: "idx_download_collection_status", columns: ["status"] },

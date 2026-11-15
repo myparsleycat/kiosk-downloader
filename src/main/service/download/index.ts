@@ -12,6 +12,7 @@ import {
     isZipInvalidPasswordError,
     isZipPasswordRequiredError,
 } from "@shared/download-errors";
+import { getAutoResumeTime } from "@shared/pause-reason";
 import type { TransferProviderRequestId } from "@shared/settings";
 import {
     buildShareUrl,
@@ -23,8 +24,10 @@ import { applyRenamesToTree, toDisplayPath, validateNodeName } from "@shared/tre
 import {
     DOWNLOAD_PREPARE_CONCURRENCY,
     type Collection,
+    type DirectRequestHeaders,
     type CreateDownloadPayload,
     type DownloadItem,
+    type DownloadPauseReason,
     type DownloadProvider,
     type FileProgress,
     type ListZipEntriesPayload,
@@ -43,14 +46,17 @@ import fse from "fs-extra";
 import pLimit from "p-limit";
 
 import type { KioskDownloader } from "../..";
+import type { MegaQuotaExceededError } from "../mega/mega-api";
 import type {
     DownloadCollectionRow,
     DownloadFileRow,
     LoadedCollection,
+    LoadedDirectCollection,
     LoadedKioskCollection,
     LoadedWorkuploadCollection,
 } from "./types";
 
+import { toLogUrl } from "../../lib/http";
 import { logCaughtError, withLoggedError } from "../../lib/logged-error";
 import {
     decodeExtendedShare,
@@ -62,13 +68,21 @@ import {
     type ExtendedSharePayload,
 } from "../extended-share";
 import { toOsProgressTransfer } from "../os-progress-bar";
+import { TransferItemPublisher } from "../transfer-item-publisher";
 import { showOpenDialog, showSaveDialog } from "../util";
 import { BundleReassemblyCoordinator } from "./bundle-reassembly-coordinator";
+import { DirectHttpClient } from "./direct-http-client";
 import { reassembleExtendedFile } from "./extended-reassembly";
 import { KioApiClient } from "./kio-api-client";
+import { MegaApiClient } from "./mega-api-client";
 import { DownloadTransferMetrics } from "./metrics";
-import { PartFileWriter, getBundleTempDirName, getStagingPartPath } from "./part-file";
-import { DownloadRepository } from "./repository";
+import {
+    PartFileWriter,
+    getBundleTempDirName,
+    getPartDigestPath,
+    getStagingPartPath,
+} from "./part-file";
+import { DownloadRepository, parsePauseReason } from "./repository";
 import { DownloadScheduler } from "./scheduler";
 import {
     MAX_DOWNLOAD_TRANSFER_COMPRESSED_BYTES,
@@ -76,7 +90,7 @@ import {
     encodeDownloadTransfer,
 } from "./transfer-format";
 import { TransferItApiClient } from "./transfer-it-api-client";
-import { parseWorkuploadFileSourceMeta } from "./types";
+import { readRangeSupported } from "./types";
 import { WorkuploadApiClient } from "./workupload-api-client";
 import { uniquifyWorkuploadTree } from "./workupload-filenames";
 import { indexZipFromSegments } from "./zip-index";
@@ -90,14 +104,25 @@ type LoadedExtendedCollection = {
     manifest: ExtendedSharePayload;
 };
 
+// The app's new-download view discards all of its drafts at once; drafts prepared for the browser
+// extension popover live in their own scope so those discards cannot invalidate them.
+export type DraftScope = "app" | "extension";
+const DRAFT_SCOPES: readonly DraftScope[] = ["app", "extension"];
+// Popovers can close without discarding (tab closed, page navigated), so cap what they leave behind.
+const MAX_EXTENSION_DRAFTS = 20;
+
 type PreparedDownloadDraft = {
     id: string;
     sourceInput: string;
     password?: string;
     asciiFilenames: boolean;
     correlationId: string;
+    scope: DraftScope;
+    savePath?: string;
     loaded: LoadedCollection | LoadedExtendedCollection;
 };
+
+const MAX_DIRECT_HEADER_VALUE_LENGTH = 8 * 1024;
 
 type StoredExtendedManifest = {
     renames: Record<string, string>;
@@ -119,28 +144,41 @@ type StoredExtendedManifest = {
 export class DownloadService {
     private readonly api: KioApiClient;
     private readonly transferApi: TransferItApiClient;
+    private readonly megaApi: MegaApiClient;
+    private megaQuotaResumeTimer: ReturnType<typeof setTimeout> | null = null;
     private readonly workuploadApi: WorkuploadApiClient;
+    private readonly directApi: DirectHttpClient;
     private readonly repository: DownloadRepository;
     private readonly metrics = new DownloadTransferMetrics();
     private readonly scheduler: DownloadScheduler;
     private readonly preparedDrafts = new Map<string, PreparedDownloadDraft>();
-    private readonly prepareControllers = new Map<string, AbortController>();
+    private readonly prepareControllers = new Map<
+        string,
+        { controller: AbortController; scope: DraftScope }
+    >();
     private readonly prepareLimit = pLimit(DOWNLOAD_PREPARE_CONCURRENCY);
-    private prepareEpoch = 0;
+    private readonly prepareEpochs: Record<DraftScope, number> = { app: 0, extension: 0 };
     private readonly reassemblyCoordinators = new Map<string, BundleReassemblyCoordinator>();
     private readonly bundleFinalizations = new Map<string, Promise<void>>();
     private unsubscribeRequestPoolUsage?: () => void;
-    private revision = 0;
+    private readonly publisher = new TransferItemPublisher<DownloadItem>((change) =>
+        this.kd.ipc.sendToMainWindow("download:changed", change),
+    );
 
     public constructor(private readonly kd: KioskDownloader) {
         this.api = new KioApiClient(kd);
         this.transferApi = new TransferItApiClient(kd);
+        this.megaApi = new MegaApiClient(kd, {
+            onQuotaExceeded: (error) => this.pauseMegaCollectionsForQuota(error),
+        });
         this.workuploadApi = new WorkuploadApiClient(kd);
+        this.directApi = new DirectHttpClient(kd);
         this.repository = new DownloadRepository(kd);
         this.scheduler = new DownloadScheduler(
             kd,
             this.api,
             this.transferApi,
+            this.megaApi,
             this.workuploadApi,
             this.repository,
             this.metrics,
@@ -178,7 +216,7 @@ export class DownloadService {
     public async restoreStartupState() {
         const mode = await this.kd.setting.get("transfer.startupResumeMode");
         this.repository.restoreStartupState(mode);
-        await this.resetNonResumableWorkuploadStartupState();
+        await this.resetNonResumableStartupState();
         this.repository.syncExpiredCollections();
         await this.emitUpdate();
         for (const bundle of this.repository.listBundles()) {
@@ -197,6 +235,7 @@ export class DownloadService {
         if (mode === "auto") {
             this.scheduler.requestSchedule();
         }
+        await this.scheduleMegaQuotaResume();
     }
 
     public hasActiveTransfers() {
@@ -207,9 +246,10 @@ export class DownloadService {
         this.scheduler.requestSchedule();
     }
 
-    private async resetNonResumableWorkuploadStartupState() {
+    private async resetNonResumableStartupState() {
         for (const item of this.repository.listItems()) {
-            if (item.collection.provider !== "workupload") {
+            const provider = item.collection.provider;
+            if (provider !== "workupload" && provider !== "direct") {
                 continue;
             }
             const collection = this.repository.getCollection(item.id);
@@ -221,8 +261,7 @@ export class DownloadService {
                 .filter(
                     (file) =>
                         file.status !== "completed" &&
-                        tryParseWorkuploadFileSourceMeta(file.sourceMetaJson)?.rangeSupported !==
-                            true,
+                        readRangeSupported(provider, file.sourceMetaJson) !== true,
                 );
             if (files.length === 0) {
                 continue;
@@ -259,45 +298,141 @@ export class DownloadService {
     }
 
     public destroy() {
-        this.abortAllPrepares();
+        if (this.megaQuotaResumeTimer) {
+            clearTimeout(this.megaQuotaResumeTimer);
+            this.megaQuotaResumeTimer = null;
+        }
+        this.abortPrepares();
         this.preparedDrafts.clear();
         this.unsubscribeRequestPoolUsage?.();
         this.scheduler.destroy();
     }
 
-    public async prepare(payload: PrepareDownloadPayload): Promise<PrepareDownloadResult> {
+    // Direct links often resolve to the same name ("download", "get.php"). Pick a free
+    // name the way browsers do so downloads never share final or temporary files.
+    private async claimDirectTarget(
+        loaded: LoadedDirectCollection,
+        savePath: string,
+        asciiFilenames: boolean,
+        selectedPaths: string[],
+    ) {
+        const entry = loaded.collection.tree.entries[0];
+        if (entry?.kind !== "file") {
+            return { loaded, selectedPaths };
+        }
+        const toFinalPath = (name: string, ascii: boolean, base = savePath) =>
+            path.join(base, this.kd.lib.fs.getSafeRelativePath(name, { asciiFilenames: ascii }));
+        const getTargetPaths = (finalPath: string) => {
+            const partPath = `${finalPath}.part`;
+            const stagingPath = getStagingPartPath(partPath);
+            return [
+                finalPath,
+                partPath,
+                getPartDigestPath(partPath),
+                stagingPath,
+                getPartDigestPath(stagingPath),
+            ];
+        };
+        const occupied = new Set(
+            this.repository.listUnfinishedFileTargets().flatMap((target) => {
+                const finalPath = toFinalPath(
+                    target.path,
+                    target.asciiFilenames === 1,
+                    target.savePath,
+                ).toLowerCase();
+                return getTargetPaths(finalPath);
+            }),
+        );
+        const originalName = entry.node.name;
+        const extension = path.extname(originalName);
+        const stem = originalName.slice(0, originalName.length - extension.length);
+        for (let attempt = 0; ; attempt += 1) {
+            const name = attempt === 0 ? originalName : `${stem} (${attempt})${extension}`;
+            let collision = false;
+            for (const targetPath of getTargetPaths(toFinalPath(name, asciiFilenames))) {
+                if (occupied.has(targetPath.toLowerCase()) || (await pathExists(targetPath))) {
+                    collision = true;
+                    break;
+                }
+            }
+            if (collision) {
+                continue;
+            }
+            if (attempt === 0) {
+                return { loaded, selectedPaths };
+            }
+            return {
+                loaded: {
+                    ...loaded,
+                    collection: {
+                        ...loaded.collection,
+                        name,
+                        tree: {
+                            ...loaded.collection.tree,
+                            entries: [{ ...entry, node: { ...entry.node, name } }],
+                        },
+                    },
+                },
+                selectedPaths: selectedPaths.map((selected) =>
+                    selected === originalName ? name : selected,
+                ),
+            };
+        }
+    }
+
+    public async prepare(
+        payload: PrepareDownloadPayload,
+        scope: DraftScope = "app",
+    ): Promise<PrepareDownloadResult> {
         const sourceInput = payload.url.trim();
         const parsed = tryParseDownloadUrl(sourceInput);
         if (!parsed && !sourceInput.startsWith(EXTENDED_SHARE_PREFIX)) {
             return { status: "failed", code: "invalidUrl", message: "Invalid share URL." };
         }
+        const directHeaders =
+            parsed?.provider === "direct" ? normalizeDirectRequestHeaders(payload.headers) : null;
+        if (directHeaders && "error" in directHeaders) {
+            return { status: "failed", code: "invalidUrl", message: directHeaders.error };
+        }
 
-        const epoch = this.prepareEpoch;
+        const epoch = this.prepareEpochs[scope];
         const correlationId = payload.correlationId ?? randomUUID();
         const controller = new AbortController();
-        this.prepareControllers.get(correlationId)?.abort();
-        this.prepareControllers.set(correlationId, controller);
+        this.prepareControllers.get(correlationId)?.controller.abort();
+        this.prepareControllers.set(correlationId, { controller, scope });
 
         try {
             return await this.prepareLimit(() =>
-                this.prepareDraft(payload, sourceInput, epoch, controller, correlationId),
+                this.prepareDraft(
+                    { ...payload, headers: directHeaders?.headers },
+                    sourceInput,
+                    epoch,
+                    controller,
+                    correlationId,
+                    scope,
+                ),
             );
         } finally {
-            if (this.prepareControllers.get(correlationId) === controller) {
+            if (this.prepareControllers.get(correlationId)?.controller === controller) {
                 this.prepareControllers.delete(correlationId);
             }
         }
     }
 
+    /** Without a draft id, discards every draft of the app's new-download view (not extension drafts). */
     public discardDraft(payload: { draftId?: string }) {
         if (!payload.draftId) {
-            this.abortAllPrepares();
-            this.preparedDrafts.clear();
+            this.abortPrepares("app");
+            for (const [id, draft] of this.preparedDrafts) {
+                if (draft.scope === "app") {
+                    this.preparedDrafts.delete(id);
+                }
+            }
             return;
         }
-        const controller = this.prepareControllers.get(payload.draftId);
-        if (controller) {
-            controller.abort();
+        const pending = this.prepareControllers.get(payload.draftId);
+        if (pending) {
+            pending.controller.abort();
             this.prepareControllers.delete(payload.draftId);
         }
         this.preparedDrafts.delete(payload.draftId);
@@ -452,15 +587,30 @@ export class DownloadService {
                           }),
                       )
                     : basePath;
+                const target =
+                    enriched.provider === "direct"
+                        ? await this.claimDirectTarget(
+                              enriched,
+                              savePath,
+                              asciiFilenames,
+                              payload.selectedPaths,
+                          )
+                        : { loaded: enriched, selectedPaths: payload.selectedPaths };
                 const collectionId = this.repository.insertDownload({
-                    loaded: enriched,
+                    loaded: target.loaded,
                     url:
                         enriched.provider === "workupload"
                             ? buildWorkuploadUrl(enriched.collection.shareId, enriched.resource)
-                            : draft.sourceInput,
+                            : enriched.provider === "direct"
+                              ? (tryParseDownloadUrl(draft.sourceInput)?.id ?? draft.sourceInput)
+                              : draft.sourceInput,
                     password: enriched.passwordProtected ? draft.password : undefined,
+                    requestHeaders:
+                        enriched.provider === "direct"
+                            ? resolveCreateRequestHeaders(payload.headers, enriched.requestHeaders)
+                            : undefined,
                     savePath,
-                    selectedPaths: payload.selectedPaths,
+                    selectedPaths: target.selectedPaths,
                     asciiFilenames,
                     zipPasswords: payload.zipPasswords,
                     startPaused,
@@ -480,6 +630,14 @@ export class DownloadService {
         );
     }
 
+    public getExtensionDraftSavePath(draftId: string) {
+        const draft = this.requirePreparedDraft(draftId);
+        if (draft.scope !== "extension" || !draft.savePath) {
+            throw new Error("Prepared extension download draft is no longer available.");
+        }
+        return draft.savePath;
+    }
+
     private requirePreparedDraft(draftId: string) {
         const draft = this.preparedDrafts.get(draftId);
         if (!draft) {
@@ -492,12 +650,15 @@ export class DownloadService {
         this.preparedDrafts.delete(draftId);
     }
 
-    private abortAllPrepares() {
-        this.prepareEpoch += 1;
-        for (const controller of this.prepareControllers.values()) {
-            controller.abort();
+    private abortPrepares(scope?: DraftScope) {
+        for (const each of scope ? [scope] : DRAFT_SCOPES) {
+            this.prepareEpochs[each] += 1;
         }
-        this.prepareControllers.clear();
+        for (const [id, pending] of this.prepareControllers) {
+            if (scope && pending.scope !== scope) continue;
+            pending.controller.abort();
+            this.prepareControllers.delete(id);
+        }
     }
 
     private async prepareDraft(
@@ -506,8 +667,9 @@ export class DownloadService {
         epoch: number,
         controller: AbortController,
         correlationId: string,
+        scope: DraftScope,
     ): Promise<PrepareDownloadResult> {
-        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+        if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
             return {
                 status: "failed",
                 code: "remoteFailure",
@@ -517,7 +679,7 @@ export class DownloadService {
 
         const asciiFilenames =
             payload.asciiFilenames ?? (await this.kd.setting.get("general.asciiFilenames"));
-        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+        if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
             return {
                 status: "failed",
                 code: "remoteFailure",
@@ -526,11 +688,16 @@ export class DownloadService {
         }
 
         const attempt = async (password?: string) => {
-            const loadPayload = { url: sourceInput, password, signal: controller.signal };
+            const loadPayload = {
+                url: sourceInput,
+                password,
+                headers: payload.headers,
+                signal: controller.signal,
+            };
             const loaded = sourceInput.startsWith(EXTENDED_SHARE_PREFIX)
                 ? await this.loadExtendedCollection(loadPayload)
                 : await this.loadCollectionUnlocked(loadPayload, asciiFilenames);
-            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                 throw new DOMException("The operation was aborted.", "AbortError");
             }
             return { loaded, password };
@@ -560,7 +727,7 @@ export class DownloadService {
                     }
                     let matched: Awaited<ReturnType<typeof attempt>> | null = null;
                     for (const candidate of settings["general.collectionPasswordList"]) {
-                        if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+                        if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                             throw new DOMException("The operation was aborted.", "AbortError");
                         }
                         try {
@@ -584,7 +751,9 @@ export class DownloadService {
                 }
             }
 
-            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            const savePath =
+                scope === "extension" ? await this.kd.setting.getDownloadSavePath() : undefined;
+            if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                 return {
                     status: "failed",
                     code: "remoteFailure",
@@ -599,8 +768,18 @@ export class DownloadService {
                 password: prepared.password,
                 asciiFilenames,
                 correlationId,
+                scope,
+                savePath,
                 loaded: prepared.loaded,
             });
+            if (scope === "extension") {
+                const extensionIds = [...this.preparedDrafts.values()]
+                    .filter((draft) => draft.scope === "extension")
+                    .map((draft) => draft.id);
+                for (const staleId of extensionIds.slice(0, -MAX_EXTENSION_DRAFTS)) {
+                    this.preparedDrafts.delete(staleId);
+                }
+            }
             const collection = prepared.loaded.collection;
             return {
                 status: "ready",
@@ -611,17 +790,23 @@ export class DownloadService {
                         : collection,
             };
         } catch (error) {
-            if (epoch !== this.prepareEpoch || controller.signal.aborted) {
+            if (epoch !== this.prepareEpochs[scope] || controller.signal.aborted) {
                 return {
                     status: "failed",
                     code: "remoteFailure",
                     message: "Preparation superseded.",
                 };
             }
+            const direct = tryParseDownloadUrl(sourceInput)?.provider === "direct";
             logCaughtError(
                 this.kd.logger,
                 "DownloadService:prepare",
-                { channel: "download:prepare", stage: "load", url: sourceInput },
+                {
+                    channel: "download:prepare",
+                    stage: "load",
+                    url: direct ? toLogUrl(sourceInput) : sourceInput,
+                    ...(direct ? { requestHeaderNames: Object.keys(payload.headers ?? {}) } : {}),
+                },
                 error,
             );
             return {
@@ -636,6 +821,7 @@ export class DownloadService {
         payload: {
             url: string;
             password?: string;
+            headers?: DirectRequestHeaders;
             signal?: AbortSignal;
         },
         asciiFilenames: boolean,
@@ -644,8 +830,17 @@ export class DownloadService {
         if (!parsed) {
             throw new Error("Invalid share URL.");
         }
+        if (parsed.provider === "direct") {
+            return this.directApi.loadCollection(
+                { url: parsed.id, headers: payload.headers, signal: payload.signal },
+                asciiFilenames,
+            );
+        }
         if (parsed.provider === "transfer") {
             return this.transferApi.loadCollection(payload);
+        }
+        if (parsed.provider === "mega") {
+            return this.megaApi.loadCollection(payload);
         }
         if (parsed.provider === "workupload") {
             return this.normalizeWorkuploadCollection(
@@ -654,6 +849,107 @@ export class DownloadService {
             );
         }
         return this.api.loadCollection(payload);
+    }
+
+    /**
+     * The MEGA transfer quota belongs to the IP or account, so every running Mega collection is
+     * stopped together. Runs synchronously so in-flight chunks are aborted (kept pending) before
+     * the failing range is handled; the reason stays on the collection until it runs again.
+     */
+    private pauseMegaCollectionsForQuota(error: MegaQuotaExceededError) {
+        const collections = this.repository
+            .listRunnableCollections()
+            .filter((collection) => collection.provider === "mega");
+        if (collections.length === 0) {
+            return;
+        }
+        const loggedIn = Boolean(this.kd.service.mega.getSessionId());
+        const pausedAt = Date.now();
+        const reason: DownloadPauseReason = {
+            kind: "megaQuota",
+            pausedAt,
+            resumeAt: error.timeLeftMs === undefined ? null : pausedAt + error.timeLeftMs,
+        };
+        this.kd.logger.warn(
+            {
+                collectionIds: collections.map((collection) => collection.id),
+                timeLeftMs: error.timeLeftMs,
+                loggedIn,
+            },
+            "DownloadService:megaQuotaExceeded",
+        );
+        for (const collection of collections) {
+            this.scheduler.pauseCollection(collection.id);
+            this.repository.pauseCollection(collection.id, reason);
+        }
+        void (async () => {
+            for (const collection of collections) {
+                await this.emitUpdate(collection.id);
+            }
+            await this.kd.service.transfer.refreshPowerSaveBlock();
+            await this.scheduleMegaQuotaResume();
+        })().catch((emitError: unknown) => {
+            logCaughtError(
+                this.kd.logger,
+                "DownloadService:megaQuotaExceeded",
+                { stage: "emit-update" },
+                emitError,
+            );
+        });
+    }
+
+    /**
+     * Re-arms the single timer that resumes quota-paused Mega collections. Called after a quota
+     * pause, on startup and when the auto-resume setting changes; a no-op while the setting is off.
+     */
+    public async scheduleMegaQuotaResume() {
+        const autoResume = await this.kd.setting.get("transfer.megaQuotaAutoResume");
+        // Cleared only after the await so overlapping calls cannot leave an orphaned timer.
+        if (this.megaQuotaResumeTimer) {
+            clearTimeout(this.megaQuotaResumeTimer);
+            this.megaQuotaResumeTimer = null;
+        }
+        if (!autoResume) {
+            return;
+        }
+        const resumeTimes = this.repository
+            .listMegaQuotaPausedCollections()
+            .map((collection) => megaQuotaResumeTime(collection.pauseReasonJson))
+            .filter((time) => time !== undefined);
+        if (resumeTimes.length === 0) {
+            return;
+        }
+        // setTimeout overflows above ~24.8 days; a long wait is simply re-armed.
+        const delayMs = Math.min(Math.max(0, Math.min(...resumeTimes) - Date.now()), 2 ** 31 - 1);
+        this.megaQuotaResumeTimer = setTimeout(() => {
+            this.megaQuotaResumeTimer = null;
+            void this.resumeDueMegaQuotaCollections();
+        }, delayMs);
+    }
+
+    private async resumeDueMegaQuotaCollections() {
+        const now = Date.now();
+        for (const collection of this.repository.listMegaQuotaPausedCollections()) {
+            const resumeAt = megaQuotaResumeTime(collection.pauseReasonJson);
+            if (resumeAt === undefined || resumeAt > now) {
+                continue;
+            }
+            try {
+                this.repository.resumeCollection(collection.id, false, {
+                    preserveUserPauses: true,
+                });
+                this.scheduler.resumeCollection(collection.id);
+                await this.emitUpdate(collection.id);
+            } catch (error) {
+                logCaughtError(
+                    this.kd.logger,
+                    "DownloadService:megaQuotaAutoResume",
+                    { collectionId: collection.id, name: collection.name, resumeAt },
+                    error,
+                );
+            }
+        }
+        await this.scheduleMegaQuotaResume();
     }
 
     private normalizeWorkuploadCollection(
@@ -896,10 +1192,9 @@ export class DownloadService {
     }
 
     public async list() {
-        return {
-            revision: this.revision,
-            items: this.repository.listItems().map((item) => this.enrichItem(item)),
-        };
+        return this.publisher.snapshot(
+            this.repository.listItems().map((item) => this.enrichItem(item)),
+        );
     }
 
     public async pauseCollection(collectionId: string) {
@@ -1221,6 +1516,9 @@ export class DownloadService {
         if (!collection) {
             throw new Error("Download item not found.");
         }
+        if (collection.provider === "direct") {
+            throw new Error("Export is not supported for direct URL downloads.");
+        }
 
         const payload = await withLoggedError(
             this.kd.logger,
@@ -1295,11 +1593,10 @@ export class DownloadService {
             },
         );
 
-        const lastDownloadPath = await this.kd.setting.get("general.lastDownloadPath");
         const folderResult = await showOpenDialog({
             title: "저장 폴더 선택",
             properties: ["openDirectory", "createDirectory"],
-            defaultPath: lastDownloadPath || undefined,
+            defaultPath: (await this.kd.setting.getDownloadSavePath()) || undefined,
         });
         if (folderResult.canceled || folderResult.filePaths.length === 0) {
             return null;
@@ -1539,29 +1836,20 @@ export class DownloadService {
         if (collectionId) {
             const item = this.repository.getItem(collectionId);
             if (item) {
-                this.emitChanged(collectionId, this.enrichItem(item, options));
+                this.publisher.publish(this.enrichItem(item, options));
             }
             this.kd.service.transfer.syncMainWindowProgressBar();
             return;
         }
 
         for (const item of this.repository.listItems()) {
-            this.emitChanged(item.id, this.enrichItem(item, options));
+            this.publisher.publish(this.enrichItem(item, options));
         }
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
-    private emitChanged(id: string, item: DownloadItem | null) {
-        this.revision += 1;
-        this.kd.ipc.sendToMainWindow("download:changed", {
-            revision: this.revision,
-            id,
-            item,
-        });
-    }
-
     private async emitRemoved(id: string) {
-        this.emitChanged(id, null);
+        this.publisher.remove(id);
         this.kd.service.transfer.syncMainWindowProgressBar();
     }
 
@@ -1903,22 +2191,95 @@ export class DownloadService {
     }
 }
 
+function megaQuotaResumeTime(pauseReasonJson: string | null) {
+    const reason = parsePauseReason(pauseReasonJson);
+    return reason && getAutoResumeTime(reason);
+}
+
 function requestPoolProviderId(provider: DownloadProvider | undefined) {
     if (provider === "transfer") {
         return "transfer-it-download" satisfies TransferProviderRequestId;
     }
+    if (provider === "mega") {
+        return "mega-download" satisfies TransferProviderRequestId;
+    }
     if (provider === "workupload") {
         return "workupload-download" satisfies TransferProviderRequestId;
+    }
+    if (provider === "direct") {
+        return "direct-download" satisfies TransferProviderRequestId;
     }
     return "kiosk-download" satisfies TransferProviderRequestId;
 }
 
-function tryParseWorkuploadFileSourceMeta(raw: string | null) {
+const DIRECT_HEADER_LABELS = {
+    referer: "Referer",
+    cookie: "Cookie",
+    userAgent: "User-Agent",
+} as const satisfies Record<keyof DirectRequestHeaders, string>;
+
+/**
+ * Validates and trims renderer-supplied headers. HTTP header values must be ASCII bytes,
+ * so a Referer is normalized through URL parsing (which percent-encodes Hangul) and any
+ * other non-ASCII or control character is rejected up front.
+ */
+function normalizeDirectRequestHeaders(
+    headers: DirectRequestHeaders | undefined,
+): { headers: DirectRequestHeaders | undefined } | { error: string } {
+    const normalized: DirectRequestHeaders = {};
+    for (const [key, label] of Object.entries(DIRECT_HEADER_LABELS) as [
+        keyof DirectRequestHeaders,
+        string,
+    ][]) {
+        const raw: unknown = headers?.[key];
+        if (raw === undefined || raw === null) {
+            continue;
+        }
+        if (typeof raw !== "string") {
+            return { error: `요청 헤더 ${label} 값이 올바르지 않습니다.` };
+        }
+        const trimmed = raw.trim();
+        if (!trimmed) {
+            continue;
+        }
+        if (trimmed.length > MAX_DIRECT_HEADER_VALUE_LENGTH) {
+            return { error: `요청 헤더 ${label} 값이 너무 깁니다.` };
+        }
+        const value = key === "referer" ? normalizeReferer(trimmed) : trimmed;
+        if (value === null) {
+            return { error: "Referer는 http(s) 주소여야 합니다." };
+        }
+        if (/[^\t\x20-\x7e]/.test(value)) {
+            return {
+                error: `요청 헤더 ${label}에는 줄바꿈이나 한글 같은 비ASCII 문자를 넣을 수 없습니다.`,
+            };
+        }
+        normalized[key] = value;
+    }
+    return { headers: Object.keys(normalized).length > 0 ? normalized : undefined };
+}
+
+function normalizeReferer(value: string) {
     try {
-        return parseWorkuploadFileSourceMeta(raw);
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
     } catch {
         return null;
     }
+}
+
+function resolveCreateRequestHeaders(
+    edited: DirectRequestHeaders | undefined,
+    prepared: DirectRequestHeaders | undefined,
+) {
+    if (edited === undefined) {
+        return prepared;
+    }
+    const normalized = normalizeDirectRequestHeaders(edited);
+    if ("error" in normalized) {
+        throw new Error(normalized.error);
+    }
+    return normalized.headers;
 }
 
 function validateDraftTreeMutation(

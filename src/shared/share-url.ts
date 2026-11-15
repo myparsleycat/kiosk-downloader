@@ -1,10 +1,23 @@
-import type { DownloadProvider } from "./types";
+// Defined here rather than in ./types so the browser extension can import this module without
+// pulling in the generated IPC types.
+export type DownloadProvider = "kiosk" | "transfer" | "extended" | "workupload" | "direct" | "mega";
 
-export type { DownloadProvider };
 export type WorkuploadShareKind = "file" | "archive";
+export type MegaLinkKind = "file" | "folder";
+export type MegaLink =
+    | {
+          type: "public";
+          kind: MegaLinkKind;
+          handle: string;
+          key?: string;
+          subFolderId?: string;
+          subFileId?: string;
+      }
+    | { type: "encoded"; kind: MegaLinkKind; version: 1 | 2; payload: string };
 export type ParsedDownloadUrl =
-    | { provider: Exclude<DownloadProvider, "workupload">; id: string }
-    | { provider: "workupload"; id: string; kind: WorkuploadShareKind };
+    | { provider: Exclude<DownloadProvider, "workupload" | "mega">; id: string }
+    | { provider: "workupload"; id: string; kind: WorkuploadShareKind }
+    | { provider: "mega"; id: string; link: MegaLink };
 
 export const SHARE_HOST = "kio.ac";
 export const SHARE_PATH_PREFIX = "/c/";
@@ -19,6 +32,18 @@ export const WORKUPLOAD_HOST = "workupload.com";
 export const WORKUPLOAD_FILE_PATH_PREFIX = "/file/";
 export const WORKUPLOAD_START_PATH_PREFIX = "/start/";
 export const WORKUPLOAD_ARCHIVE_PATH_PREFIX = "/archive/";
+
+export const MEGA_HOSTS = ["mega.nz", "mega.co.nz", "mega.io"];
+export const MEGA_FILE_KEY_LENGTH = 43;
+export const MEGA_FOLDER_KEY_LENGTH = 22;
+
+const SHARE_PROVIDER_HOSTS = [SHARE_HOST, TRANSFER_HOST, WORKUPLOAD_HOST, ...MEGA_HOSTS];
+
+const MEGA_WEB_PATTERN =
+    /^(?:https?:\/\/)?(?:www\.)?mega\.(?:nz|co\.nz)\/(?:(file|folder)\/([\w-]+)(?:#([\w-]*))?|#(F?)!([\w-]+)(?:!([\w-]*))?)(?:\/(folder|file)\/([\w-]+))?\/?$/i;
+const MEGA_URI_PATTERN =
+    /^mega:(?:\/\/\/?)?#?(F?)!([\w-]+)(?:!([\w-]*))?(?:\/(folder|file)\/([\w-]+))?$/i;
+const MEGA_ENCODED_PATTERN = /^mega:(?:\/\/\/?)?(f?)enc(2?)\/?\?([\w,=-]+)$/i;
 
 const UUID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 const UUID_DECODE_TABLE = new Map(UUID_ALPHABET.split("").map((char, index) => [char, index]));
@@ -188,6 +213,65 @@ export function tryParseWorkuploadUrl(
     };
 }
 
+/**
+ * Mega public links (file/folder, sub-folder/sub-file suffixes, legacy `#!`/`#F!`, `mega:` URIs)
+ * and MegaDownloader `enc`/`fenc` obfuscated links. A present key must have its full length so a
+ * half-typed key is not loaded; a missing key is requested through the password prompt.
+ */
+export function tryParseMegaUrl(url: string): MegaLink | null {
+    const trimmed = url.trim();
+    if (/\s/.test(trimmed)) {
+        return null;
+    }
+
+    const encoded = MEGA_ENCODED_PATTERN.exec(trimmed);
+    if (encoded) {
+        return {
+            type: "encoded",
+            kind: encoded[1] ? "folder" : "file",
+            version: encoded[2] ? 2 : 1,
+            payload: encoded[3],
+        };
+    }
+
+    const web = MEGA_WEB_PATTERN.exec(trimmed);
+    if (web) {
+        return web[1]
+            ? buildMegaPublicLink(web[1].toLowerCase() === "folder", web[2], web[3], web[7], web[8])
+            : buildMegaPublicLink(web[4] !== "", web[5], web[6], web[7], web[8]);
+    }
+
+    const uri = MEGA_URI_PATTERN.exec(trimmed);
+    if (uri) {
+        return buildMegaPublicLink(uri[1] !== "", uri[2], uri[3], uri[4], uri[5]);
+    }
+    return null;
+}
+
+function buildMegaPublicLink(
+    isFolder: boolean,
+    handle: string,
+    key: string | undefined,
+    subKind: string | undefined,
+    subId: string | undefined,
+): MegaLink | null {
+    if (key && key.length !== (isFolder ? MEGA_FOLDER_KEY_LENGTH : MEGA_FILE_KEY_LENGTH)) {
+        return null;
+    }
+    if (subId && !isFolder) {
+        return null;
+    }
+    const sub = subKind?.toLowerCase();
+    return {
+        type: "public",
+        kind: isFolder ? "folder" : "file",
+        handle,
+        ...(key ? { key } : {}),
+        ...(subId && sub === "folder" ? { subFolderId: subId } : {}),
+        ...(subId && sub === "file" ? { subFileId: subId } : {}),
+    };
+}
+
 export function tryParseDownloadUrl(url: string): ParsedDownloadUrl | null {
     const shareId = tryParseShareUrl(url);
     if (shareId) {
@@ -204,7 +288,65 @@ export function tryParseDownloadUrl(url: string): ParsedDownloadUrl | null {
         return { provider: "workupload", ...workupload };
     }
 
+    const mega = tryParseMegaUrl(url);
+    if (mega) {
+        return {
+            provider: "mega",
+            id: mega.type === "public" ? mega.handle : mega.payload,
+            link: mega,
+        };
+    }
+
+    const directUrl = tryParseDirectUrl(url);
+    if (directUrl) {
+        return { provider: "direct", id: directUrl };
+    }
+
     return null;
+}
+
+/**
+ * Any http(s) URL that is not a recognized share link. Share-provider hosts are
+ * rejected so a malformed share link fails instead of downloading the site's HTML.
+ */
+export function tryParseDirectUrl(url: string) {
+    const trimmed = url.trim();
+    // The URL parser silently drops tabs/newlines and encodes spaces, which would merge
+    // pasted text holding several links into one bogus URL.
+    if (/\s/.test(trimmed)) {
+        return null;
+    }
+    let parsed: URL;
+    try {
+        parsed = new URL(trimmed);
+    } catch {
+        return null;
+    }
+
+    if (
+        (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+        !parsed.hostname ||
+        parsed.username ||
+        parsed.password
+    ) {
+        return null;
+    }
+    const host = parsed.hostname.replace(/\.+$/, "");
+    if (
+        SHARE_PROVIDER_HOSTS.some(
+            (shareHost) => host === shareHost || host.endsWith(`.${shareHost}`),
+        )
+    ) {
+        return null;
+    }
+
+    parsed.hash = "";
+    return parsed.href;
+}
+
+/** Providers whose files lose progress on stop when the server lacks Range support. */
+export function usesRangeDependentControl(provider: DownloadProvider | undefined) {
+    return provider === "workupload" || provider === "direct";
 }
 
 export function buildTransferUrl(transferId: string): string {
@@ -272,16 +414,28 @@ export function isDownloadShareInput(value: string) {
     return Boolean(tryParseDownloadUrl(trimmed) || trimmed.startsWith(EXTENDED_SHARE_PREFIX));
 }
 
+/**
+ * Direct URLs are only loaded on an explicit commit (paste, Enter, bulk add);
+ * auto-loading them while typing would probe every partial URL.
+ */
+export function isAutoCommitShareInput(value: string) {
+    const trimmed = value.trim();
+    if (trimmed.startsWith(EXTENDED_SHARE_PREFIX)) {
+        return true;
+    }
+    const parsed = tryParseDownloadUrl(trimmed);
+    if (parsed?.provider === "mega") {
+        return parsed.link.type === "encoded" || parsed.link.key !== undefined;
+    }
+    return parsed !== null && parsed.provider !== "direct";
+}
+
 export function parseBulkShareInputs(text: string) {
     const urls: string[] = [];
     const invalid: string[] = [];
     const seen = new Set<string>();
 
-    for (const raw of text.split(/[\n\r,]+/)) {
-        const token = raw.trim();
-        if (!token) {
-            continue;
-        }
+    for (const token of splitBulkTokens(text)) {
         const resolved = (tryDecodeShareUrlBase64(token) ?? token).trim();
         if (!isDownloadShareInput(resolved)) {
             invalid.push(token);
@@ -295,4 +449,49 @@ export function parseBulkShareInputs(text: string) {
     }
 
     return { urls, invalid };
+}
+
+// Commas separate links, but direct URLs and encoded Mega payloads may contain commas.
+// A comma piece glued to such a URL (no whitespace after the comma) that does not look
+// like a link of its own is treated as part of that URL; anything link-like stays
+// separate so a bad link is still reported.
+function splitBulkTokens(text: string) {
+    const tokens: string[] = [];
+    for (const line of text.split(/[\n\r]+/)) {
+        let previousAllowsCommas = false;
+        let pendingCommas = "";
+        for (const raw of line.split(",")) {
+            const token = raw.trim();
+            if (previousAllowsCommas && raw === raw.trimStart()) {
+                if (!token) {
+                    pendingCommas += ",";
+                    continue;
+                }
+                if (!looksLikeLink(token)) {
+                    tokens[tokens.length - 1] += `,${pendingCommas}${token}`;
+                    pendingCommas = "";
+                    continue;
+                }
+            }
+            pendingCommas = "";
+            if (!token) {
+                previousAllowsCommas = false;
+                continue;
+            }
+            tokens.push(token);
+            const parsed = tryParseDownloadUrl(token);
+            previousAllowsCommas =
+                parsed?.provider === "direct" ||
+                (parsed?.provider === "mega" && parsed.link.type === "encoded");
+        }
+    }
+    return tokens;
+}
+
+function looksLikeLink(token: string) {
+    return (
+        /^[a-z][a-z\d+.-]*:/i.test(token) ||
+        /^(?:[a-z\d-]+\.)+[a-z]{2,}\//i.test(token) ||
+        isDownloadShareInput(tryDecodeShareUrlBase64(token) ?? token)
+    );
 }

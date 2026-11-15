@@ -1,3 +1,27 @@
+# [1.14.0](https://github.com/myparsleycat/kiosk-downloader/compare/v1.13.3...v1.14.0) (2026-11-15)
+
+
+### Bug Fixes
+
+* **download:** prevent auxiliary file collisions ([eacb45b](https://github.com/myparsleycat/kiosk-downloader/commit/eacb45b2f0d1987b05e9ffb55f9ec9a5d67a5708))
+* **download:** reject HTML pages in direct URL downloads ([1cf8af3](https://github.com/myparsleycat/kiosk-downloader/commit/1cf8af36c565367c48be2314b3bdb85f29894106))
+* **download:** validate direct resumes and prevent target collisions ([50be890](https://github.com/myparsleycat/kiosk-downloader/commit/50be890f5d6c4c524948d44055bb433f2df7e407))
+* **extension:** bring app forward for pairing approval ([d0ad1f0](https://github.com/myparsleycat/kiosk-downloader/commit/d0ad1f0815b890d8ae712dc667b56d1d00432d83))
+* **main:** exit second instance before opening database ([f5877cc](https://github.com/myparsleycat/kiosk-downloader/commit/f5877cc8b52abc01377daea446c7eee37e846964))
+
+
+### Features
+
+* **download:** add direct URL downloads ([b608d05](https://github.com/myparsleycat/kiosk-downloader/commit/b608d056de796609846b01eeedd6976b381260b0))
+* **download:** add folders-first ordering and select-all for file lists ([5328bcb](https://github.com/myparsleycat/kiosk-downloader/commit/5328bcb93c17df8acd75294155997287bcf79e03))
+* **download:** add Mega downloads ([129c42b](https://github.com/myparsleycat/kiosk-downloader/commit/129c42b958857fac150b986430ab6b1358d4d785))
+* **extension:** add kioex browser extension integration ([2bc8bce](https://github.com/myparsleycat/kiosk-downloader/commit/2bc8bce41e85b28d01c7595f6545e2c7fd026f62))
+
+
+### Performance Improvements
+
+* **transfer:** send item changes as diff patches ([4e504f2](https://github.com/myparsleycat/kiosk-downloader/commit/4e504f2a92f0dc3f0aeec7bbec60b37170e44b70))
+
 ## [1.13.3](https://github.com/myparsleycat/kiosk-downloader/compare/v1.13.2...v1.13.3) (2026-11-13)
 
 

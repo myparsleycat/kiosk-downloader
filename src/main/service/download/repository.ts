@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import type { StartupResumeMode } from "@shared/settings";
+import { usesRangeDependentControl } from "@shared/share-url";
 import type {
     Collection,
     DirNode,
     DownloadItem,
+    DownloadPauseReason,
+    DownloadProvider,
     DownloadStatus,
     DownloadTransferPayload,
     FileDownloadStatus,
@@ -24,13 +27,15 @@ import type {
     DownloadCollectionRow,
     DownloadFileRow,
     FlatTreeFile,
+    MegaFileSourceMeta,
     TransferFileSourceMeta,
     WorkuploadFileSourceMeta,
     ZipEntryStoredMeta,
 } from "./types";
 
+import { ParsedTreeCache } from "../parsed-tree-cache";
 import { transferChunkLayoutMatches, transferChunkSizes } from "./transfer-it-crypto";
-import { parseWorkuploadFileSourceMeta } from "./types";
+import { parseWorkuploadFileSourceMeta, readRangeSupported } from "./types";
 import { buildZipEntrySegmentChunks, supportsZipEntryPoolDownload } from "./zip-segment-map";
 
 const COLLECTION_EXPIRED_ERROR = "Collection has expired.";
@@ -53,7 +58,9 @@ const COLLECTION_SELECT = `"id",
                     "ascii_filenames" AS "asciiFilenames",
                     COALESCE("provider", 'kiosk') AS "provider",
                     "bundle_id" AS "bundleId",
-                    "ordinal"`;
+                    "ordinal",
+                    "request_headers_json" AS "requestHeadersJson",
+                    "pause_reason_json" AS "pauseReasonJson"`;
 
 const FILE_SELECT = `"id",
                     "collection_id" AS "collectionId",
@@ -81,14 +88,6 @@ function tryParseZipEntryMeta(raw: string | null): ZipEntryStoredMeta | null {
         return JSON.parse(raw) as ZipEntryStoredMeta;
     } catch {
         return null;
-    }
-}
-
-function tryParseWorkuploadFileSourceMeta(raw: string | null) {
-    try {
-        return parseWorkuploadFileSourceMeta(raw);
-    } catch {
-        return undefined;
     }
 }
 
@@ -120,7 +119,7 @@ function parseTree(value: string): DirNode {
     return JSON.parse(value) as DirNode;
 }
 
-function rowToCollection(row: DownloadCollectionRow): Collection {
+function rowToCollection(row: DownloadCollectionRow, tree: DirNode): Collection {
     return {
         shareId: row.shareId,
         name: row.name,
@@ -128,7 +127,7 @@ function rowToCollection(row: DownloadCollectionRow): Collection {
         segmentSize: row.segmentSize,
         passwordProtected: row.passwordPlain != null,
         provider: row.provider ?? "kiosk",
-        tree: parseTree(row.treeJson),
+        tree,
     };
 }
 
@@ -147,6 +146,24 @@ function transferSourceMetaJson(
     return JSON.stringify(meta);
 }
 
+function megaSourceMetaJson(
+    loaded: CreateDownloadRecord["loaded"],
+    remoteId: string,
+): string | null {
+    if (loaded.provider !== "mega") {
+        return null;
+    }
+    const nodeKey = loaded.nodeKeys.get(remoteId);
+    if (!nodeKey) {
+        return null;
+    }
+    const meta: MegaFileSourceMeta = {
+        nodeKey,
+        ...(loaded.folderHandle ? { folderHandle: loaded.folderHandle } : {}),
+    };
+    return JSON.stringify(meta);
+}
+
 function workuploadSourceMetaJson(
     loaded: CreateDownloadRecord["loaded"],
     remoteId: string,
@@ -159,6 +176,10 @@ function workuploadSourceMetaJson(
         throw new Error(`Missing Workupload source metadata for file: ${remoteId}.`);
     }
     return JSON.stringify(parseWorkuploadFileSourceMeta(JSON.stringify(meta)));
+}
+
+function directSourceMetaJson(loaded: CreateDownloadRecord["loaded"]): string | null {
+    return loaded.provider === "direct" ? JSON.stringify(loaded.fileMeta) : null;
 }
 
 function normalizeTransferFile(file: DownloadFileRow) {
@@ -293,6 +314,8 @@ function isUnderFolderPath(filePath: string, folderPath: string) {
 }
 
 export class DownloadRepository {
+    private readonly treeCache = new ParsedTreeCache();
+
     public constructor(private readonly kd: KioskDownloader) {}
 
     public syncExpiredCollections() {
@@ -407,6 +430,12 @@ export class DownloadRepository {
             id: randomUUID(),
             selected: file.selected ?? isSelectedArchiveOrFile(file.path, selectedPaths, tree),
         }));
+        if (usesMegaNodeTree(record.loaded.provider)) {
+            this.assertUniqueDownloadPaths(
+                fileRows.filter((file) => file.selected).map((file) => file.path),
+                record.asciiFilenames,
+            );
+        }
         const selectedCount = fileRows.filter((file) => file.selected).length;
         if (selectedCount === 0) {
             throw new Error("No files selected.");
@@ -419,8 +448,8 @@ export class DownloadRepository {
                  ("id", "share_id", "source_url", "password_plain", "name", "root_id",
                   "segment_size", "expires", "tree_json", "save_path", "status",
                   "created_at", "updated_at", "elapsed_ms", "error", "ascii_filenames",
-                  "provider", "bundle_id", "ordinal")
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?)`,
+                  "provider", "bundle_id", "ordinal", "request_headers_json")
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)`,
                 [
                     collectionId,
                     record.loaded.collection.shareId,
@@ -439,6 +468,7 @@ export class DownloadRepository {
                     record.loaded.provider,
                     record.bundleId ?? null,
                     record.ordinal ?? 0,
+                    record.requestHeaders ? JSON.stringify(record.requestHeaders) : null,
                 ],
             );
 
@@ -465,7 +495,9 @@ export class DownloadRepository {
                         file.zipEntryJson,
                         file.sourceMetaJson ??
                             transferSourceMetaJson(record.loaded, file.remoteId) ??
-                            workuploadSourceMetaJson(record.loaded, file.remoteId),
+                            megaSourceMetaJson(record.loaded, file.remoteId) ??
+                            workuploadSourceMetaJson(record.loaded, file.remoteId) ??
+                            directSourceMetaJson(record.loaded),
                     ],
                 );
             }
@@ -507,6 +539,12 @@ export class DownloadRepository {
     ) {
         if (!payload.files.some((file) => file.selected)) {
             throw new Error("No files selected.");
+        }
+        if (usesMegaNodeTree(payload.collection.provider)) {
+            this.assertUniqueDownloadPaths(
+                payload.files.filter((file) => file.selected).map((file) => file.path),
+                payload.collection.asciiFilenames,
+            );
         }
 
         const collectionId = randomUUID();
@@ -824,6 +862,7 @@ export class DownloadRepository {
 
     public deleteBundle(bundleId: string) {
         this.kd.lib.db.run(`DELETE FROM "download_bundle" WHERE "id" = ?`, [bundleId]);
+        this.treeCache.delete(bundleId);
     }
 
     public getCollection(collectionId: string) {
@@ -833,6 +872,15 @@ export class DownloadRepository {
              WHERE "id" = ?
              LIMIT 1`,
             [collectionId],
+        );
+    }
+
+    public listMegaQuotaPausedCollections() {
+        return this.kd.lib.db.all<DownloadCollectionRow>(
+            `SELECT ${COLLECTION_SELECT}
+             FROM "download_collection"
+             WHERE "status" = 'paused' AND "provider" = 'mega' AND "pause_reason_json" IS NOT NULL
+             ORDER BY "created_at" ASC`,
         );
     }
 
@@ -995,7 +1043,7 @@ export class DownloadRepository {
     public reconcileTransferChunkLayout(fileId: string) {
         const file = this.getFile(fileId);
         const collection = file ? this.getCollection(file.collectionId) : null;
-        if (!file || !collection || (collection.provider ?? "kiosk") !== "transfer") {
+        if (!file || !collection || !usesMegaChunkLayout(collection.provider)) {
             return false;
         }
 
@@ -1033,9 +1081,10 @@ export class DownloadRepository {
     ) {
         this.kd.lib.db.run(
             `UPDATE "download_collection"
-             SET "status" = ?, "updated_at" = ?, "error" = ?
+             SET "status" = ?, "updated_at" = ?, "error" = ?,
+                 "pause_reason_json" = CASE WHEN ? = 'paused' THEN "pause_reason_json" END
              WHERE "id" = ?`,
-            [status, nowIso(), error ?? null, collectionId],
+            [status, nowIso(), error ?? null, status, collectionId],
         );
     }
 
@@ -1225,14 +1274,15 @@ export class DownloadRepository {
         return Number(row?.count ?? 0) > 0;
     }
 
-    public pauseCollection(collectionId: string) {
+    /** `pauseReason` is kept until the collection runs again; a user pause clears it. */
+    public pauseCollection(collectionId: string, pauseReason?: DownloadPauseReason) {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
             tx.run(
                 `UPDATE "download_collection"
-                 SET "status" = 'paused', "updated_at" = ?, "error" = NULL
+                 SET "status" = 'paused', "updated_at" = ?, "error" = NULL, "pause_reason_json" = ?
                  WHERE "id" = ?`,
-                [timestamp, collectionId],
+                [timestamp, pauseReason ? JSON.stringify(pauseReason) : null, collectionId],
             );
             tx.run(
                 `UPDATE "download_file"
@@ -1252,7 +1302,11 @@ export class DownloadRepository {
         });
     }
 
-    public resumeCollection(collectionId: string, _force: boolean) {
+    public resumeCollection(
+        collectionId: string,
+        _force: boolean,
+        options: { preserveUserPauses?: boolean } = {},
+    ) {
         if (this.ensureCollectionNotExpired(collectionId)) {
             return;
         }
@@ -1260,7 +1314,8 @@ export class DownloadRepository {
         this.kd.lib.db.transaction((tx) => {
             tx.run(
                 `UPDATE "download_collection"
-                 SET "status" = 'queued', "updated_at" = ?, "error" = NULL
+                 SET "status" = 'queued', "updated_at" = ?, "error" = NULL,
+                     "pause_reason_json" = NULL
                  WHERE "id" = ? AND "status" != 'completed'`,
                 [timestamp, collectionId],
             );
@@ -1271,9 +1326,10 @@ export class DownloadRepository {
                      WHERE "collection_id" = ?
                        AND "selected" = 1
                        AND "completed_elsewhere" = 0
+                        AND (? = 0 OR "paused_by_user" = 0)
                        AND "status" IN ('paused', 'pending', 'error')
                  )`,
-                [collectionId],
+                [collectionId, options.preserveUserPauses ? 1 : 0],
             );
             tx.run(
                 `UPDATE "download_file"
@@ -1284,8 +1340,9 @@ export class DownloadRepository {
                  WHERE "collection_id" = ?
                    AND "selected" = 1
                    AND "completed_elsewhere" = 0
+                    AND (? = 0 OR "paused_by_user" = 0)
                    AND "status" IN ('paused', 'error')`,
-                [timestamp, collectionId],
+                [timestamp, collectionId, options.preserveUserPauses ? 1 : 0],
             );
         });
     }
@@ -1349,6 +1406,7 @@ export class DownloadRepository {
         if (file.selected === 1) {
             return;
         }
+        this.assertIncludedPathsUnique(file.collectionId, [file.id]);
 
         const timestamp = nowIso();
         this.kd.lib.db.run(
@@ -1370,6 +1428,10 @@ export class DownloadRepository {
         if (files.length === 0) {
             return [];
         }
+        this.assertIncludedPathsUnique(
+            collectionId,
+            files.map((file) => file.id),
+        );
 
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
@@ -1479,6 +1541,55 @@ export class DownloadRepository {
         );
     }
 
+    /** Applies a fresh probe of a direct URL after the remote file changed. */
+    public updateDirectRemote(
+        fileId: string,
+        remote: { size: number; segmentSize: number; sourceMetaJson: string },
+    ) {
+        const file = this.getFile(fileId);
+        const collection = file ? this.getCollection(file.collectionId) : null;
+        if (!file || !collection) {
+            return;
+        }
+        const tree = parseTree(collection.treeJson);
+        for (const entry of tree.entries) {
+            if (entry.kind === "file" && entry.node.id === file.remoteId) {
+                (entry.node as FileNode).size = remote.size;
+            }
+        }
+        const timestamp = nowIso();
+        this.kd.lib.db.transaction((tx) => {
+            tx.run(
+                `UPDATE "download_file"
+                 SET "size" = ?, "source_meta_json" = ?, "updated_at" = ?
+                 WHERE "id" = ?`,
+                [remote.size, remote.sourceMetaJson, timestamp, fileId],
+            );
+            tx.run(
+                `UPDATE "download_collection"
+                 SET "segment_size" = ?, "tree_json" = ?, "updated_at" = ?
+                 WHERE "id" = ?`,
+                [
+                    requireSegmentSize(remote.segmentSize),
+                    JSON.stringify(tree),
+                    timestamp,
+                    collection.id,
+                ],
+            );
+        });
+    }
+
+    /** Save targets of every file not finalized yet, for picking collision-free names. */
+    public listUnfinishedFileTargets() {
+        return this.kd.lib.db.all<{ savePath: string; path: string; asciiFilenames: number }>(
+            `SELECT c."save_path" AS "savePath", f."path" AS "path",
+                    c."ascii_filenames" AS "asciiFilenames"
+             FROM "download_file" f
+             JOIN "download_collection" c ON c."id" = f."collection_id"
+             WHERE f."status" != 'completed'`,
+        );
+    }
+
     public resetFileProgress(fileId: string) {
         const timestamp = nowIso();
         this.kd.lib.db.transaction((tx) => {
@@ -1533,6 +1644,7 @@ export class DownloadRepository {
 
     public deleteCollection(collectionId: string) {
         this.kd.lib.db.run(`DELETE FROM "download_collection" WHERE "id" = ?`, [collectionId]);
+        this.treeCache.delete(collectionId);
     }
 
     public recomputeCollectionStatus(collectionId: string) {
@@ -1609,6 +1721,37 @@ export class DownloadRepository {
         this.markCollectionStatus(collectionId, "queued");
     }
 
+    /** Unselected files are skipped until included, so including one re-checks the selection. */
+    private assertIncludedPathsUnique(collectionId: string, includedIds: string[]) {
+        const collection = this.getCollection(collectionId);
+        if (!collection || !usesMegaNodeTree(collection.provider)) {
+            return;
+        }
+        const included = new Set(includedIds);
+        this.assertUniqueDownloadPaths(
+            this.listFiles(collectionId)
+                .filter((file) => file.selected === 1 || included.has(file.id))
+                .map((file) => file.path),
+            collection.asciiFilenames === 1,
+        );
+    }
+
+    private assertUniqueDownloadPaths(paths: string[], asciiFilenames: boolean) {
+        const targets = new Map<string, string>();
+        for (const filePath of paths) {
+            const target = this.kd.lib.fs
+                .getSafeRelativePath(filePath, { asciiFilenames })
+                .toLowerCase();
+            const previous = targets.get(target);
+            if (previous !== undefined) {
+                throw new Error(
+                    `Download paths collide after sanitization: "${previous}" and "${filePath}".`,
+                );
+            }
+            targets.set(target, filePath);
+        }
+    }
+
     private buildChunks(collection: DownloadCollectionRow, file: DownloadFileRow) {
         const storedByIndex = new Map(
             this.kd.lib.db
@@ -1632,7 +1775,11 @@ export class DownloadRepository {
                 .map((chunk) => [chunk.chunkIndex, chunk]),
         );
 
-        if ((collection.provider ?? "kiosk") === "workupload") {
+        if (
+            collection.provider === "workupload" ||
+            (collection.provider === "direct" &&
+                readRangeSupported(collection.provider, file.sourceMetaJson) !== true)
+        ) {
             if (file.size <= 0) {
                 return [];
             }
@@ -1731,7 +1878,7 @@ export class DownloadRepository {
             ];
         }
 
-        if ((collection.provider ?? "kiosk") === "transfer") {
+        if (usesMegaChunkLayout(collection.provider)) {
             return transferChunkSizes(file.size).map((chunk, chunkIndex) => {
                 const stored = storedByIndex.get(chunkIndex);
                 if (stored && stored.offset === chunk.start && stored.size === chunk.size) {
@@ -1794,10 +1941,7 @@ export class DownloadRepository {
         const summary = { transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
         const activeTransferControls: Array<"pause" | "stop" | undefined> = [];
         for (const file of this.listFiles(collection.id)) {
-            const rangeSupported =
-                collection.provider === "workupload"
-                    ? tryParseWorkuploadFileSourceMeta(file.sourceMetaJson)?.rangeSupported
-                    : undefined;
+            const rangeSupported = readRangeSupported(collection.provider, file.sourceMetaJson);
             const transferControl =
                 rangeSupported === undefined ? undefined : rangeSupported ? "pause" : "stop";
             progress[file.path] = {
@@ -1832,7 +1976,10 @@ export class DownloadRepository {
 
         return {
             id: collection.id,
-            collection: rowToCollection(collection),
+            collection: rowToCollection(
+                collection,
+                this.treeCache.get(collection.id, collection.treeJson),
+            ),
             savePath: collection.savePath,
             progress,
             summary,
@@ -1841,10 +1988,13 @@ export class DownloadRepository {
             updatedAt: Date.parse(collection.updatedAt),
             elapsedMs: collection.elapsedMs,
             error: collection.error ?? undefined,
-            transferControl:
-                collection.provider === "workupload"
-                    ? aggregateTransferControls(activeTransferControls)
+            pauseReason:
+                collection.status === "paused"
+                    ? parsePauseReason(collection.pauseReasonJson)
                     : undefined,
+            transferControl: usesRangeDependentControl(collection.provider)
+                ? aggregateTransferControls(activeTransferControls)
+                : undefined,
         };
     }
 
@@ -1914,7 +2064,7 @@ export class DownloadRepository {
                 segmentSize: collections[0]?.segmentSize ?? 16 * 1024 * 1024,
                 passwordProtected: bundle.passwordPlain != null,
                 provider: "extended",
-                tree: parseTree(bundle.treeJson),
+                tree: this.treeCache.get(bundle.id, bundle.treeJson),
             },
             savePath: bundle.savePath,
             progress,
@@ -2009,4 +2159,37 @@ function bundleSelectSql() {
                    "updated_at" AS "updatedAt",
                    "error"
             FROM "download_bundle"`;
+}
+
+/** transfer.it and Mega files use fixed MEGA CDN chunk sizes instead of the collection segment size. */
+function usesMegaChunkLayout(provider: DownloadProvider | undefined) {
+    return provider === "transfer" || provider === "mega";
+}
+
+/**
+ * Trees built from MEGA nodes can hold siblings that only differ before sanitization, so the
+ * selected target paths are checked before they could overwrite each other.
+ */
+function usesMegaNodeTree(provider: DownloadProvider | undefined) {
+    return provider === "transfer" || provider === "mega";
+}
+
+export function parsePauseReason(json: string | null): DownloadPauseReason | undefined {
+    if (!json) {
+        return undefined;
+    }
+    let parsed: Partial<DownloadPauseReason>;
+    try {
+        parsed = JSON.parse(json) as Partial<DownloadPauseReason>;
+    } catch {
+        return undefined;
+    }
+    if (
+        parsed.kind !== "megaQuota" ||
+        typeof parsed.pausedAt !== "number" ||
+        (parsed.resumeAt !== null && typeof parsed.resumeAt !== "number")
+    ) {
+        return undefined;
+    }
+    return { kind: "megaQuota", pausedAt: parsed.pausedAt, resumeAt: parsed.resumeAt };
 }

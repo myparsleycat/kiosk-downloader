@@ -1,3 +1,4 @@
+import { Section, SectionTitle, SettingRow } from "@renderer/components/settings/setting-layout";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -21,7 +22,10 @@ import {
 } from "@renderer/components/ui/select";
 import { Switch } from "@renderer/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@renderer/components/ui/tabs";
+import { type SettingsSection, useAppNavigation } from "@renderer/stores/app-navigation";
 import { useUpdaterStore } from "@renderer/stores/updater";
+import type { BrowserExtensionServerStatus } from "@shared/browser-extension";
+import { getIpcErrorCause } from "@shared/download-errors";
 import {
   type AppSettings,
   AUTO_UPDATE_MODES,
@@ -50,18 +54,28 @@ import {
   UPLOAD_CHUNK_RETRY_MAX,
   UPLOAD_CHUNK_RETRY_MIN,
 } from "@shared/settings";
-import type { AppStatus } from "@shared/types";
+import type { AppStatus, MegaAccountState } from "@shared/types";
 import { formatSize } from "@shared/utils";
 import { clamp } from "es-toolkit";
-import { CpuIcon, FolderOpenIcon, PlusIcon, PowerIcon, XIcon, ZapIcon } from "lucide-react";
+import {
+  CpuIcon,
+  FolderOpenIcon,
+  PlusIcon,
+  PowerIcon,
+  UserIcon,
+  XIcon,
+  ZapIcon,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
 const SETTING_KEYS = [
   "general.runOnStartup",
   "general.runInBackground",
+  "general.defaultDownloadPath",
   "general.createCollectionSubfolder",
   "general.asciiFilenames",
+  "general.foldersFirst",
   "general.powerSaveBlockInTransfer",
   "general.shutdownAfterTransfer",
   "general.autoUpdateMode",
@@ -77,9 +91,12 @@ const SETTING_KEYS = [
   "transfer.startupResumeMode",
   "transfer.uploadStartupResumeMode",
   "transfer.startTransfersPaused",
+  "transfer.megaQuotaAutoResume",
   "transfer.downloadBandwidthLimitMibps",
   "transfer.uploadBandwidthLimitMibps",
   "network.forceIpv4",
+  "general.browserExtension",
+  "general.browserExtensionAllowedIds",
 ] as const;
 
 type SettingsState = {
@@ -89,8 +106,10 @@ type SettingsState = {
 const DEFAULT_SETTINGS: SettingsState = {
   "general.runOnStartup": false,
   "general.runInBackground": true,
+  "general.defaultDownloadPath": "",
   "general.createCollectionSubfolder": true,
   "general.asciiFilenames": false,
+  "general.foldersFirst": true,
   "general.powerSaveBlockInTransfer": true,
   "general.shutdownAfterTransfer": false,
   "general.autoUpdateMode": "auto",
@@ -106,9 +125,12 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.startupResumeMode": "auto",
   "transfer.uploadStartupResumeMode": "auto",
   "transfer.startTransfersPaused": false,
+  "transfer.megaQuotaAutoResume": false,
   "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "network.forceIpv4": true,
+  "general.browserExtension": true,
+  "general.browserExtensionAllowedIds": [],
 };
 
 const chunkRetryOptions = rangeOptions(CHUNK_RETRY_MIN, CHUNK_RETRY_MAX);
@@ -163,8 +185,9 @@ const SECTIONS = [
   { id: "general", icon: PowerIcon, title: "일반" },
   { id: "collection", icon: FolderOpenIcon, title: "컬렉션 및 저장" },
   { id: "transfer", icon: ZapIcon, title: "전송" },
+  { id: "account", icon: UserIcon, title: "계정" },
   { id: "advanced", icon: CpuIcon, title: "고급" },
-] as const;
+] as const satisfies readonly { id: SettingsSection; icon: unknown; title: string }[];
 
 function getUpdaterStatusText(options: {
   strategy: string;
@@ -213,6 +236,8 @@ export function SettingsView() {
   const isChecking = useUpdaterStore((state) => state.isChecking);
   const isDownloading = useUpdaterStore((state) => state.isDownloading);
   const setShouldPromptForUpdate = useUpdaterStore((state) => state.setShouldPromptForUpdate);
+  const settingsSection = useAppNavigation((state) => state.settingsSection);
+  const setSettingsSection = useAppNavigation((state) => state.setSettingsSection);
 
   React.useEffect(() => {
     void window.api
@@ -286,7 +311,12 @@ export function SettingsView() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Tabs defaultValue="general" orientation="vertical" className="h-full gap-0">
+      <Tabs
+        value={settingsSection}
+        onValueChange={(value) => setSettingsSection(value as SettingsSection)}
+        orientation="vertical"
+        className="h-full gap-0"
+      >
         <div className="flex h-full w-52 shrink-0 flex-col border-r bg-sidebar">
           <div className="flex items-center gap-2 px-4 py-3.5">
             <h2 className="cn-font-heading text-base font-medium text-sidebar-foreground">설정</h2>
@@ -470,6 +500,20 @@ export function SettingsView() {
                 </div>
 
                 <div className="flex flex-col gap-1">
+                  <SectionTitle title="브라우저 확장 프로그램" />
+                  <Section>
+                    <BrowserExtensionSetting
+                      enabled={settings["general.browserExtension"]}
+                      allowedIds={settings["general.browserExtensionAllowedIds"]}
+                      onEnabledChange={(value) => setSetting("general.browserExtension", value)}
+                      onAllowedIdsChange={(value) =>
+                        void setSetting("general.browserExtensionAllowedIds", value)
+                      }
+                    />
+                  </Section>
+                </div>
+
+                <div className="flex flex-col gap-1">
                   <SectionTitle title="외관" />
                   <Section>
                     <SettingRow
@@ -493,6 +537,10 @@ export function SettingsView() {
                 <div className="flex flex-col gap-1">
                   <SectionTitle title="저장" />
                   <Section>
+                    <DefaultDownloadPathSetting
+                      value={settings["general.defaultDownloadPath"]}
+                      onChange={(value) => void setSetting("general.defaultDownloadPath", value)}
+                    />
                     <SettingRow
                       title="컬렉션 이름 하위 폴더 생성"
                       description="최상위 항목이 두 개 이상일 때만 저장 경로 아래에 컬렉션 이름으로 하위 폴더를 만듭니다."
@@ -513,6 +561,24 @@ export function SettingsView() {
                           checked={settings["general.asciiFilenames"]}
                           onCheckedChange={(value) =>
                             void setSetting("general.asciiFilenames", value)
+                          }
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="파일 목록" />
+                  <Section>
+                    <SettingRow
+                      title="폴더 먼저 표시"
+                      description="컬렉션 파일 목록에서 폴더와 ZIP을 파일보다 먼저 표시합니다. 끄면 모든 항목을 같은 기준으로 함께 나열합니다."
+                      control={
+                        <Switch
+                          checked={settings["general.foldersFirst"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("general.foldersFirst", value)
                           }
                         />
                       }
@@ -743,6 +809,33 @@ export function SettingsView() {
               </div>
             </TabsContent>
 
+            <TabsContent value="account" keepMounted>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="Mega" />
+                  <MegaAccountSettings />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <SectionTitle title="Mega 다운로드" />
+                  <Section>
+                    <SettingRow
+                      title="한도 복구 시 자동 재개"
+                      description="Mega 전송 한도 초과로 일시정지된 다운로드를 한도가 복구되는 시점에 자동으로 재개합니다."
+                      control={
+                        <Switch
+                          checked={settings["transfer.megaQuotaAutoResume"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("transfer.megaQuotaAutoResume", value)
+                          }
+                        />
+                      }
+                    />
+                  </Section>
+                </div>
+              </div>
+            </TabsContent>
+
             <TabsContent value="advanced" keepMounted>
               <div className="flex flex-col gap-6">
                 <div className="flex flex-col gap-1">
@@ -824,39 +917,60 @@ function SettingSelect<T extends string>({
   );
 }
 
-function SectionTitle({ title }: { title: string }) {
-  return (
-    <h3 className="cn-font-heading px-1 pb-2 text-sm font-medium text-muted-foreground">{title}</h3>
-  );
-}
-
-function Section({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col border-l border-foreground/20 pl-4">
-      {React.Children.toArray(children).map((child, i, arr) => (
-        <React.Fragment key={i}>{child}</React.Fragment>
-      ))}
-    </div>
-  );
-}
-
-function SettingRow({
-  title,
-  description,
-  control,
+function DefaultDownloadPathSetting({
+  value,
+  onChange,
 }: {
-  title: string;
-  description: string;
-  control: React.ReactNode;
+  value: string;
+  onChange: (value: string) => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 p-3.5">
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <Label className="text-sm">{title}</Label>
-        <span className="text-xs text-muted-foreground">{description}</span>
-      </div>
-      <div className="shrink-0">{control}</div>
-    </div>
+    <SettingRow
+      title="기본 저장 경로"
+      description={
+        value ||
+        "설정하지 않으면 마지막으로 사용한 경로를 사용합니다. 처음에는 OS 다운로드 폴더를 사용합니다."
+      }
+      control={
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void window.api
+                .invoke("util:showOpenDialog", {
+                  properties: ["openDirectory", "createDirectory"],
+                  ...(value ? { defaultPath: value } : {}),
+                })
+                .then((result) => {
+                  if (!result.canceled && result.filePaths.length > 0) {
+                    onChange(result.filePaths[0]);
+                  }
+                })
+                .catch((error) => {
+                  toast.error("폴더 선택 창을 열지 못했습니다", {
+                    description: error instanceof Error ? error.message : String(error),
+                  });
+                });
+            }}
+          >
+            변경
+          </Button>
+          {value && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="기본 저장 경로 해제"
+              onClick={() => onChange("")}
+            >
+              <XIcon className="size-3.5" />
+            </Button>
+          )}
+        </div>
+      }
+    />
   );
 }
 
@@ -864,6 +978,265 @@ type PasswordRow = { id: string; value: string };
 
 function createPasswordRow(value = ""): PasswordRow {
   return { id: crypto.randomUUID(), value };
+}
+
+const MEGA_PLAN_LABELS: Record<number, string> = {
+  0: "무료",
+  1: "Pro I",
+  2: "Pro II",
+  3: "Pro III",
+  4: "Pro Lite",
+  100: "Business",
+  101: "Pro Flexi",
+};
+
+function MegaAccountSettings() {
+  const [account, setAccount] = React.useState<MegaAccountState | null>(null);
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [mfaCode, setMfaCode] = React.useState("");
+  const [mfaRequired, setMfaRequired] = React.useState(false);
+  const [pending, setPending] = React.useState(false);
+
+  React.useEffect(() => {
+    window.api
+      .invoke("mega:getAccount")
+      .then(setAccount)
+      .catch((error) => {
+        toast.error("Mega 계정 정보를 불러오지 못했습니다", {
+          description: getIpcErrorCause(error),
+        });
+      });
+    return window.api.on("mega:accountChanged", setAccount);
+  }, []);
+
+  const run = async (action: () => Promise<void>, failure: string) => {
+    setPending(true);
+    try {
+      await action();
+    } catch (error) {
+      toast.error(failure, { description: getIpcErrorCause(error) });
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const login = () =>
+    run(async () => {
+      const result = await window.api.invoke("mega:login", {
+        email,
+        password,
+        ...(mfaRequired ? { mfaCode } : {}),
+      });
+      if (result.status === "mfaRequired") {
+        setMfaRequired(true);
+        return;
+      }
+      setAccount(result.account);
+      setPassword("");
+      setMfaCode("");
+      setMfaRequired(false);
+    }, "Mega에 로그인하지 못했습니다");
+
+  if (!account) {
+    return null;
+  }
+
+  if (account.loggedIn) {
+    return (
+      <Section>
+        <SettingRow
+          title={account.email}
+          description={`요금제: ${MEGA_PLAN_LABELS[account.proLevel] ?? `유형 ${account.proLevel}`}${
+            account.persistent
+              ? ""
+              : " · 이 시스템에서는 세션을 저장할 수 없어 앱을 다시 시작하면 로그아웃됩니다."
+          }`}
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={pending}
+              onClick={() =>
+                void run(async () => {
+                  setAccount(await window.api.invoke("mega:logout"));
+                }, "Mega에서 로그아웃하지 못했습니다")
+              }
+            >
+              로그아웃
+            </Button>
+          }
+        />
+        <SettingRow
+          title="전송 한도"
+          description={
+            account.transferUsedBytes === undefined
+              ? "사용량 정보 없음"
+              : account.transferMaxBytes
+                ? `${formatSize(account.transferUsedBytes)} / ${formatSize(account.transferMaxBytes)} 사용`
+                : `${formatSize(account.transferUsedBytes)} 사용`
+          }
+          control={
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={pending}
+              onClick={() =>
+                void run(async () => {
+                  setAccount(await window.api.invoke("mega:refreshAccount"));
+                }, "Mega 계정 정보를 불러오지 못했습니다")
+              }
+            >
+              새로고침
+            </Button>
+          }
+        />
+      </Section>
+    );
+  }
+
+  return (
+    <Section>
+      <form
+        className="flex flex-col gap-3 p-3.5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void login();
+        }}
+      >
+        <span className="text-xs text-muted-foreground">
+          로그인하면 Mega 다운로드에 계정의 전송 한도가 적용됩니다. 비밀번호는 저장하지 않습니다.
+        </span>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="mega-email">이메일</Label>
+          <Input
+            id="mega-email"
+            type="email"
+            autoComplete="username"
+            value={email}
+            disabled={pending}
+            onChange={(event) => {
+              setEmail(event.target.value);
+              setMfaRequired(false);
+              setMfaCode("");
+            }}
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="mega-password">비밀번호</Label>
+          <Input
+            id="mega-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            disabled={pending}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </div>
+        {mfaRequired && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="mega-mfa">2단계 인증 코드</Label>
+            <Input
+              id="mega-mfa"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={mfaCode}
+              disabled={pending}
+              onChange={(event) => setMfaCode(event.target.value)}
+            />
+          </div>
+        )}
+        <div>
+          <Button
+            type="submit"
+            size="sm"
+            disabled={pending || !email.trim() || !password || (mfaRequired && !mfaCode.trim())}
+          >
+            로그인
+          </Button>
+        </div>
+      </form>
+    </Section>
+  );
+}
+
+function BrowserExtensionSetting({
+  enabled,
+  allowedIds,
+  onEnabledChange,
+  onAllowedIdsChange,
+}: {
+  enabled: boolean;
+  allowedIds: string[];
+  onEnabledChange: (value: boolean) => Promise<void>;
+  onAllowedIdsChange: (value: string[]) => void;
+}) {
+  const [status, setStatus] = React.useState<BrowserExtensionServerStatus | null>(null);
+
+  const refreshStatus = React.useCallback(() => {
+    window.api
+      .invoke("browserExtension:getStatus")
+      .then(setStatus)
+      .catch((error) => {
+        toast.error("브라우저 확장 연동 상태를 불러오지 못했습니다", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, []);
+
+  React.useEffect(refreshStatus, [refreshStatus]);
+
+  const statusText = !status?.enabled
+    ? (status?.error ?? "연동이 꺼져 있습니다.")
+    : `127.0.0.1:${status.port}에서 연결을 받고 있습니다.`;
+
+  return (
+    <>
+      <SettingRow
+        title="브라우저 확장 연동"
+        description={`kioex 확장 프로그램에서 보낸 링크를 받습니다. ${statusText}`}
+        control={
+          <Switch
+            checked={enabled}
+            onCheckedChange={(value) => void onEnabledChange(value).then(refreshStatus)}
+          />
+        }
+      />
+      <div className="flex flex-col gap-2 p-3.5">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <Label className="text-sm">허용된 확장 프로그램</Label>
+          <span className="text-xs text-muted-foreground">
+            처음 연결할 때 승인한 확장 프로그램 ID입니다. 삭제하면 다음 연결 시 다시 승인을
+            요청합니다.
+          </span>
+        </div>
+        {allowedIds.length === 0 ? (
+          <span className="text-xs text-muted-foreground">없음</span>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {allowedIds.map((id) => (
+              <div key={id} className="flex items-center gap-1.5">
+                <code className="flex-1 truncate rounded-md bg-muted px-2 py-1.5 text-xs">
+                  {id}
+                </code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="shrink-0"
+                  onClick={() => onAllowedIdsChange(allowedIds.filter((entry) => entry !== id))}
+                >
+                  <XIcon className="size-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
 }
 
 function CollectionPasswordListSetting({
