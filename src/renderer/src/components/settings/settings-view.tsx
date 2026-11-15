@@ -794,7 +794,7 @@ export function SettingsView() {
                       }
                     />
                     <SettingRow
-                      title="시작 시 이어받기"
+                      title="시작 시 업로드 재개"
                       description="앱 시작 시 이전 업로드를 자동으로 다시 시작할지 선택합니다."
                       control={
                         <SettingSelect
