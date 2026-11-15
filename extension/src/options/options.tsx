@@ -60,7 +60,7 @@ export function Options() {
           <Section>
             <SettingRow
               title="링크 버튼 표시"
-              description="Kiosk Downloader가 지원하는 링크 오른쪽에 다운로드 버튼을 표시합니다."
+              description="지원하는 링크 옆에 다운로드 버튼을 표시합니다."
               control={
                 <Switch
                   checked={settings.linkButtons.enabled}
@@ -70,7 +70,7 @@ export function Options() {
             />
             <SettingRow
               title="버튼 클릭 동작"
-              description="앱으로 보내면 앱의 새 다운로드 화면에서 확인한 뒤 시작합니다. 바로 다운로드를 고르면 페이지 위에 파일 목록을 표시하고, 선택한 파일을 앱이 마지막 저장 위치로 바로 받습니다."
+              description={`${LINK_CLICK_ACTION_LABELS.send}: 앱의 새 다운로드 화면에서 확인 후 시작합니다.\n${LINK_CLICK_ACTION_LABELS.popover}: 페이지에서 고른 파일을 마지막 저장 위치에 다운로드합니다.`}
               control={
                 <Select
                   items={LINK_CLICK_ACTIONS.map((value) => ({
@@ -104,7 +104,7 @@ export function Options() {
                 title={LINK_PROVIDER_LABELS[provider]}
                 description={
                   provider === "direct"
-                    ? "아래 확장자로 끝나는 파일 링크에 버튼을 표시합니다. 인코딩된 링크는 확장자와 관계없이 표시합니다."
+                    ? "아래 확장자의 파일 링크에 버튼을 표시합니다. 인코딩된 링크는 확장자와 무관합니다."
                     : `${LINK_PROVIDER_LABELS[provider]} 링크에 버튼을 표시합니다.`
                 }
                 control={
@@ -131,7 +131,7 @@ export function Options() {
             />
             <SettingRow
               title="링크 안의 인코딩된 주소 해석"
-              description="링크 주소나 리다이렉트 파라미터에 base64(중첩 포함)로 인코딩된 링크를 찾습니다."
+              description="링크 주소 안에 base64로 인코딩된 링크를 찾습니다."
               control={
                 <Switch
                   checked={settings.linkButtons.decodeLinks}
@@ -142,7 +142,7 @@ export function Options() {
             />
             <SettingRow
               title="본문의 base64 문자열 해석"
-              description="페이지 본문에 적힌 base64 문자열을 디코딩해 지원하는 링크이면 버튼을 표시합니다."
+              description="본문의 base64 문자열이 지원하는 링크이면 버튼을 표시합니다."
               control={
                 <Switch
                   checked={settings.linkButtons.decodeText}
@@ -159,7 +159,7 @@ export function Options() {
           <Section>
             <SettingRow
               title="브라우저 다운로드 가로채기"
-              description="브라우저에서 시작된 다운로드를 취소하고 Kiosk Downloader로 보냅니다. 앱에 연결할 수 없으면 브라우저가 그대로 받습니다."
+              description="브라우저 다운로드를 앱으로 보냅니다. 앱에 연결할 수 없으면 브라우저에서 다운로드합니다."
               control={
                 <Switch
                   checked={settings.intercept.enabled}
@@ -178,7 +178,7 @@ export function Options() {
             />
             <SettingRow
               title="최소 파일 크기 (MiB)"
-              description="이보다 작은 파일은 브라우저가 받습니다. 0이면 크기와 관계없이 가로챕니다."
+              description="이보다 작은 파일은 가로채지 않습니다. 0이면 제한이 없습니다."
               control={
                 <MinSizeInput
                   key={settings.intercept.minSizeMiB}
@@ -191,7 +191,7 @@ export function Options() {
             <ListSetting
               key={settings.intercept.excludedHosts.join()}
               title="제외 사이트"
-              description="이 도메인(하위 도메인 포함)의 다운로드와 이 도메인에서 시작된 다운로드는 가로채지 않습니다. 쉼표나 공백으로 구분하며, *는 임의의 문자열과 일치합니다."
+              description="파일 주소나 시작한 페이지가 이 도메인(하위 도메인 포함)이면 가로채지 않습니다. *는 임의의 문자열과 일치합니다."
               placeholder="example.com, *.example.org, cdn*.example.net"
               value={settings.intercept.excludedHosts}
               disabled={!settings.intercept.enabled}
@@ -200,7 +200,7 @@ export function Options() {
             />
             <SettingRow
               title="앱이 꺼져 있으면 실행"
-              description="Kiosk Downloader가 실행 중이 아니면 앱을 실행한 뒤 보냅니다. 끄면 브라우저가 그대로 받습니다."
+              description="앱이 실행 중이 아니면 실행한 뒤 보냅니다."
               control={
                 <Switch
                   checked={settings.intercept.launchApp}

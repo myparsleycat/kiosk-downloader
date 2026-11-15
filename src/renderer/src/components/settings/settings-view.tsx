@@ -173,9 +173,9 @@ const autoUpdateModeLabels: Record<AutoUpdateMode, string> = {
 };
 
 const autoUpdateModeDescriptions: Record<AutoUpdateMode, string> = {
-  auto: "업데이트를 자동으로 확인하고 다운로드합니다. 설치는 확인 후 진행됩니다.",
-  notify: "업데이트가 있으면 알림만 표시하고, 다운로드는 직접 시작합니다.",
-  off: "자동 확인을 하지 않습니다. 수동으로 확인할 수 있습니다.",
+  auto: "업데이트를 자동으로 다운로드하고, 설치 전에 확인합니다.",
+  notify: "업데이트가 있으면 알림만 표시합니다.",
+  off: "업데이트를 자동으로 확인하지 않습니다.",
 };
 
 const autoUpdateModeOptions = AUTO_UPDATE_MODES.map((value) => ({
@@ -353,7 +353,7 @@ export function SettingsView() {
                     {appStatus && !appStatus.isPortable && (
                       <SettingRow
                         title="시작 시 실행"
-                        description="시스템 시작 시 Kiosk Downloader를 자동으로 실행합니다."
+                        description="시스템 시작 시 앱을 실행합니다."
                         control={
                           <Switch
                             checked={settings["general.runOnStartup"]}
@@ -520,7 +520,6 @@ export function SettingsView() {
                   <Section>
                     <SettingRow
                       title="테마"
-                      description="앱의 색상 테마를 선택합니다."
                       control={
                         <SettingSelect
                           options={themeOptions}
@@ -545,7 +544,7 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="컬렉션 이름 하위 폴더 생성"
-                      description="최상위 항목이 두 개 이상일 때만 저장 경로 아래에 컬렉션 이름으로 하위 폴더를 만듭니다."
+                      description="최상위 항목이 두 개 이상이면 컬렉션 이름으로 하위 폴더를 만듭니다."
                       control={
                         <Switch
                           checked={settings["general.createCollectionSubfolder"]}
@@ -557,7 +556,7 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="ASCII 파일명으로 저장"
-                      description="다운로드 파일·폴더 이름에서 비ASCII 문자를 유사 ASCII 또는 _로 바꿉니다. 새로 시작하는 다운로드에만 적용됩니다."
+                      description="파일·폴더 이름의 비ASCII 문자를 비슷한 ASCII 문자나 _로 바꿉니다."
                       control={
                         <Switch
                           checked={settings["general.asciiFilenames"]}
@@ -575,7 +574,7 @@ export function SettingsView() {
                   <Section>
                     <SettingRow
                       title="폴더 먼저 표시"
-                      description="컬렉션 파일 목록에서 폴더와 ZIP을 파일보다 먼저 표시합니다. 끄면 모든 항목을 같은 기준으로 함께 나열합니다."
+                      description="파일 목록에서 폴더와 ZIP을 파일보다 위에 표시합니다."
                       control={
                         <Switch
                           checked={settings["general.foldersFirst"]}
@@ -593,7 +592,7 @@ export function SettingsView() {
                   <Section>
                     <SettingRow
                       title="비밀번호 자동 시도"
-                      description="보호된 컬렉션 로드 시 등록된 비밀번호를 병렬로 시도합니다."
+                      description="보호된 컬렉션을 열 때 등록된 비밀번호를 시도합니다."
                       control={
                         <Switch
                           checked={settings["general.autoTryCollectionPasswords"]}
@@ -619,7 +618,7 @@ export function SettingsView() {
                   <Section>
                     <SettingRow
                       title="전송 중 절전 방지"
-                      description="다운로드 진행 중 시스템이 절전 모드로 전환되지 않도록 합니다."
+                      description="전송 중에는 시스템이 절전 모드로 전환되지 않습니다."
                       control={
                         <Switch
                           checked={settings["general.powerSaveBlockInTransfer"]}
@@ -631,7 +630,7 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="추가 시 일시정지"
-                      description="새 전송을 추가하면 바로 시작하지 않고 일시정지 상태로 대기합니다."
+                      description="새 전송을 일시정지 상태로 추가합니다."
                       control={
                         <Switch
                           checked={settings["transfer.startTransfersPaused"]}
@@ -665,7 +664,7 @@ export function SettingsView() {
                   <Section>
                     <SettingRow
                       title="요청 풀 크기"
-                      description="모든 업로드·다운로드의 실제 데이터 전송 요청이 공유하는 동시 실행 상한입니다."
+                      description="업로드와 다운로드 전체의 최대 동시 요청 수입니다."
                       control={
                         <NumberSetting
                           value={settings["transfer.requestPoolSize"]}
@@ -713,7 +712,7 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="스트림 쓰기 배치"
-                      description="스트림으로 받은 데이터를 디스크에 쓰기 전에 모으는 크기입니다."
+                      description="디스크에 쓰기 전에 모으는 데이터 크기입니다."
                       control={
                         <SettingSelect
                           options={streamWriteBatchOptions}
@@ -745,7 +744,7 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="시작 시 이어받기"
-                      description="앱 시작 시 이전 다운로드를 자동으로 다시 시작할지 선택합니다."
+                      description="앱 시작 시 중단된 다운로드를 재개하는 방식입니다."
                       control={
                         <SettingSelect
                           options={startupResumeModeOptions}
@@ -795,7 +794,7 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="시작 시 업로드 재개"
-                      description="앱 시작 시 이전 업로드를 자동으로 다시 시작할지 선택합니다."
+                      description="앱 시작 시 중단된 업로드를 재개하는 방식입니다."
                       control={
                         <SettingSelect
                           options={startupResumeModeOptions}
@@ -823,7 +822,7 @@ export function SettingsView() {
                   <Section>
                     <SettingRow
                       title="한도 복구 시 자동 재개"
-                      description="Mega 전송 한도 초과로 일시정지된 다운로드를 한도가 복구되는 시점에 자동으로 재개합니다."
+                      description="전송 한도 초과로 일시정지된 Mega 다운로드를 한도가 복구되면 재개합니다."
                       control={
                         <Switch
                           checked={settings["transfer.megaQuotaAutoResume"]}
@@ -845,7 +844,7 @@ export function SettingsView() {
                   <Section>
                     <SettingRow
                       title="IPv4 연결 우선"
-                      description="다운로드·업로드 요청을 IPv4로만 시도합니다. IPv6 경로에서 연결이 멈추는 문제가 있다면 켜두세요."
+                      description="다운로드·업로드 요청에 IPv4만 사용합니다. IPv6 연결이 멈출 때 켭니다."
                       control={
                         <Switch
                           checked={settings["network.forceIpv4"]}
@@ -855,7 +854,7 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="연결 오류를 동시 연결 제한으로 처리"
-                      description="직접 링크 다운로드에서 연결 직후 끊김(ECONNRESET 등)을 서버의 동시 연결 제한으로 판단하고, 해당 서버에 보내는 동시 요청 수를 줄입니다. 변경 사항은 이후 시작하는 다운로드부터 적용됩니다."
+                      description="직접 링크 다운로드에서 연결이 바로 끊기면(ECONNRESET 등) 해당 서버의 동시 요청 수를 줄입니다."
                       control={
                         <Switch
                           checked={settings["network.connectionErrorsAsConcurrencyLimit"]}
@@ -867,7 +866,6 @@ export function SettingsView() {
                     />
                     <SettingRow
                       title="로그 레벨"
-                      description="앱 로그의 상세 정도를 설정합니다."
                       control={
                         <SettingSelect
                           options={logLevelOptions}
@@ -942,8 +940,7 @@ function DefaultDownloadPathSetting({
     <SettingRow
       title="기본 저장 경로"
       description={
-        value ||
-        "설정하지 않으면 마지막으로 사용한 경로를 사용합니다. 처음에는 OS 다운로드 폴더를 사용합니다."
+        value || "비워 두면 마지막으로 사용한 경로(처음에는 다운로드 폴더)를 사용합니다."
       }
       control={
         <div className="flex items-center gap-1">
@@ -1062,9 +1059,7 @@ function MegaAccountSettings() {
         <SettingRow
           title={account.email}
           description={`요금제: ${MEGA_PLAN_LABELS[account.proLevel] ?? `유형 ${account.proLevel}`}${
-            account.persistent
-              ? ""
-              : " · 이 시스템에서는 세션을 저장할 수 없어 앱을 다시 시작하면 로그아웃됩니다."
+            account.persistent ? "" : " · 세션을 저장할 수 없어 앱을 다시 시작하면 로그아웃됩니다."
           }`}
           control={
             <Button
@@ -1204,13 +1199,13 @@ function BrowserExtensionSetting({
 
   const statusText = !status?.enabled
     ? (status?.error ?? "연동이 꺼져 있습니다.")
-    : `127.0.0.1:${status.port}에서 연결을 받고 있습니다.`;
+    : `127.0.0.1:${status.port}에서 대기 중입니다.`;
 
   return (
     <>
       <SettingRow
         title="브라우저 확장 연동"
-        description={`kioex 확장 프로그램에서 보낸 링크를 받습니다. ${statusText}`}
+        description={`kioex 확장 프로그램의 링크를 수신합니다. ${statusText}`}
         control={
           <Switch
             checked={enabled}
