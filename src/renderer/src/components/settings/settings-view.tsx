@@ -1121,7 +1121,7 @@ function MegaAccountSettings() {
         }}
       >
         <span className="text-xs text-muted-foreground">
-          로그인하면 Mega 다운로드에 계정의 전송 한도가 적용됩니다. 비밀번호는 저장하지 않습니다.
+          로그인하면 Mega 다운로드에 계정의 전송 한도가 적용됩니다.
         </span>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="mega-email">이메일</Label>
