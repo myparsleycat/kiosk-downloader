@@ -277,6 +277,77 @@ describe("SlowChunkMonitor", () => {
         },
     );
 
+    it.each(["bandwidth-wait", "disk-write"] as const)(
+        "still detects a stall while the reader flips through %s around every read",
+        (phase) => {
+            const monitor = new SlowChunkMonitor();
+            const attemptController = new AbortController();
+            const transfer = monitor.register({
+                fileId: "file-a",
+                chunkIndex: 0,
+                chunkSize: 1024 * 1024,
+                attemptController,
+                slowReconnects: 0,
+            });
+
+            for (let elapsed = 0; elapsed < 14_900; elapsed += 100) {
+                monitor.setPhase(transfer.key, phase);
+                monitor.setPhase(transfer.key, "network");
+                vi.advanceTimersByTime(100);
+            }
+            expect(attemptController.signal.aborted).toBe(false);
+
+            for (let elapsed = 0; elapsed < 1_100; elapsed += 100) {
+                monitor.setPhase(transfer.key, phase);
+                monitor.setPhase(transfer.key, "network");
+                vi.advanceTimersByTime(100);
+            }
+            expect(transfer.detect).toBe("stall");
+            expect(attemptController.signal.aborted).toBe(true);
+
+            monitor.unregister(transfer.key);
+        },
+    );
+
+    it("still aborts a relatively slow chunk while readers flip phases around every read", () => {
+        const monitor = new SlowChunkMonitor();
+        const chunkSize = 64 * 1024 * 1024;
+        const entries = [0, 1, 2].map((chunkIndex) => ({
+            controller: new AbortController(),
+            bytesPerStep: chunkIndex === 2 ? 1_000 : 51_200,
+            bytes: 0,
+            transfer: undefined as unknown as ReturnType<SlowChunkMonitor["register"]>,
+            chunkIndex,
+        }));
+        for (const entry of entries) {
+            entry.transfer = monitor.register({
+                fileId: "file-a",
+                chunkIndex: entry.chunkIndex,
+                chunkSize,
+                attemptController: entry.controller,
+                slowReconnects: 0,
+            });
+        }
+
+        for (let elapsed = 0; elapsed < 8_000; elapsed += 100) {
+            vi.advanceTimersByTime(100);
+            for (const entry of entries) {
+                monitor.setPhase(entry.transfer.key, "bandwidth-wait");
+                monitor.setPhase(entry.transfer.key, "network");
+                entry.bytes += entry.bytesPerStep;
+                monitor.recordSample(entry.transfer.key, entry.bytes);
+            }
+        }
+
+        expect(entries[2].transfer.detect).toBe("relative");
+        expect(entries[2].controller.signal.aborted).toBe(true);
+        expect(entries[0].controller.signal.aborted).toBe(false);
+        expect(entries[1].controller.signal.aborted).toBe(false);
+        for (const entry of entries) {
+            monitor.unregister(entry.transfer.key);
+        }
+    });
+
     it("keeps transferred bytes monotonic when a stale sample reports fewer bytes", () => {
         const monitor = new SlowChunkMonitor();
         const transfer = monitor.register({

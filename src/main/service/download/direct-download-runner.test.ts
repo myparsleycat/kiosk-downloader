@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TransferFileRegistration } from "./transfer-chunk-pool";
 import type { DownloadChunkRow } from "./types";
 
-import { TransferScheduler } from "../transfer-request-pool";
+import { TransferRateLimitError, TransferScheduler } from "../transfer-request-pool";
 import { DirectDownloadRunner } from "./direct-download-runner";
 import { DirectHttpClient } from "./direct-http-client";
 
@@ -25,6 +25,7 @@ async function createHarness(options: {
     size?: number;
     downloadedBytes?: number;
     chunkStatus?: DownloadChunkRow["status"];
+    connectionErrorsAsConcurrencyLimit?: boolean;
 }) {
     const dir = await fse.mkdtemp(path.join(os.tmpdir(), "direct-runner-"));
     tempDirs.push(dir);
@@ -78,6 +79,9 @@ async function createHarness(options: {
     const kd = {
         http: { payloadRequest: options.payloadRequest },
         logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() },
+        setting: {
+            get: vi.fn(async () => options.connectionErrorsAsConcurrencyLimit ?? false),
+        },
         service: {
             transfer: {
                 requestPool: new TransferScheduler(8),
@@ -304,6 +308,27 @@ describe("DirectDownloadRunner", () => {
         expect(headers.get("cookie")).toBe("a=b");
         expect(harness.finalizeFile).toHaveBeenCalledOnce();
     });
+
+    it.each([
+        [false, TypeError],
+        [true, TransferRateLimitError],
+    ] as const)(
+        "reports a reset connection as a concurrency rejection only when enabled (%s)",
+        async (enabled, expected) => {
+            const payloadRequest = vi.fn(async () => {
+                throw new TypeError("fetch failed", {
+                    cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }),
+                });
+            });
+            const harness = await createHarness({
+                rangeSupported: true,
+                payloadRequest,
+                connectionErrorsAsConcurrencyLimit: enabled,
+            });
+
+            await expect(harness.run()).rejects.toBeInstanceOf(expected);
+        },
+    );
 
     it("resets and restarts once when the remote file changed", async () => {
         const payloadRequest = vi

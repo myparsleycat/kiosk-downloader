@@ -62,6 +62,17 @@ export class TransferService {
         providerId: TransferProviderRequestId,
         collectionIds: string[],
     ) {
+        // The host limit is reported only for a single collection: grouped collections may
+        // reach different hosts, so there is no one limit to show for their sum.
+        if (collectionIds.length === 1) {
+            return (
+                this.requestPool.getCollectionUsage({
+                    direction,
+                    providerId,
+                    collectionId: collectionIds[0],
+                }) ?? undefined
+            );
+        }
         let inFlight = 0;
         let pending = 0;
         let found = false;

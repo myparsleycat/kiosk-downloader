@@ -181,7 +181,11 @@ export class DirectDownloadRunner {
         }
 
         const partWriter = new PartFileWriter(this.deps.getPartPath(collection, file));
-        const source = this.createRangeSource(collection, file);
+        const source = this.createRangeSource(
+            collection,
+            file,
+            await this.deps.kd.setting.get("network.connectionErrorsAsConcurrencyLimit"),
+        );
         // The pool aborts the controller it is given when the file fails. Hand it a child so
         // the file's own signal stays usable for the re-probe after a remote change.
         const controller = new AbortController();
@@ -267,16 +271,18 @@ export class DirectDownloadRunner {
     private createRangeSource(
         collection: DownloadCollectionRow,
         file: DownloadFileRow,
+        connectionErrorsAsConcurrencyLimit: boolean,
     ): DirectRangeSource {
         const kd = this.deps.kd;
         const api = this.deps.api;
         const meta = parseDirectFileSourceMeta(file.sourceMetaJson);
         const headers = parseRequestHeaders(collection);
         const ifRange = meta.rangeSupported ? directIfRangeValidator(meta) : undefined;
-        const requestContext = (signal: AbortSignal) => ({
+        const requestContext = (signal: AbortSignal, host: string) => ({
             collectionId: collection.id,
             direction: "download" as const,
             providerId: "direct-download" as const,
+            host,
             signal,
         });
         // Shared by concurrent chunk workers; each attempt keeps its own copy of the URL it used.
@@ -296,20 +302,28 @@ export class DirectDownloadRunner {
                     : undefined;
 
                 let requestUrl = resolvedUrl;
+                // Charged to the host that served the body last time: the expired-URL fallback
+                // below requests sourceUrl, which redirects back to that serving host.
+                const host = new URL(resolvedUrl).host;
                 for (let attempt = 0; attempt < 2; attempt += 1) {
                     try {
                         onPhaseChange("request-wait");
                         yield* kd.service.transfer.requestPool.runPayloadStream(
-                            requestContext(signal),
+                            requestContext(signal, host),
                             async function* () {
                                 onPhaseChange("network");
-                                const opened = await openOrThrottle(api, requestUrl, {
-                                    headers,
-                                    cookieOriginUrl: collection.sourceUrl,
-                                    range,
-                                    ifRange,
-                                    signal,
-                                });
+                                const opened = await openOrThrottle(
+                                    api,
+                                    requestUrl,
+                                    {
+                                        headers,
+                                        cookieOriginUrl: collection.sourceUrl,
+                                        range,
+                                        ifRange,
+                                        signal,
+                                    },
+                                    connectionErrorsAsConcurrencyLimit,
+                                );
                                 resolvedUrl = opened.url;
                                 const response = opened.response;
                                 try {
@@ -361,6 +375,7 @@ async function openOrThrottle(
     api: DirectHttpClient,
     url: string,
     options: Parameters<DirectHttpClient["open"]>[1],
+    connectionErrorsAsConcurrencyLimit: boolean,
 ) {
     try {
         return await api.open(url, options);
@@ -371,8 +386,32 @@ async function openOrThrottle(
                 "서버가 다운로드 요청을 제한했습니다. 잠시 후 다시 시도해 주세요.",
             );
         }
+        if (connectionErrorsAsConcurrencyLimit && isConnectionRejection(error)) {
+            throw new TransferRateLimitError(
+                undefined,
+                `서버 연결이 끊어졌습니다(${error.cause.code}). 잠시 후 다시 시도해 주세요.`,
+            );
+        }
         throw error;
     }
+}
+
+const CONNECTION_REJECTION_CODES = new Set([
+    "ECONNRESET",
+    "ECONNABORTED",
+    "EPIPE",
+    "UND_ERR_SOCKET",
+]);
+
+// Undici's fetch rejects with TypeError("fetch failed") and puts the socket error in `cause`.
+// Timeouts, refused connections (server or port down) and errors while reading the body are
+// deliberately not treated as rejections.
+function isConnectionRejection(error: unknown): error is TypeError & { cause: { code: string } } {
+    if (!(error instanceof TypeError) || typeof error.cause !== "object" || !error.cause) {
+        return false;
+    }
+    const code = (error.cause as { code?: unknown }).code;
+    return typeof code === "string" && CONNECTION_REJECTION_CODES.has(code);
 }
 
 // Servers may ignore If-Range, and a retry without Range re-reads from byte 0, so every

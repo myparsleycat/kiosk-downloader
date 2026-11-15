@@ -26,6 +26,15 @@ export type InFlightChunkTransfer = {
     peerMedianBps: number;
     phase: SlowChunkTransferPhase;
     phaseStartedAt: number;
+    /** First entry into "network", on the network clock. */
+    networkStartedAt: number | null;
+    /** When the transfer last left "network"; kept across consecutive non-network phases. */
+    pausedAt: number | null;
+    /**
+     * Total time spent outside "network". lastProgressAt, networkStartedAt and sample timestamps
+     * use the network clock, which is wall time minus this offset.
+     */
+    pausedTotalMs: number;
 };
 
 type ByteSample = { t: number; b: number };
@@ -169,6 +178,7 @@ export class SlowChunkMonitor {
             0,
             Math.min(input.chunkSize, input.initialTransferredBytes ?? 0),
         );
+        const phase = input.phase ?? "network";
         const transfer: InFlightChunkTransfer = {
             key,
             fileId: input.fileId,
@@ -186,8 +196,11 @@ export class SlowChunkMonitor {
             detect: null,
             chunkSpeedBps: 0,
             peerMedianBps: 0,
-            phase: input.phase ?? "network",
+            phase,
             phaseStartedAt: now,
+            networkStartedAt: phase === "network" ? now : null,
+            pausedAt: null,
+            pausedTotalMs: 0,
         };
         this.inFlightTransfers.set(key, transfer);
         this.ensureMonitor();
@@ -200,15 +213,15 @@ export class SlowChunkMonitor {
             return;
         }
 
-        const now = Date.now();
+        const networkNow = Date.now() - transfer.pausedTotalMs;
         const normalized = Math.max(transfer.transferredBytes, transferredBytes);
         if (normalized > transfer.transferredBytes) {
-            transfer.lastProgressAt = now;
+            transfer.lastProgressAt = networkNow;
         }
         transfer.transferredBytes = normalized;
-        transfer.samples.push({ t: now, b: normalized });
+        transfer.samples.push({ t: networkNow, b: normalized });
         transfer.samples = transfer.samples.filter(
-            (sample) => now - sample.t <= SLOW_CHUNK_SPEED_WINDOW_MS,
+            (sample) => networkNow - sample.t <= SLOW_CHUNK_SPEED_WINDOW_MS,
         );
     }
 
@@ -219,13 +232,29 @@ export class SlowChunkMonitor {
         }
 
         const now = Date.now();
+        const leavingNetwork = transfer.phase === "network";
         transfer.phase = phase;
         transfer.phaseStartedAt = now;
-        transfer.slowTickCount = 0;
-        if (phase === "network") {
-            transfer.lastProgressAt = now;
-            transfer.samples = [{ t: now, b: transfer.transferredBytes }];
+        if (leavingNetwork) {
+            transfer.pausedAt = now;
+            return;
         }
+        if (phase !== "network") {
+            return;
+        }
+
+        // Readers flip to bandwidth-wait or disk-write around every read and write batch, so a
+        // return to network must keep the observation history and only skip the paused time;
+        // restarting it here would keep every chunk inside the minimum observe window forever.
+        if (transfer.networkStartedAt === null || transfer.pausedAt === null) {
+            const networkNow = now - transfer.pausedTotalMs;
+            transfer.networkStartedAt = networkNow;
+            transfer.lastProgressAt = networkNow;
+            transfer.samples = [{ t: networkNow, b: transfer.transferredBytes }];
+            return;
+        }
+        transfer.pausedTotalMs += now - transfer.pausedAt;
+        transfer.pausedAt = null;
     }
 
     public unregister(key: string) {
@@ -267,7 +296,7 @@ export class SlowChunkMonitor {
         const now = Date.now();
         const scored = entries.map((entry) => ({
             entry,
-            speed: speedFromSamples(entry.samples, now),
+            speed: speedFromSamples(entry.samples, now - entry.pausedTotalMs),
         }));
 
         const stallCandidates: SlowAbortCandidate[] = [];
@@ -277,12 +306,13 @@ export class SlowChunkMonitor {
             if (entry.abortReason !== null || entry.attemptController.signal.aborted) {
                 continue;
             }
-            if (entry.phase !== "network") {
+            if (entry.phase !== "network" || entry.networkStartedAt === null) {
                 entry.slowTickCount = 0;
                 continue;
             }
 
-            const observedMs = now - Math.max(entry.startedAt, entry.phaseStartedAt);
+            const networkNow = now - entry.pausedTotalMs;
+            const observedMs = networkNow - entry.networkStartedAt;
             if (observedMs < SLOW_CHUNK_MIN_OBSERVE_MS) {
                 entry.slowTickCount = 0;
                 continue;
@@ -303,7 +333,7 @@ export class SlowChunkMonitor {
             const stallTimeoutMs = nearComplete
                 ? SLOW_CHUNK_NEAR_COMPLETE_STALL_TIMEOUT_MS
                 : SLOW_CHUNK_STALL_TIMEOUT_MS;
-            const isStalled = now - entry.lastProgressAt >= stallTimeoutMs;
+            const isStalled = networkNow - entry.lastProgressAt >= stallTimeoutMs;
             if (isStalled) {
                 entry.slowTickCount = 0;
                 stallCandidates.push({

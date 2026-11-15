@@ -95,6 +95,7 @@ const SETTING_KEYS = [
   "transfer.downloadBandwidthLimitMibps",
   "transfer.uploadBandwidthLimitMibps",
   "network.forceIpv4",
+  "network.connectionErrorsAsConcurrencyLimit",
   "general.browserExtension",
   "general.browserExtensionAllowedIds",
 ] as const;
@@ -129,6 +130,7 @@ const DEFAULT_SETTINGS: SettingsState = {
   "transfer.downloadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "transfer.uploadBandwidthLimitMibps": BANDWIDTH_LIMIT_MIBPS_DEFAULT,
   "network.forceIpv4": true,
+  "network.connectionErrorsAsConcurrencyLimit": false,
   "general.browserExtension": true,
   "general.browserExtensionAllowedIds": [],
 };
@@ -848,6 +850,18 @@ export function SettingsView() {
                         <Switch
                           checked={settings["network.forceIpv4"]}
                           onCheckedChange={(value) => void setSetting("network.forceIpv4", value)}
+                        />
+                      }
+                    />
+                    <SettingRow
+                      title="연결 오류를 동시 연결 제한으로 처리"
+                      description="직접 링크 다운로드에서 연결 직후 끊김(ECONNRESET 등)을 서버의 동시 연결 제한으로 판단하고, 해당 서버에 보내는 동시 요청 수를 줄입니다. 변경 사항은 이후 시작하는 다운로드부터 적용됩니다."
+                      control={
+                        <Switch
+                          checked={settings["network.connectionErrorsAsConcurrencyLimit"]}
+                          onCheckedChange={(value) =>
+                            void setSetting("network.connectionErrorsAsConcurrencyLimit", value)
+                          }
                         />
                       }
                     />

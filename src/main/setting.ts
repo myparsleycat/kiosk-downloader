@@ -477,6 +477,12 @@ export class Setting {
                     this.kd.http.setForceIpv4(value);
                 },
             },
+            "network.connectionErrorsAsConcurrencyLimit": {
+                definition: APP_SETTINGS["network.connectionErrorsAsConcurrencyLimit"],
+                getDefault: () => false,
+                fromStored: (value) => parseBooleanSetting(value, false),
+                toStored: (value) => String(value),
+            },
         };
 
         return this.settingSpecs;

@@ -316,19 +316,243 @@ describe("TransferScheduler", () => {
     it("ends a direct-download rate-limit streak after a success", async () => {
         vi.useFakeTimers();
         const scheduler = new TransferScheduler(4);
-        const directContext = context("direct-download", "direct");
+        const requestContext = directContext("direct", "files.test");
 
         for (let episode = 0; episode < 3; episode += 1) {
             const error = new TransferRateLimitError(undefined, "rate limited");
             await expect(
-                scheduler.runPayload(directContext, async () => {
+                scheduler.runPayload(requestContext, async () => {
                     throw error;
                 }),
             ).rejects.toBe(error);
             expect(error.state).toMatchObject({ consecutiveRateLimits: 1, terminal: false });
             await vi.advanceTimersByTimeAsync(error.state?.cooldownMs ?? 0);
-            await scheduler.runPayload(directContext, async () => undefined);
+            await scheduler.runPayload(requestContext, async () => undefined);
         }
+    });
+
+    it("learns a direct host limit from concurrent rejections without pausing the host", async () => {
+        const scheduler = new TransferScheduler(16);
+        const gates = Array.from({ length: 8 }, deferred);
+        let active = 0;
+        const run = (gate: ReturnType<typeof deferred>) =>
+            scheduler.runPayload(directContext("a", "files.test"), async () => {
+                active += 1;
+                try {
+                    await gate.promise;
+                } finally {
+                    active -= 1;
+                }
+            });
+        const tasks = gates.map(run);
+        await vi.waitFor(() => expect(active).toBe(8));
+
+        const limits: Array<number | undefined> = [];
+        for (const [index, gate] of gates.slice(4).entries()) {
+            const error = new TransferRateLimitError();
+            gate.reject(error);
+            await expect(tasks[4 + index]).rejects.toBe(error);
+            expect(error.state).toMatchObject({ cooldownMs: 0, terminal: false });
+            limits.push(error.state?.hostLimit);
+        }
+        expect(limits).toEqual([7, 6, 5, 4]);
+
+        const retryGate = deferred();
+        const retry = run(retryGate);
+        await Promise.resolve();
+        expect(active).toBe(4);
+        expect(scheduler.getCollectionUsage(directContext("a", "files.test"))).toEqual({
+            inFlight: 4,
+            pending: 1,
+            limit: 4,
+        });
+
+        gates[0].resolve();
+        await vi.waitFor(() =>
+            expect(scheduler.getCollectionUsage(directContext("a", "files.test"))).toEqual({
+                inFlight: 4,
+                pending: 0,
+                limit: 4,
+            }),
+        );
+        expect(active).toBe(4);
+
+        gates.slice(1, 4).forEach((gate) => gate.resolve());
+        retryGate.resolve();
+        await Promise.all([...tasks.slice(0, 4), retry]);
+    });
+
+    it("shares a direct host limit across collections and keeps other hosts separate", async () => {
+        const scheduler = new TransferScheduler(16);
+        const gates = Array.from({ length: 3 }, deferred);
+        const tasks = gates.map((gate) =>
+            scheduler.runPayload(directContext("a", "files.test"), () => gate.promise),
+        );
+        await Promise.resolve();
+        const error = new TransferRateLimitError();
+        gates[2].reject(error);
+        await expect(tasks[2]).rejects.toBe(error);
+        expect(error.state?.hostLimit).toBe(2);
+
+        const sameHost = vi.fn(async () => undefined);
+        const otherHost = vi.fn(async () => undefined);
+        const sameHostRun = scheduler.runPayload(directContext("b", "files.test"), sameHost);
+        await scheduler.runPayload(directContext("c", "other.test"), otherHost);
+        expect(otherHost).toHaveBeenCalledOnce();
+        expect(sameHost).not.toHaveBeenCalled();
+        expect(scheduler.getCollectionUsage(directContext("b", "files.test"))).toEqual({
+            inFlight: 0,
+            pending: 1,
+            limit: 2,
+        });
+        expect(scheduler.getCollectionUsage(directContext("c", "other.test"))?.limit).toBe(8);
+
+        gates[0].resolve();
+        await sameHostRun;
+        expect(sameHost).toHaveBeenCalledOnce();
+        gates[1].resolve();
+        await Promise.all(tasks.slice(0, 2));
+    });
+
+    it("grants a collection's request to a free host while its head request waits on another", async () => {
+        vi.useFakeTimers();
+        const scheduler = new TransferScheduler(4);
+        await expect(
+            scheduler.runPayload(directContext("a", "cooling.test"), async () => {
+                throw new TransferRateLimitError();
+            }),
+        ).rejects.toBeInstanceOf(TransferRateLimitError);
+
+        const blocked = vi.fn(async () => undefined);
+        const free = vi.fn(async () => undefined);
+        const blockedRun = scheduler.runPayload(directContext("a", "cooling.test"), blocked);
+        const freeRun = scheduler.runPayload(directContext("a", "free.test"), free);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(free).toHaveBeenCalledOnce();
+        expect(blocked).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(2000);
+        await Promise.all([blockedRun, freeRun]);
+        expect(blocked).toHaveBeenCalledOnce();
+    });
+
+    it("pauses a direct host and turns terminal only when a lone request keeps being rejected", async () => {
+        vi.useFakeTimers();
+        const scheduler = new TransferScheduler(4);
+        let previousDelay = 0;
+
+        for (const [index, expectedDelay] of [2000, 7000, 10000].entries()) {
+            const error = new TransferRateLimitError(index === 1 ? 7000 : undefined);
+            const task = vi.fn(async () => {
+                throw error;
+            });
+            const failed = scheduler.runPayload(directContext(`c${index}`, "files.test"), task);
+            failed.catch(() => undefined);
+            if (previousDelay > 0) {
+                await vi.advanceTimersByTimeAsync(previousDelay - 1);
+                expect(task).not.toHaveBeenCalled();
+                await vi.advanceTimersByTimeAsync(1);
+            }
+            await expect(failed).rejects.toBe(error);
+            expect(error.state).toEqual({
+                consecutiveRateLimits: index + 1,
+                cooldownMs: expectedDelay,
+                isNewEpisode: true,
+                terminal: index === 2,
+                hostLimit: 1,
+            });
+            previousDelay = expectedDelay;
+        }
+
+        await vi.advanceTimersByTimeAsync(previousDelay + 10_001);
+        const laterError = new TransferRateLimitError();
+        await expect(
+            scheduler.runPayload(directContext("retry", "files.test"), async () => {
+                throw laterError;
+            }),
+        ).rejects.toBe(laterError);
+        expect(laterError.state).toMatchObject({
+            consecutiveRateLimits: 1,
+            cooldownMs: 2000,
+            terminal: false,
+        });
+    });
+
+    it("keeps a direct rejection streak for a retry queued at cooldown end but granted late", async () => {
+        vi.useFakeTimers();
+        const scheduler = new TransferScheduler(2);
+        const reject = () =>
+            scheduler.runPayload(directContext("a", "files.test"), async () => {
+                throw new TransferRateLimitError();
+            });
+        const first = await reject().catch((error: TransferRateLimitError) => error);
+        expect(first.state).toMatchObject({ consecutiveRateLimits: 1, cooldownMs: 2000 });
+
+        const gates = [deferred(), deferred()];
+        const holders = gates.map((gate, index) =>
+            scheduler.runPayload(
+                context("transfer-it-download", `other${index}`),
+                () => gate.promise,
+            ),
+        );
+        await vi.advanceTimersByTimeAsync(2000);
+        const retry = reject().catch((error: TransferRateLimitError) => error);
+        await vi.advanceTimersByTimeAsync(15_000);
+        gates.forEach((gate) => gate.resolve());
+        await Promise.all(holders);
+
+        expect((await retry).state).toMatchObject({ consecutiveRateLimits: 2, cooldownMs: 5000 });
+    });
+
+    it("probes one more direct connection after a quiet interval that doubles on rejection", async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
+        const scheduler = new TransferScheduler(8);
+        const usageLimit = () =>
+            scheduler.getCollectionUsage(directContext("a", "files.test"))?.limit;
+        const rejectOneOfTwo = async () => {
+            const gate = deferred();
+            const held = scheduler.runPayload(directContext("a", "files.test"), () => gate.promise);
+            const error = new TransferRateLimitError();
+            await expect(
+                scheduler.runPayload(directContext("a", "files.test"), async () => {
+                    throw error;
+                }),
+            ).rejects.toBe(error);
+            gate.resolve();
+            await held;
+        };
+        const succeed = () =>
+            scheduler.runPayload(directContext("a", "files.test"), async () => undefined);
+
+        await rejectOneOfTwo();
+        expect(usageLimit()).toBe(1);
+        await vi.advanceTimersByTimeAsync(29_999);
+        await succeed();
+        expect(usageLimit()).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await succeed();
+        expect(usageLimit()).toBe(2);
+
+        await rejectOneOfTwo();
+        expect(usageLimit()).toBe(1);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await succeed();
+        expect(usageLimit()).toBe(1);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await succeed();
+        expect(usageLimit()).toBe(2);
+
+        // A rejection long after a probe that held does not blame that probe.
+        await vi.advanceTimersByTimeAsync(61_000);
+        await rejectOneOfTwo();
+        expect(usageLimit()).toBe(1);
+        await vi.advanceTimersByTimeAsync(59_999);
+        await succeed();
+        expect(usageLimit()).toBe(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await succeed();
+        expect(usageLimit()).toBe(2);
     });
 
     it("removes aborted waiters without consuming a permit", async () => {
@@ -469,6 +693,10 @@ function context(
         direction: providerId === "kiosk-upload" ? "upload" : "download",
         providerId,
     };
+}
+
+function directContext(collectionId: string, host: string): TransferRequestContext {
+    return { ...context("direct-download", collectionId), host };
 }
 
 async function reserve(scheduler: TransferScheduler, value: TransferRequestContext, count: number) {

@@ -131,6 +131,8 @@ export interface TransferProgressSummary {
 export interface RequestPoolUsage {
     inFlight: number;
     pending: number;
+    /** Concurrent request limit learned for the server host, shared by all its collections. */
+    limit?: number;
 }
 
 export interface TransferListSnapshot<T> {

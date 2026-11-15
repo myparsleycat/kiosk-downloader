@@ -40,6 +40,7 @@ export interface AppSettings {
     "transfer.uploadBandwidthLimitMibps": number;
     "transfer.megaQuotaAutoResume": boolean;
     "network.forceIpv4": boolean;
+    "network.connectionErrorsAsConcurrencyLimit": boolean;
 }
 
 export const CHUNK_RETRY_MIN = 3;
@@ -242,5 +243,10 @@ export const APP_SETTINGS = {
         publicKey: "network.forceIpv4",
         scope: "network",
         storageKey: "network.forceIpv4",
+    },
+    "network.connectionErrorsAsConcurrencyLimit": {
+        publicKey: "network.connectionErrorsAsConcurrencyLimit",
+        scope: "network",
+        storageKey: "network.connectionErrorsAsConcurrencyLimit",
     },
 } as const satisfies Record<SettingKey, SettingDefinition>;

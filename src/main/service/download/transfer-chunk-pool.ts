@@ -504,6 +504,7 @@ export class TransferChunkPool {
                             cooldownMs: rateLimit?.cooldownMs ?? error.retryAfterMs ?? 0,
                             retryAfterMs: error.retryAfterMs,
                             coalesced: rateLimit ? !rateLimit.isNewEpisode : false,
+                            hostLimit: rateLimit?.hostLimit,
                         },
                         "TransferChunkPool:rateLimited",
                     );
